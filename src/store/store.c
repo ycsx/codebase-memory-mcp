@@ -441,6 +441,20 @@ static int configure_pragmas(cbm_store_t *s, bool in_memory, bool read_only) {
         if (rc != CBM_STORE_OK) {
             return rc;
         }
+        /* #1083: bound the WAL file so a checkpoint-starved log is physically
+         * reclaimed the next time a checkpoint can reset it. Our checkpoints are
+         * all PASSIVE (they never ftruncate — see cbm_store_checkpoint's SIGBUS
+         * note), so without a size limit the -wal file only ever grows; a
+         * journal_size_limit truncates it back to N bytes on the next successful
+         * reset. N is far above the healthy WAL (~4 MiB under the default
+         * 1000-page autocheckpoint), so normal indexing never triggers
+         * truncate/regrow churn — it only fires after abnormal growth. We do NOT
+         * use a TRUNCATE checkpoint: its ftruncate(fd,0) can raise SIGBUS in a
+         * sibling process that has the DB mmap'd on macOS. */
+        rc = exec_sql(s, "PRAGMA journal_size_limit = 268435456;"); /* 256 MiB */
+        if (rc != CBM_STORE_OK) {
+            return rc;
+        }
         char mmap_sql[ST_BUF_64];
         snprintf(mmap_sql, sizeof(mmap_sql), "PRAGMA mmap_size = %lld;",
                  (long long)cbm_store_resolve_mmap_size());
@@ -1086,6 +1100,25 @@ int cbm_store_checkpoint(cbm_store_t *s) {
         return CBM_STORE_ERR;
     }
     return exec_sql(s, "PRAGMA optimize;");
+}
+
+/* #1083: the WAL size limit configured on this (write) connection, in bytes.
+ * -1 means unlimited (SQLite's default — the pre-fix behavior). Per-connection
+ * and not persisted, so it can only be read on the connection that set it. */
+int64_t cbm_store_journal_size_limit(cbm_store_t *s) {
+    if (!s || !s->db) {
+        return -1;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, "PRAGMA journal_size_limit;", -1, &stmt, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    int64_t limit = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        limit = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return limit;
 }
 
 /* ── Dump ───────────────────────────────────────────────────────── */
