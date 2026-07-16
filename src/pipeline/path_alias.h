@@ -11,10 +11,11 @@
  * config files, and adds each one's aliases to a single collection scoped
  * by directory.
  *
- * Currently implemented sources: TypeScript / JavaScript (tsconfig.json
- * and jsconfig.json compilerOptions.paths + baseUrl). The data model and
- * resolver below are deliberately language-agnostic so further loaders
- * (Vite/Webpack alias config, Python tool.* hints, ...) can register
+ * Currently implemented sources: tsconfig/jsconfig paths + baseUrl, Vue CLI's
+ * default @ alias, and static aliases in Vue/Webpack config files. Config JS is
+ * parsed conservatively and never executed. The data model and resolver below
+ * are deliberately language-agnostic so further loaders (Vite alias config,
+ * Python tool.* hints, ...) can register
  * additional scopes without touching the resolver or the pipeline.
  *
  * Lookup is two-step:
@@ -67,8 +68,7 @@ typedef struct {
 } cbm_path_alias_collection_t;
 
 /* Walk repo_path for known build-config files and build a collection of
- * scoped alias maps. Currently picks up tsconfig.json and jsconfig.json;
- * additional loaders register here. Returns NULL when no usable configs
+ * scoped alias maps. Returns NULL when no usable configs
  * are found (also NULL on out-of-memory). Caller frees with
  * cbm_path_alias_collection_free. */
 cbm_path_alias_collection_t *cbm_load_path_aliases(const char *repo_path);
@@ -87,8 +87,8 @@ const cbm_path_alias_map_t *cbm_path_alias_find_for_file(const cbm_path_alias_co
 
 /* Resolve module_path against map. Returns a heap-allocated repo-relative
  * path (caller frees), or NULL when no alias entry matches and no
- * baseUrl fallback applies. Common JS/TS extensions (.ts, .tsx, .js,
- * .jsx) are stripped from the resolved path so the existing module-FQN
+ * baseUrl fallback applies. Common JS/TS/Vue extensions are stripped from the
+ * resolved path so the existing module-FQN
  * pipeline can consume it. */
 char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module_path);
 

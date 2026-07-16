@@ -407,6 +407,90 @@ TEST(path_alias_loader_no_configs) {
     PASS();
 }
 
+TEST(path_alias_loader_vue_cli_and_static_alias) {
+    char tmpl[256];
+    snprintf(tmpl, sizeof(tmpl), "/tmp/cbm_palias_vue_XXXXXX");
+    char *root = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(root);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/vue.config.js", root);
+    ASSERT_EQ(write_file(path,
+                         "const path = require('path');\n"
+                         "module.exports = { configureWebpack: { resolve: { alias: {\n"
+                         "  '@dmn': path.resolve(__dirname, './src/views/dataset-manage'),\n"
+                         "  'vue$': 'vue/dist/vue.esm.js'\n"
+                         "} } } };\n"),
+              0);
+
+    cbm_path_alias_collection_t *coll = cbm_load_path_aliases(root);
+    ASSERT_NOT_NULL(coll);
+    ASSERT_EQ(coll->count, 1);
+    const cbm_path_alias_map_t *map = cbm_path_alias_find_for_file(coll, "src/QAAgent.vue");
+    ASSERT_NOT_NULL(map);
+
+    char *resolved = cbm_path_alias_resolve(map, "@/components/Answer.vue");
+    ASSERT_NOT_NULL(resolved);
+    ASSERT_STR_EQ(resolved, "src/components/Answer");
+    free(resolved);
+
+    resolved = cbm_path_alias_resolve(map, "@dmn/services/query.js");
+    ASSERT_NOT_NULL(resolved);
+    ASSERT_STR_EQ(resolved, "src/views/dataset-manage/services/query");
+    free(resolved);
+
+    /* Bare package aliases are intentionally not treated as repo paths. */
+    ASSERT_NULL(cbm_path_alias_resolve(map, "vue"));
+
+    cbm_path_alias_collection_free(coll);
+    unlink(path);
+    rmdir(root);
+    PASS();
+}
+
+TEST(path_alias_loader_merges_tsconfig_and_webpack) {
+    char tmpl[256];
+    snprintf(tmpl, sizeof(tmpl), "/tmp/cbm_palias_webpack_XXXXXX");
+    char *root = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(root);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/jsconfig.json", root);
+    ASSERT_EQ(write_file(path,
+                         "{\"compilerOptions\":{\"paths\":{\"@api/*\":[\"src/api/*\"]}}}"),
+              0);
+    snprintf(path, sizeof(path), "%s/webpack.config.js", root);
+    ASSERT_EQ(write_file(path,
+                         "const path = require('path');\n"
+                         "module.exports = { resolve: { alias: {\n"
+                         "  '@shared': path.resolve(__dirname, './src/shared')\n"
+                         "} } };\n"),
+              0);
+
+    cbm_path_alias_collection_t *coll = cbm_load_path_aliases(root);
+    ASSERT_NOT_NULL(coll);
+    ASSERT_EQ(coll->count, 1);
+    const cbm_path_alias_map_t *map = cbm_path_alias_find_for_file(coll, "src/main.ts");
+    ASSERT_NOT_NULL(map);
+
+    char *resolved = cbm_path_alias_resolve(map, "@api/client.ts");
+    ASSERT_NOT_NULL(resolved);
+    ASSERT_STR_EQ(resolved, "src/api/client");
+    free(resolved);
+    resolved = cbm_path_alias_resolve(map, "@shared/model.js");
+    ASSERT_NOT_NULL(resolved);
+    ASSERT_STR_EQ(resolved, "src/shared/model");
+    free(resolved);
+
+    cbm_path_alias_collection_free(coll);
+    snprintf(path, sizeof(path), "%s/webpack.config.js", root);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/jsconfig.json", root);
+    unlink(path);
+    rmdir(root);
+    PASS();
+}
+
 void suite_path_alias(void);
 void suite_path_alias(void) {
     RUN_TEST(path_alias_at_wildcard);
@@ -421,4 +505,6 @@ void suite_path_alias(void) {
     RUN_TEST(path_alias_loader_monorepo_dotdot_climb);
     RUN_TEST(path_alias_loader_honors_discovery_exclusions);
     RUN_TEST(path_alias_loader_no_configs);
+    RUN_TEST(path_alias_loader_vue_cli_and_static_alias);
+    RUN_TEST(path_alias_loader_merges_tsconfig_and_webpack);
 }

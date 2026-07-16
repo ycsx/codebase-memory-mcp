@@ -1377,7 +1377,9 @@ static void parse_spec_imports(CBMExtractCtx *ctx) {
 // keeps embedded sub-language source as raw_text (or similar) without parsing
 // it.  The host's CBMLangSpec.embedded_imports declares which content nodes
 // hold which sub-language; we re-parse each match with the embedded grammar
-// and run the standard ES import walker over the inner AST.
+// and run the standard ES import walker over the inner AST. Vue additionally
+// reuses the JavaScript definition/unified/channel extractors so Options API
+// and script-setup relationships are represented in the host file's graph.
 //
 // No grammar symbols are referenced here — the embedded TSLanguage is
 // resolved through cbm_ts_language(spec->embedded_language), the same hook
@@ -1457,8 +1459,32 @@ static void parse_embedded_imports(CBMExtractCtx *ctx) {
             }
             CBMExtractCtx sub_ctx = *ctx;
             sub_ctx.source = sub_src;
+            sub_ctx.source_len = (int)sub_len;
+            sub_ctx.language = e->embedded_language;
             sub_ctx.root = ts_tree_root_node(sub_tree);
-            walk_es_imports(&sub_ctx, sub_ctx.root);
+            memset(&sub_ctx.ef_cache, 0, sizeof(sub_ctx.ef_cache));
+            memset(&sub_ctx.string_constants, 0, sizeof(sub_ctx.string_constants));
+
+            if (ctx->language == CBM_LANG_VUE) {
+                int defs_start = ctx->result->defs.count;
+                int calls_start = ctx->result->calls.count;
+                uint32_t line_offset = ts_node_start_point(hits[i]).row;
+
+                cbm_extract_embedded_definitions(&sub_ctx);
+                cbm_extract_imports(&sub_ctx);
+                cbm_extract_unified(&sub_ctx);
+                cbm_extract_channels(&sub_ctx);
+
+                for (int d = defs_start; d < ctx->result->defs.count; d++) {
+                    ctx->result->defs.items[d].start_line += line_offset;
+                    ctx->result->defs.items[d].end_line += line_offset;
+                }
+                for (int c = calls_start; c < ctx->result->calls.count; c++) {
+                    ctx->result->calls.items[c].start_line += (int)line_offset;
+                }
+            } else {
+                walk_es_imports(&sub_ctx, sub_ctx.root);
+            }
             ts_tree_delete(sub_tree);
         }
         ts_parser_delete(parser);

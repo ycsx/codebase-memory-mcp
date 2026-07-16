@@ -7434,8 +7434,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     }
 
     /* Reject shell metacharacters, and a leading '-', in the user-supplied
-     * branch name. base_branch is spliced into `git diff --name-only
-     * "<base>"...HEAD`; a value starting with '-' would be read by git as an
+     * branch name. base_branch is spliced into the `<base>...HEAD` revision;
+     * a value starting with '-' would be read by git as an
      * option rather than a ref (e.g. `--output=<path>` writes the diff to an
      * arbitrary file). A real git ref never begins with '-'. */
     if (!cbm_validate_shell_arg(base_branch) || base_branch[0] == '-') {
@@ -7468,25 +7468,27 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
      * Three sources are merged:
      *   1. committed changes vs base   (diff <base>...HEAD)
      *   2. unstaged tracked changes    (diff)
-     *   3. untracked + staged-new files (status --porcelain) — these are
+     *   3. untracked + staged-new files (status --short) — these are
      *      invisible to `git diff` and were silently missed before, so a
      *      brand-new file never appeared until a manual re-index (#520).
-     * status --porcelain prefixes each path with a 2-char code + space
+     * Every query is scoped to the indexed directory and emits paths relative
+     * to it, including when it is nested below the Git worktree root.
+     * status --short prefixes each path with a 2-char code + space
      * ("?? path", "A  path"); the prefix is stripped when parsing below. */
     char cmd[CBM_SZ_2K];
 #ifdef _WIN32
     snprintf(cmd, sizeof(cmd),
-             "git -C \"%s\" diff --name-only \"%s\"...HEAD 2>NUL & "
-             "git -C \"%s\" diff --name-only 2>NUL & "
-             "git --no-optional-locks -C \"%s\" status --porcelain "
-             "--untracked-files=normal 2>NUL",
+             "git -C \"%s\" diff --name-only --relative %s...HEAD -- . 2>NUL & "
+             "git -C \"%s\" diff --name-only --relative -- . 2>NUL & "
+             "git --no-optional-locks -c status.relativePaths=true -C \"%s\" status --short "
+             "--untracked-files=normal -- . 2>NUL",
              root_path, base_branch, root_path, root_path);
 #else
     snprintf(cmd, sizeof(cmd),
-             "{ git -C '%s' diff --name-only '%s'...HEAD 2>/dev/null; "
-             "git -C '%s' diff --name-only 2>/dev/null; "
-             "git --no-optional-locks -C '%s' status --porcelain "
-             "--untracked-files=normal 2>/dev/null; } | sort -u",
+             "{ git -C '%s' diff --name-only --relative '%s...HEAD' -- . 2>/dev/null; "
+             "git -C '%s' diff --name-only --relative -- . 2>/dev/null; "
+             "git --no-optional-locks -c status.relativePaths=true -C '%s' status --short "
+             "--untracked-files=normal -- . 2>/dev/null; } | sort -u",
              root_path, base_branch, root_path, root_path);
 #endif
 
@@ -7525,9 +7527,9 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
             continue;
         }
 
-        /* `git status --porcelain` prefixes each path with a two-character
+        /* `git status --short` prefixes each path with a two-character
          * status code and a space ("?? path", "A  path", " M path"). The two
-         * `git diff --name-only` sources emit bare paths. Strip the porcelain
+         * `git diff --name-only` sources emit bare paths. Strip the status
          * prefix when present so all three sources yield clean paths; for a
          * rename ("R  old -> new") keep the post-arrow destination path. */
         char *path_line = line;

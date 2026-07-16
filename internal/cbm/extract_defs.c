@@ -6733,6 +6733,30 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
     free(s.data);
 }
 
+void cbm_extract_embedded_definitions(CBMExtractCtx *ctx) {
+    const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
+    if (!spec) {
+        return;
+    }
+
+    walk_defs(ctx, ctx->root, spec, 0);
+    extract_variables(ctx, ctx->root, spec);
+}
+
+static bool module_path_is_entry_point(const char *rel_path) {
+    if (!rel_path) {
+        return false;
+    }
+    const char *fwd = strrchr(rel_path, '/');
+    const char *back = strrchr(rel_path, '\\');
+    const char *base = fwd;
+    if (!base || (back && back > base)) {
+        base = back;
+    }
+    base = base ? base + 1 : rel_path;
+    return strncmp(base, "main.", 5) == 0;
+}
+
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
     const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
     if (!spec) {
@@ -6752,11 +6776,8 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.end_line = ts_node_end_point(ctx->root).row + TS_LINE_OFFSET;
     mod.is_exported = true;
     mod.is_test = ctx->result->is_test_file;
+    mod.is_entry_point = module_path_is_entry_point(ctx->rel_path);
     cbm_defs_push(&ctx->result->defs, a, mod);
 
-    // Walk AST for function/class definitions
-    walk_defs(ctx, ctx->root, spec, 0);
-
-    // Extract module-level variables
-    extract_variables(ctx, ctx->root, spec);
+    cbm_extract_embedded_definitions(ctx);
 }

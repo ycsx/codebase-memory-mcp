@@ -1544,7 +1544,25 @@ TEST(vue_component) {
                 CBM_LANG_VUE, "t", "App.vue");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_any(r, "data"));
+    ASSERT(has_def_any(r, "greet"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(js_main_module_is_entry_point) {
+    CBMFileResult *r = extract("export default {};\n", CBM_LANG_JAVASCRIPT, "t",
+                               "src/main.build.js");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->defs.count, 1);
+    ASSERT_STR_EQ(r->defs.items[0].label, "Module");
+    ASSERT_TRUE(r->defs.items[0].is_entry_point);
+    cbm_free_result(r);
+
+    r = extract("export default {};\n", CBM_LANG_JAVASCRIPT, "t", "src/helper.js");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->defs.items[0].is_entry_point);
     cbm_free_result(r);
     PASS();
 }
@@ -4531,6 +4549,7 @@ SUITE(extraction) {
     RUN_TEST(graphql_type);
     RUN_TEST(svelte_component);
     RUN_TEST(vue_component);
+    RUN_TEST(js_main_module_is_entry_point);
     RUN_TEST(glsl_shader);
     RUN_TEST(vimscript_function);
 

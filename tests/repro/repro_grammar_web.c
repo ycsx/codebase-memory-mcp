@@ -4,7 +4,7 @@
  *
  * One TEST() per language so per-language RED/GREEN shows on the bug-repro
  * board. Each test runs a battery adapted to what the language actually models:
- * many web/markup/schema languages have NO functions or calls (HTML, CSS, Vue,
+ * many web/markup/schema languages have NO functions or calls (HTML, CSS,
  * Svelte, Astro, GraphQL, Prisma, JSDoc, GoTemplate as a pure-template host).
  * The battery dimensions applied per language are documented in the per-TEST
  * comment.
@@ -36,8 +36,8 @@
  *   4. ranges-valid    : inv_count_bad_ranges(r) == 0
  *                        (start_line >= 1 and start_line <= end_line).
  *   5. defs-present    : at least one def with the expected label is extracted.
- *                        SKIPPED for languages whose spec has no func_types,
- *                        class_types, or field_types (HTML, CSS, Vue, Svelte,
+ *                        SKIPPED for languages whose host spec has no func_types,
+ *                        class_types, or field types (HTML, CSS, Svelte,
  *                        Astro, GoTemplate, JSDoc). A SKIP is annotated in the
  *                        per-TEST comment; the dimension is not asserted.
  *   6. calls-extracted : inv_has_call(r, callee) == 1.
@@ -60,10 +60,11 @@
  *                          Asserted together with dim 7 when the pipeline is run.
  *
  * STRUCTURAL-ONLY LANGUAGES (dims 1-5, no call/pipeline dims):
- *   HTML, VUE, SVELTE, ASTRO  -- only module_types in spec; no defs extracted
- *                                from the host grammar node tree (embedded <script>
- *                                re-parsed by the JS sub-grammar separately).
- *                                Dims 1-4 only (dim 5 skipped -- no def labels).
+ *   HTML, SVELTE, ASTRO       -- only module_types in spec; no defs extracted
+ *                                from embedded script blocks. Dims 1-4 only.
+ *   VUE                       -- embedded scripts are re-parsed as JavaScript;
+ *                                imports, definitions, calls, and channels are
+ *                                extracted into the Vue host module.
  *   GRAPHQL                   -- class_types (object_type_definition etc. -> "Class")
  *                                and field_types (field_definition -> "Field");
  *                                no call_types. Dims 1-5 ("Class" + "Field").
@@ -449,33 +450,54 @@ TEST(repro_grammar_web_scss) {
 
 /* ── Vue ─────────────────────────────────────────────────────────────────────
  * Idiomatic single-file component with <template>, <script>, and <style>
- * blocks. The Vue host grammar spec has only vue_module_types = {"document"};
- * no func/class/field types. Embedded <script> content uses the embedded-
- * imports walker (re-parsed as JS), but that does not affect the SFC host
- * grammar's own def extraction.
+ * blocks. The Vue host grammar keeps script content as raw text, which is
+ * re-parsed with the JavaScript grammar for imports, definitions, calls, and
+ * channels. Extracted line numbers must map back to the SFC source.
  *
- * Dims asserted: 1-4.
- * Dims 5-8 SKIPPED: no defs in host grammar; no call_types; no pipeline.
- * Expected GREEN: dims 1-4.
+ * Dims asserted: base invariants plus embedded imports/defs/calls and line map.
  */
 TEST(repro_grammar_web_vue) {
     static const char src[] =
         "<template>\n"
-        "  <div class=\"hello\">\n"
-        "    <h1>{{ msg }}</h1>\n"
-        "  </div>\n"
+        "  <button @click=\"submit\">Save</button>\n"
         "</template>\n"
-        "\n"
         "<script>\n"
+        "import validate from './validate';\n"
         "export default {\n"
-        "  props: { msg: String }\n"
+        "  methods: {\n"
+        "    submit() {\n"
+        "      validate();\n"
+        "    }\n"
+        "  }\n"
         "}\n"
-        "</script>\n"
-        "\n"
-        "<style scoped>\n"
-        ".hello { font-size: 1rem; }\n"
-        "</style>\n";
-    return structural_base_battery("Vue", src, CBM_LANG_VUE, "Hello.vue");
+        "</script>\n";
+    if (structural_base_battery("Vue", src, CBM_LANG_VUE, "Hello.vue") != 0) {
+        return 1;
+    }
+    CBMFileResult *r = inv_rx(src, CBM_LANG_VUE, "Hello.vue");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(r->imports.count, 1);
+    ASSERT_TRUE(inv_count_label(r, "Function") + inv_count_label(r, "Method") >= 1);
+    ASSERT_TRUE(inv_has_call(r, "validate"));
+
+    int modules = 0;
+    int validate_line = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].label && strcmp(r->defs.items[i].label, "Module") == 0) {
+            modules++;
+        }
+    }
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name &&
+            strstr(r->calls.items[i].callee_name, "validate")) {
+            validate_line = r->calls.items[i].start_line;
+            break;
+        }
+    }
+    ASSERT_EQ(modules, 1);
+    ASSERT_EQ(validate_line, 9);
+    cbm_free_result(r);
+    PASS();
 }
 
 /* ── Svelte ──────────────────────────────────────────────────────────────────

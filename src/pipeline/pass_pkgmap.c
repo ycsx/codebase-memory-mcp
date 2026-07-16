@@ -1265,6 +1265,22 @@ static bool import_targetable_label(const char *label) {
     return false;
 }
 
+static bool source_uses_es_module_paths(const char *source_rel) {
+    if (!source_rel) {
+        return false;
+    }
+    static const char *exts[] = {".js",  ".jsx", ".mjs", ".cjs", ".ts",
+                                 ".tsx", ".mts", ".cts", ".vue", NULL};
+    size_t len = strlen(source_rel);
+    for (const char **ext = exts; *ext; ext++) {
+        size_t ext_len = strlen(*ext);
+        if (len >= ext_len && strcmp(source_rel + len - ext_len, *ext) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Resolve a sibling-file import: a bare path/name (no leading "./") that names
  * a file relative to the importer's directory.  This covers build/markup
  * grammars whose import string is a sibling filename or directory rather than a
@@ -1442,6 +1458,13 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
             }
             *dot = '\0';
         }
+    }
+
+    /* ES module specifiers name modules, not arbitrary same-named symbols. If
+     * path/alias resolution failed, a basename fallback such as "index" can
+     * connect the importer to any unrelated index function in the repository. */
+    if (source_uses_es_module_paths(source_rel)) {
+        return NULL;
     }
 
     /* Strategy 3: symbol-name fallback.  Derive a representative imported

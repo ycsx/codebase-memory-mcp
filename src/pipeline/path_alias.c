@@ -2,7 +2,7 @@
  * path_alias.c — Resolve build-tool path aliases.
  *
  * Builds a directory-scoped collection of alias maps from per-language
- * config files (currently tsconfig.json / jsconfig.json) so the import
+ * config files (tsconfig/jsconfig and static Vue/Webpack config) so the import
  * resolver can turn "@/lib/auth"-style imports into repo-relative paths.
  *
  * Design notes:
@@ -47,20 +47,20 @@ enum {
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
-/* Strip .ts/.tsx/.js/.jsx in place. Returns its argument. */
+/* Strip source extensions in place. Returns its argument. */
 static char *strip_resolved_ext(char *path) {
     if (!path) {
         return path;
     }
     size_t len = strlen(path);
-    if (len > 3 && path[len - 3] == '.' && (path[len - 2] == 't' || path[len - 2] == 'j') &&
-        path[len - 1] == 's') {
-        path[len - 3] = '\0';
-        return path;
-    }
-    if (len > 4 && path[len - 4] == '.' && (path[len - 3] == 't' || path[len - 3] == 'j') &&
-        path[len - 2] == 's' && path[len - 1] == 'x') {
-        path[len - 4] = '\0';
+    static const char *exts[] = {".tsx", ".jsx", ".vue", ".mts", ".cts", ".mjs", ".cjs",
+                                 ".ts",  ".js",  NULL};
+    for (const char **ext = exts; *ext; ext++) {
+        size_t ext_len = strlen(*ext);
+        if (len > ext_len && strcmp(path + len - ext_len, *ext) == 0) {
+            path[len - ext_len] = '\0';
+            break;
+        }
     }
     return path;
 }
@@ -289,24 +289,377 @@ static cbm_path_alias_map_t *load_tsconfig_file(const char *abs_path, const char
 
 /* ── Public API ────────────────────────────────────────────────── */
 
+/* Static Vue CLI / Webpack config support. Config code is never executed. */
+static void free_alias_entry(cbm_path_alias_t *entry) {
+    if (!entry) {
+        return;
+    }
+    free(entry->alias_prefix);
+    free(entry->alias_suffix);
+    free(entry->target_prefix);
+    free(entry->target_suffix);
+    memset(entry, 0, sizeof(*entry));
+}
+
+static void free_alias_map(cbm_path_alias_map_t *map) {
+    if (!map) {
+        return;
+    }
+    for (int i = 0; i < map->count; i++) {
+        free_alias_entry(&map->entries[i]);
+    }
+    free(map->entries);
+    free(map->base_url);
+    free(map);
+}
+
+static bool alias_map_put(cbm_path_alias_map_t *map, const char *alias_prefix,
+                          const char *target_prefix, bool wildcard) {
+    if (!map || !alias_prefix || !alias_prefix[0] || !target_prefix || !target_prefix[0]) {
+        return false;
+    }
+    char *new_alias_prefix = strdup(alias_prefix);
+    char *new_alias_suffix = strdup("");
+    char *new_target_prefix = strdup(target_prefix);
+    char *new_target_suffix = strdup("");
+    if (!new_alias_prefix || !new_alias_suffix || !new_target_prefix || !new_target_suffix) {
+        free(new_alias_prefix);
+        free(new_alias_suffix);
+        free(new_target_prefix);
+        free(new_target_suffix);
+        return false;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < map->count; i++) {
+        cbm_path_alias_t *entry = &map->entries[i];
+        if (entry->has_wildcard == wildcard && entry->alias_prefix &&
+            strcmp(entry->alias_prefix, alias_prefix) == 0 && entry->alias_suffix &&
+            entry->alias_suffix[0] == '\0') {
+            slot = i;
+            free_alias_entry(entry);
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (map->count >= CBM_PATH_ALIAS_MAX_ENTRIES) {
+            free(new_alias_prefix);
+            free(new_alias_suffix);
+            free(new_target_prefix);
+            free(new_target_suffix);
+            return false;
+        }
+        cbm_path_alias_t *grown =
+            realloc(map->entries, (size_t)(map->count + 1) * sizeof(cbm_path_alias_t));
+        if (!grown) {
+            free(new_alias_prefix);
+            free(new_alias_suffix);
+            free(new_target_prefix);
+            free(new_target_suffix);
+            return false;
+        }
+        map->entries = grown;
+        slot = map->count++;
+        memset(&map->entries[slot], 0, sizeof(map->entries[slot]));
+    }
+    cbm_path_alias_t *entry = &map->entries[slot];
+    entry->has_wildcard = wildcard;
+    entry->alias_prefix = new_alias_prefix;
+    entry->alias_suffix = new_alias_suffix;
+    entry->target_prefix = new_target_prefix;
+    entry->target_suffix = new_target_suffix;
+    return true;
+}
+
+/* A Webpack alias without a trailing '$' also matches key/subpath. */
+static void alias_map_put_webpack(cbm_path_alias_map_t *map, const char *alias,
+                                  const char *target) {
+    size_t alias_len = strlen(alias);
+    bool exact_only = alias_len > 0 && alias[alias_len - 1] == '$';
+    char clean_alias[CBM_SZ_256];
+    int clean_len = (int)(exact_only ? alias_len - 1 : alias_len);
+    snprintf(clean_alias, sizeof(clean_alias), "%.*s", clean_len, alias);
+    if (!clean_alias[0]) {
+        return;
+    }
+    alias_map_put(map, clean_alias, target, false);
+    if (!exact_only) {
+        char alias_prefix[CBM_SZ_256];
+        char target_prefix[CBM_SZ_512];
+        snprintf(alias_prefix, sizeof(alias_prefix), "%s/", clean_alias);
+        snprintf(target_prefix, sizeof(target_prefix), "%s%s", target,
+                 target[strlen(target) - 1] == '/' ? "" : "/");
+        alias_map_put(map, alias_prefix, target_prefix, true);
+    }
+}
+
+static const char *find_matching_js_brace(const char *open) {
+    int depth = 0;
+    char quote = '\0';
+    bool escape = false;
+    bool line_comment = false;
+    bool block_comment = false;
+    for (const char *p = open; *p; p++) {
+        if (line_comment) {
+            if (*p == '\n') {
+                line_comment = false;
+            }
+            continue;
+        }
+        if (block_comment) {
+            if (p[0] == '*' && p[1] == '/') {
+                block_comment = false;
+                p++;
+            }
+            continue;
+        }
+        if (quote) {
+            if (escape) {
+                escape = false;
+            } else if (*p == '\\') {
+                escape = true;
+            } else if (*p == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (p[0] == '/' && p[1] == '/') {
+            line_comment = true;
+            p++;
+        } else if (p[0] == '/' && p[1] == '*') {
+            block_comment = true;
+            p++;
+        } else if (*p == '\'' || *p == '"' || *p == '`') {
+            quote = *p;
+        } else if (*p == '{') {
+            depth++;
+        } else if (*p == '}' && --depth == 0) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static bool js_identifier_boundary(char c) {
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+             (c >= '0' && c <= '9') || c == '_' || c == '$');
+}
+
+static const char *find_alias_object(const char *source, const char *after) {
+    const char *p = after ? after : source;
+    while ((p = strstr(p, "alias")) != NULL) {
+        if ((p == source || js_identifier_boundary(p[-1])) && js_identifier_boundary(p[5])) {
+            const char *q = p + 5;
+            while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') {
+                q++;
+            }
+            if (*q == ':') {
+                q++;
+                while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') {
+                    q++;
+                }
+                if (*q == '{') {
+                    return q;
+                }
+            }
+        }
+        p += 5;
+    }
+    return NULL;
+}
+
+static bool extract_static_alias_target(const char *expr, const char *line_end, char *out,
+                                        size_t out_size) {
+    const char *quote = expr;
+    while (quote < line_end && *quote != '\'' && *quote != '"') {
+        quote++;
+    }
+    if (quote >= line_end) {
+        return false;
+    }
+    char delimiter = *quote++;
+    const char *end = quote;
+    while (end < line_end && *end != delimiter && *end != '\n' && *end != '\r') {
+        end += (*end == '\\' && end + 1 < line_end) ? 2 : 1;
+    }
+    if (end >= line_end || *end != delimiter || end == quote) {
+        return false;
+    }
+    bool relative_literal = quote[0] == '.' && quote + 1 < end &&
+                            (quote[1] == '/' || quote[1] == '\\');
+    bool static_path_call = false;
+    for (const char *p = expr; p < quote; p++) {
+        size_t remaining = (size_t)(quote - p);
+        if ((remaining >= 7 && strncmp(p, "resolve", 7) == 0) ||
+            (remaining >= 4 && strncmp(p, "join", 4) == 0) ||
+            (remaining >= 9 && strncmp(p, "__dirname", 9) == 0)) {
+            static_path_call = true;
+            break;
+        }
+    }
+    if (!relative_literal && !static_path_call) {
+        return false;
+    }
+    size_t n = (size_t)(end - quote);
+    if (n >= out_size) {
+        return false;
+    }
+    memcpy(out, quote, n);
+    out[n] = '\0';
+    for (char *p = out; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return strchr(out, '$') == NULL && strchr(out, '`') == NULL;
+}
+
+static void parse_static_alias_object(cbm_path_alias_map_t *map, const char *dir_prefix,
+                                      const char *open, const char *close) {
+    const char *line = open + 1;
+    while (line < close) {
+        const char *line_end = memchr(line, '\n', (size_t)(close - line));
+        if (!line_end) {
+            line_end = close;
+        }
+        const char *p = line;
+        while (p < line_end && (*p == ' ' || *p == '\t' || *p == '\r')) {
+            p++;
+        }
+        if (p < line_end && (*p == '\'' || *p == '"')) {
+            char delimiter = *p++;
+            const char *key_start = p;
+            while (p < line_end && *p != delimiter) {
+                p++;
+            }
+            size_t alias_len = (size_t)(p - key_start);
+            if (p < line_end && alias_len > 0 && alias_len < CBM_SZ_256) {
+                char alias[CBM_SZ_256];
+                memcpy(alias, key_start, alias_len);
+                alias[alias_len] = '\0';
+                p++;
+                while (p < line_end && (*p == ' ' || *p == '\t')) {
+                    p++;
+                }
+                if (p < line_end && *p == ':') {
+                    char raw_target[CBM_SZ_512];
+                    if (extract_static_alias_target(p + 1, line_end, raw_target,
+                                                    sizeof(raw_target))) {
+                        char *target = resolve_target_relative(dir_prefix, raw_target);
+                        if (target && target[0]) {
+                            alias_map_put_webpack(map, alias, target);
+                        }
+                        free(target);
+                    }
+                }
+            }
+        }
+        line = line_end < close ? line_end + 1 : close;
+    }
+}
+
+static cbm_path_alias_map_t *load_static_build_config(const char *abs_path,
+                                                      const char *dir_prefix,
+                                                      bool vue_cli_config) {
+    FILE *f = cbm_fopen(abs_path, "r");
+    if (!f) {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > CBM_PATH_ALIAS_MAX_FILE_BYTES) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t nread = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[nread] = '\0';
+    cbm_path_alias_map_t *map = calloc(1, sizeof(*map));
+    if (!map) {
+        free(buf);
+        return NULL;
+    }
+    if (vue_cli_config) {
+        char *src = resolve_target_relative(dir_prefix, "src");
+        if (src) {
+            alias_map_put_webpack(map, "@", src);
+            free(src);
+        }
+    }
+    const char *after = NULL;
+    const char *open;
+    while ((open = find_alias_object(buf, after)) != NULL) {
+        const char *close = find_matching_js_brace(open);
+        if (!close) {
+            break;
+        }
+        parse_static_alias_object(map, dir_prefix, open, close);
+        after = close + 1;
+    }
+    free(buf);
+    if (map->count == 0) {
+        free_alias_map(map);
+        return NULL;
+    }
+    qsort(map->entries, (size_t)map->count, sizeof(cbm_path_alias_t),
+          cmp_alias_entry_by_specificity);
+    return map;
+}
+
+static void merge_alias_maps(cbm_path_alias_map_t *dst, cbm_path_alias_map_t *src) {
+    if (!dst || !src) {
+        return;
+    }
+    for (int i = 0; i < src->count; i++) {
+        cbm_path_alias_t *entry = &src->entries[i];
+        int slot = -1;
+        for (int j = 0; j < dst->count; j++) {
+            cbm_path_alias_t *existing = &dst->entries[j];
+            if (existing->has_wildcard == entry->has_wildcard &&
+                strcmp(existing->alias_prefix, entry->alias_prefix) == 0 &&
+                strcmp(existing->alias_suffix, entry->alias_suffix) == 0) {
+                slot = j;
+                free_alias_entry(existing);
+                break;
+            }
+        }
+        if (slot < 0) {
+            if (dst->count >= CBM_PATH_ALIAS_MAX_ENTRIES) {
+                continue;
+            }
+            cbm_path_alias_t *grown =
+                realloc(dst->entries, (size_t)(dst->count + 1) * sizeof(cbm_path_alias_t));
+            if (!grown) {
+                continue;
+            }
+            dst->entries = grown;
+            slot = dst->count++;
+        }
+        dst->entries[slot] = *entry;
+        memset(entry, 0, sizeof(*entry));
+    }
+    if (src->base_url) {
+        free(dst->base_url);
+        dst->base_url = strdup(src->base_url);
+    }
+    qsort(dst->entries, (size_t)dst->count, sizeof(cbm_path_alias_t),
+          cmp_alias_entry_by_specificity);
+    free_alias_map(src);
+}
+
 void cbm_path_alias_collection_free(cbm_path_alias_collection_t *coll) {
     if (!coll) {
         return;
     }
     for (int i = 0; i < coll->count; i++) {
         free(coll->scopes[i].dir_prefix);
-        if (coll->scopes[i].map) {
-            cbm_path_alias_map_t *map = coll->scopes[i].map;
-            for (int j = 0; j < map->count; j++) {
-                free(map->entries[j].alias_prefix);
-                free(map->entries[j].alias_suffix);
-                free(map->entries[j].target_prefix);
-                free(map->entries[j].target_suffix);
-            }
-            free(map->entries);
-            free(map->base_url);
-            free(map);
-        }
+        free_alias_map(coll->scopes[i].map);
     }
     free(coll->scopes);
     free(coll);
@@ -376,10 +729,28 @@ char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module
 typedef struct {
     char abs[CBM_SZ_512];
     char rel[CBM_SZ_256];
+    enum {
+        ALIAS_CONFIG_TSCONFIG = 0,
+        ALIAS_CONFIG_VUE,
+        ALIAS_CONFIG_WEBPACK,
+    } kind;
 } alias_config_hit_t;
 
 static const char *const TS_CONFIG_NAMES[] = {"tsconfig.json", "jsconfig.json"};
 enum { TS_CONFIG_NAMES_COUNT = 2 };
+
+typedef struct {
+    const char *name;
+    int kind;
+} static_config_name_t;
+
+static const static_config_name_t STATIC_CONFIG_NAMES[] = {
+    {"vue.config.js", ALIAS_CONFIG_VUE},
+    {"vue.config.cjs", ALIAS_CONFIG_VUE},
+    {"webpack.config.js", ALIAS_CONFIG_WEBPACK},
+    {"webpack.config.cjs", ALIAS_CONFIG_WEBPACK},
+};
+enum { STATIC_CONFIG_NAMES_COUNT = 4 };
 
 static void find_alias_files(const char *abs_dir, const char *rel_dir, alias_config_hit_t *out,
                              int *count, int max_count, int depth, char **excluded_dirs,
@@ -401,9 +772,24 @@ static void find_alias_files(const char *abs_dir, const char *rel_dir, alias_con
             fclose(f);
             snprintf(out[*count].abs, sizeof(out[*count].abs), "%s", check);
             snprintf(out[*count].rel, sizeof(out[*count].rel), "%s", rel_dir);
+            out[*count].kind = ALIAS_CONFIG_TSCONFIG;
             (*count)++;
             break;
         }
+    }
+
+    for (int i = 0; i < STATIC_CONFIG_NAMES_COUNT && *count < max_count; i++) {
+        char check[CBM_SZ_512];
+        snprintf(check, sizeof(check), "%s/%s", abs_dir, STATIC_CONFIG_NAMES[i].name);
+        FILE *f = cbm_fopen(check, "r");
+        if (!f) {
+            continue;
+        }
+        fclose(f);
+        snprintf(out[*count].abs, sizeof(out[*count].abs), "%s", check);
+        snprintf(out[*count].rel, sizeof(out[*count].rel), "%s", rel_dir);
+        out[*count].kind = STATIC_CONFIG_NAMES[i].kind;
+        (*count)++;
     }
 
     cbm_dirent_t *ent;
@@ -468,13 +854,30 @@ cbm_path_alias_collection_t *cbm_load_path_aliases_excluded(const char *repo_pat
     }
 
     for (int i = 0; i < count; i++) {
-        cbm_path_alias_map_t *map = load_tsconfig_file(hits[i].abs, hits[i].rel);
+        cbm_path_alias_map_t *map = NULL;
+        if (hits[i].kind == ALIAS_CONFIG_TSCONFIG) {
+            map = load_tsconfig_file(hits[i].abs, hits[i].rel);
+        } else {
+            map = load_static_build_config(hits[i].abs, hits[i].rel,
+                                           hits[i].kind == ALIAS_CONFIG_VUE);
+        }
         if (!map) {
             continue;
         }
-        coll->scopes[coll->count].dir_prefix = strdup(hits[i].rel);
-        coll->scopes[coll->count].map = map;
-        coll->count++;
+        int existing = -1;
+        for (int j = 0; j < coll->count; j++) {
+            if (strcmp(coll->scopes[j].dir_prefix, hits[i].rel) == 0) {
+                existing = j;
+                break;
+            }
+        }
+        if (existing >= 0) {
+            merge_alias_maps(coll->scopes[existing].map, map);
+        } else {
+            coll->scopes[coll->count].dir_prefix = strdup(hits[i].rel);
+            coll->scopes[coll->count].map = map;
+            coll->count++;
+        }
     }
     free(hits);
 

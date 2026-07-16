@@ -150,6 +150,18 @@ static int ei_edge_present(const EILangFile *files, int nfiles, const char *edge
     return got >= floor;
 }
 
+static int ei_edge_count_is(const EILangFile *files, int nfiles, const char *edge_type,
+                            int expected) {
+    EILangProj lp;
+    cbm_store_t *store = ei_index_files(&lp, files, nfiles);
+    int got = store ? cbm_store_count_edges_by_type(store, lp.project, edge_type) : -1;
+    if (got != expected) {
+        fprintf(stderr, "  [%s] FAIL count=%d expected=%d\n", edge_type, got, expected);
+    }
+    ei_cleanup(&lp, store);
+    return got == expected;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * GREEN GUARD — Python
  *
@@ -316,6 +328,32 @@ TEST(ei_typescript_type_import) {
         {"main.ts",  "import type { Config } from './types';\n\n"
                      "export function run(c: Config): number { return c.value; }\n"}};
     ASSERT_TRUE(ei_edge_present(f, 2, "IMPORTS", 1));
+    PASS();
+}
+
+/* Vue CLI provides @ -> src even when vue.config.js has no explicit aliases. */
+TEST(ei_vue_cli_implicit_alias_import) {
+    static const EILangFile f[] = {
+        {"vue.config.js", "module.exports = {};\n"},
+        {"src/utils/index.js", "export function validate() { return true; }\n"},
+        {"src/Consumer.vue", "<script>\n"
+                             "import { validate } from '@/utils/index.js';\n"
+                             "export default { methods: { submit() { return validate(); } } };\n"
+                             "</script>\n"}};
+    ASSERT_TRUE(ei_edge_present(f, 3, "IMPORTS", 1));
+    PASS();
+}
+
+/* An unresolved ES module path must not fall back to an unrelated index symbol. */
+TEST(ei_vue_unresolved_path_has_no_symbol_fallback) {
+    static const EILangFile f[] = {
+        {"vue.config.js", "module.exports = {};\n"},
+        {"src/FolderTree/xnquery.js", "export function index() { return 1; }\n"},
+        {"src/QAAgent.vue", "<script>\n"
+                            "import missing from '@/utils/index.js';\n"
+                            "export default { methods: { run() { return missing(); } } };\n"
+                            "</script>\n"}};
+    ASSERT_TRUE(ei_edge_count_is(f, 3, "IMPORTS", 0));
     PASS();
 }
 
@@ -859,6 +897,8 @@ SUITE(edge_imports) {
     RUN_TEST(ei_typescript_subdir_import);
     RUN_TEST(ei_typescript_re_export);
     RUN_TEST(ei_typescript_type_import);
+    RUN_TEST(ei_vue_cli_implicit_alias_import);
+    RUN_TEST(ei_vue_unresolved_path_has_no_symbol_fallback);
 
     /* ── GREEN GUARDS — Go (must stay passing) ── */
     RUN_TEST(ei_go_same_module_import);
