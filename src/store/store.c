@@ -26,6 +26,10 @@ enum {
     ST_FOUND = -1,
     ST_BUF_16 = 16,
     ST_BUF_64 = 64,
+    /* #1083: warn when a PASSIVE checkpoint sees a WAL this large (frames) but
+     * can't reset it — ~1 GiB at a 4 KiB page, far past the healthy ~1000-frame
+     * autocheckpoint, so it only fires under genuine starvation. */
+    ST_WAL_STARVE_WARN_FRAMES = 262144,
     /* file: URI for the immutable read-only fallback. A path is at most
      * CBM_SZ_1K; percent-encoding can triple it, plus the "file://" prefix,
      * the "?immutable=1" suffix and a leading '/'. */
@@ -1094,10 +1098,27 @@ int cbm_store_checkpoint(cbm_store_t *s) {
      * SIGBUS in a sibling process that has the DB mmap'd through SQLite
      * when it next faults a page in the now-shorter region.
      * See https://www.sqlite.org/c3ref/c_checkpoint_full.html */
-    int rc = sqlite3_wal_checkpoint_v2(s->db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
+    int wal_frames = 0;
+    int checkpointed = 0;
+    int rc = sqlite3_wal_checkpoint_v2(s->db, NULL, SQLITE_CHECKPOINT_PASSIVE, &wal_frames,
+                                       &checkpointed);
     if (rc != SQLITE_OK) {
         store_set_error_sqlite(s, "checkpoint");
         return CBM_STORE_ERR;
+    }
+    /* #1083: a large WAL that a PASSIVE checkpoint can't fully reset — because
+     * concurrent readers hold marks — is the checkpoint-starvation signal. Warn
+     * so an operator can see it (and the driving processes) before the -wal file
+     * fills the disk; journal_size_limit only reclaims once a reset succeeds.
+     * wal_frames = frames in the WAL, checkpointed = frames reclaimed this pass. */
+    if (wal_frames >= ST_WAL_STARVE_WARN_FRAMES && checkpointed < wal_frames) {
+        char frames_buf[ST_BUF_16];
+        char ckpt_buf[ST_BUF_16];
+        snprintf(frames_buf, sizeof(frames_buf), "%d", wal_frames);
+        snprintf(ckpt_buf, sizeof(ckpt_buf), "%d", checkpointed);
+        cbm_log_warn("store.wal.starving", "wal_frames", frames_buf, "checkpointed", ckpt_buf,
+                     "hint",
+                     "concurrent readers block the WAL reset — the -wal file keeps growing");
     }
     return exec_sql(s, "PRAGMA optimize;");
 }
