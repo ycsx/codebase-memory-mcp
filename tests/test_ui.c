@@ -9,8 +9,14 @@
 #include "test_helpers.h"
 #include "ui/config.h"
 #include "ui/embedded_assets.h"
+#include "ui/http_server.h"
 #include "ui/layout3d.h"
 #include "store/store.h"
+
+#ifdef _WIN32
+#include "../src/foundation/win_utf8.h"
+#include <windows.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -178,6 +184,23 @@ TEST(config_missing_fields) {
         free(old_home);
     }
 
+    PASS();
+}
+
+TEST(binary_path_preserves_unicode_on_windows) {
+#ifdef _WIN32
+    wchar_t wide_path[4096];
+    DWORD n = GetModuleFileNameW(NULL, wide_path,
+                                 (DWORD)(sizeof(wide_path) / sizeof(wide_path[0])));
+    ASSERT_TRUE(n > 0 && n < (sizeof(wide_path) / sizeof(wide_path[0])));
+    char *expected = cbm_wide_to_utf8(wide_path);
+    ASSERT_NOT_NULL(expected);
+
+    char resolved[4096];
+    ASSERT_TRUE(cbm_http_server_resolve_binary_path(NULL, resolved, sizeof(resolved)));
+    ASSERT_STR_EQ(resolved, expected);
+    free(expected);
+#endif
     PASS();
 }
 
@@ -790,6 +813,7 @@ SUITE(ui) {
     RUN_TEST(config_overwrite);
     RUN_TEST(config_corrupt_file);
     RUN_TEST(config_missing_fields);
+    RUN_TEST(binary_path_preserves_unicode_on_windows);
 
     /* Embedded assets (stub) */
     RUN_TEST(embedded_lookup_not_found);

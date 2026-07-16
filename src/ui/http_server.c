@@ -122,7 +122,7 @@ static void handle_ui_config(cbm_http_conn_t *c, const cbm_http_req_t *req) {
      * targets must come from an auditable backend response, same pattern as
      * the /api/repo-info deep-links). */
     cbm_http_replyf(c, 200, g_cors_json, "{\"lang\":\"%s\",\"upstream_issues_url\":\"%s\"}",
-                    lang_buf, "https://github.com/DeusData/codebase-memory-mcp/issues/new");
+                    lang_buf, "https://github.com/ycsx/codebase-memory-mcp/issues/new");
 }
 
 /* ── Server state ─────────────────────────────────────────────── */
@@ -931,10 +931,16 @@ static bool resolve_self_executable(char *out, size_t outsz) {
 }
 #else
 static bool resolve_self_executable(char *out, size_t outsz) {
-    char buf[1024];
-    DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)sizeof(buf));
-    if (n > 0 && n < sizeof(buf)) {
-        return copy_path(out, outsz, buf);
+    wchar_t wide_buf[4096];
+    DWORD n = GetModuleFileNameW(NULL, wide_buf, (DWORD)(sizeof(wide_buf) / sizeof(wide_buf[0])));
+    if (n > 0 && n < (sizeof(wide_buf) / sizeof(wide_buf[0]))) {
+        char *utf8 = cbm_wide_to_utf8(wide_buf);
+        if (!utf8) {
+            return false;
+        }
+        bool copied = copy_path(out, outsz, utf8);
+        free(utf8);
+        return copied;
     }
     return false;
 }
@@ -955,7 +961,9 @@ bool cbm_http_server_resolve_binary_path(const char *argv0, char *out, size_t ou
     }
 #else
     if (argv0 && argv0[0]) {
-        DWORD attrs = GetFileAttributesA(argv0);
+        wchar_t *wide_argv0 = cbm_utf8_to_wide(argv0);
+        DWORD attrs = wide_argv0 ? GetFileAttributesW(wide_argv0) : INVALID_FILE_ATTRIBUTES;
+        free(wide_argv0);
         if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
             return copy_path(out, outsz, argv0);
         }
@@ -989,7 +997,7 @@ static void *index_thread_fn(void *arg) {
         bin = self_path[0] ? self_path : "codebase-memory-mcp";
     }
 
-    char log_file[256];
+    char log_file[1024];
 
     /* JSON-escape root_path and optional project name. */
     char escaped_path[2048];
@@ -1005,8 +1013,20 @@ static void *index_thread_fn(void *arg) {
     }
 
 #ifdef _WIN32
-    snprintf(log_file, sizeof(log_file), "%s\\cbm_index_%d.log",
-             getenv("TEMP") ? getenv("TEMP") : ".", (int)_getpid());
+    wchar_t wide_temp[768];
+    wchar_t wide_log[1024];
+    DWORD temp_len = GetTempPathW((DWORD)(sizeof(wide_temp) / sizeof(wide_temp[0])), wide_temp);
+    if (temp_len > 0 && temp_len < (sizeof(wide_temp) / sizeof(wide_temp[0]))) {
+        int written = swprintf(wide_log, sizeof(wide_log) / sizeof(wide_log[0]),
+                               L"%lscbm_index_%d.log", wide_temp, (int)_getpid());
+        char *utf8_log = written > 0 ? cbm_wide_to_utf8(wide_log) : NULL;
+        if (!utf8_log || !copy_path(log_file, sizeof(log_file), utf8_log)) {
+            snprintf(log_file, sizeof(log_file), "cbm_index_%d.log", (int)_getpid());
+        }
+        free(utf8_log);
+    } else {
+        snprintf(log_file, sizeof(log_file), "cbm_index_%d.log", (int)_getpid());
+    }
 
     /* Build command line for CreateProcess through the shared MS-CRT quoter so the
      * JSON arg's embedded quotes survive the child's argv re-parse — a naive
@@ -1034,8 +1054,11 @@ static void *index_thread_fn(void *arg) {
 
     cbm_log_info("ui.index.spawn", "bin", bin, "log", log_file);
 
-    HANDLE hlog = CreateFileA(log_file, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
+    wchar_t *wide_log_path = cbm_utf8_to_wide(log_file);
+    HANDLE hlog = wide_log_path ? CreateFileW(wide_log_path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+                                    : INVALID_HANDLE_VALUE;
+    free(wide_log_path);
     STARTUPINFOW si_proc = {.cb = sizeof(si_proc)};
     if (hlog != INVALID_HANDLE_VALUE) {
         si_proc.dwFlags = STARTF_USESTDHANDLES;
@@ -1044,9 +1067,11 @@ static void *index_thread_fn(void *arg) {
     }
     PROCESS_INFORMATION pi = {0};
     BOOL spawned = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si_proc, &pi);
+    DWORD spawn_error = spawned ? ERROR_SUCCESS : GetLastError();
     free(wcmd);
     if (!spawned) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "CreateProcess failed");
+        snprintf(job->error_msg, sizeof(job->error_msg), "CreateProcess failed (Windows error %lu)",
+                 (unsigned long)spawn_error);
         atomic_store(&job->status, 3);
         if (hlog != INVALID_HANDLE_VALUE)
             CloseHandle(hlog);
@@ -1059,7 +1084,7 @@ static void *index_thread_fn(void *arg) {
     long tail_pos = 0;
     for (;;) {
         DWORD wait = WaitForSingleObject(pi.hProcess, 500);
-        FILE *lf = fopen(log_file, "r");
+        FILE *lf = cbm_fopen(log_file, "r");
         if (lf) {
             fseek(lf, tail_pos, SEEK_SET);
             char line[512];
@@ -1082,7 +1107,7 @@ static void *index_thread_fn(void *arg) {
     int exit_code = (int)win_exit;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    (void)DeleteFileA(log_file);
+    (void)cbm_unlink(log_file);
 #else
     snprintf(log_file, sizeof(log_file), "/tmp/cbm_index_%d.log", (int)getpid());
 
@@ -1236,13 +1261,7 @@ static void handle_index_status(cbm_http_conn_t *c) {
     cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
 }
 
-static void unwatch_project(cbm_http_server_t *srv, const char *name) {
-    if (srv && srv->watcher) {
-        cbm_watcher_unwatch(srv->watcher, name);
-    }
-}
-
-/* DELETE /api/project?name=X — deletes the .db file */
+/* DELETE /api/project?name=X — closes the UI store, then deletes the project. */
 static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
                                   const cbm_http_req_t *req) {
     char name[256] = {0};
@@ -1251,33 +1270,57 @@ static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
-    char db_path[1024];
-    db_path_for_project(name, db_path, sizeof(db_path));
-    if (db_path[0] == '\0') {
-        cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
+    char escaped_name[512];
+    cbm_json_escape(escaped_name, (int)sizeof(escaped_name), name);
+    char args[640];
+    int args_len = snprintf(args, sizeof(args), "{\"project\":\"%s\"}", escaped_name);
+    if (args_len <= 0 || (size_t)args_len >= sizeof(args)) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid project name\"}");
         return;
     }
 
-    if (unlink(db_path) != 0) {
-        if (errno == ENOENT) {
-            unwatch_project(srv, name);
-            cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
-            return;
-        }
-        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"failed to delete\"}");
+    /* The MCP implementation closes its cached SQLite store before unlinking.
+     * Calling it here matters on Windows, where an open database handle prevents
+     * deletion; the previous direct unlink always failed after the UI loaded a graph. */
+    char *tool_result = cbm_mcp_handle_tool(srv->mcp, "delete_project", args);
+    if (!tool_result) {
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"delete failed\"}");
         return;
     }
 
-    /* Also remove WAL and SHM files if they exist */
-    char wal_path[1040], shm_path[1040];
-    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
-    snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
-    (void)unlink(wal_path);
-    (void)unlink(shm_path);
+    yyjson_doc *result_doc = yyjson_read(tool_result, strlen(tool_result), 0);
+    yyjson_val *result_root = result_doc ? yyjson_doc_get_root(result_doc) : NULL;
+    yyjson_val *content = result_root ? yyjson_obj_get(result_root, "content") : NULL;
+    yyjson_val *first = content && yyjson_is_arr(content) ? yyjson_arr_get(content, 0U) : NULL;
+    yyjson_val *text_val = first ? yyjson_obj_get(first, "text") : NULL;
+    const char *payload = text_val && yyjson_is_str(text_val) ? yyjson_get_str(text_val) : NULL;
+    if (!payload) {
+        if (result_doc)
+            yyjson_doc_free(result_doc);
+        free(tool_result);
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"invalid delete response\"}");
+        return;
+    }
 
-    unwatch_project(srv, name);
-    cbm_log_info("ui.project.deleted", "name", name);
-    cbm_http_replyf(c, 200, g_cors_json, "{\"deleted\":true}");
+    int http_status = yyjson_is_true(yyjson_obj_get(result_root, "isError")) ? 409 : 200;
+    yyjson_doc *payload_doc = yyjson_read(payload, strlen(payload), 0);
+    yyjson_val *payload_root = payload_doc ? yyjson_doc_get_root(payload_doc) : NULL;
+    yyjson_val *status_val = payload_root ? yyjson_obj_get(payload_root, "status") : NULL;
+    const char *status = status_val && yyjson_is_str(status_val) ? yyjson_get_str(status_val) : NULL;
+    if (status && strcmp(status, "not_found") == 0) {
+        http_status = 404;
+    }
+
+    if (http_status == 200) {
+        cbm_log_info("ui.project.deleted", "name", name);
+    } else {
+        cbm_log_warn("ui.project.delete_failed", "name", name, "detail", payload);
+    }
+    cbm_http_replyf(c, http_status, g_cors_json, "%s", payload);
+    if (payload_doc)
+        yyjson_doc_free(payload_doc);
+    yyjson_doc_free(result_doc);
+    free(tool_result);
 }
 
 /* GET /api/project-health?name=X — checks db integrity */
@@ -1949,5 +1992,6 @@ void cbm_http_server_set_recv_deadline_ms(cbm_http_server_t *srv, int ms) {
 void cbm_http_server_set_watcher(cbm_http_server_t *srv, struct cbm_watcher *watcher) {
     if (srv) {
         srv->watcher = watcher;
+        cbm_mcp_server_set_watcher(srv->mcp, watcher);
     }
 }

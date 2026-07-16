@@ -4,6 +4,7 @@
 
 ## Key facts
 
+- Fork: maintained at ycsx/codebase-memory-mcp; based on the original DeusData project and extended for Vue 2 / Webpack analysis.
 - License: MIT, open source.
 - Languages: 158 (158 vendored tree-sitter grammars compiled into the binary).
 - Hybrid LSP type resolution: 9 language families (Python, TypeScript/JavaScript/JSX/TSX, PHP, C#, Go, C/C++, Java, Kotlin, Rust) — a lightweight C implementation of language type-resolution algorithms, structurally inspired by and compatible with major language servers including tsserver, pyright, gopls, Roslyn, Eclipse JDT, and rust-analyzer.
@@ -15,12 +16,13 @@
 - Supported agents: 43 automatic/conditional client surfaces (37 automatically detected + 6 conditional/explicit): Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf, Augment / Auggie, OpenClaw, Kiro, Junie, Hermes, OpenHands, Cline, Warp, Qwen Code, GitHub Copilot CLI, Factory Droid, Crush, Goose, Mistral Vibe, Qoder CLI, Kimi Code CLI, GitLab Duo CLI, Rovo Dev CLI, Amp, Devin CLI / Local, Tabnine, Continue / cn, Visual Studio, TRAE, Roo Code, Amazon Q Developer IDE, CodeBuddy Code CLI, IBM Bob IDE, IBM Bob Shell, Pochi, Pi, and Sourcegraph Cody.
 - Agent profiles: documented custom-agent formats receive Scout (fast/provisional), Verify (default/task-directed), and Auditor (bounded/full verification) definitions. Every direct tier checks exact path/scope coverage with check_index_coverage and falls back to source for flagged gaps; unsafe child-MCP formats use explicit parent handoff. Kiro and Junie use positive-allowlist Scout/Analysis server profiles (7/11 tools); Qoder combines named-server selection with exact tier-specific MCP tool IDs, while Factory uses exact registered IDs without additive whole-server exposure. Foreign Junie aliases are preserved and force parent handoff.
 - Performance: Linux kernel (28M LOC, 75K files) full index in 3 minutes → 4.81M nodes, 7.72M edges; Cypher queries in under 1ms.
-- Distribution: single static C binary; also npm, PyPI, Homebrew, Scoop, Winget, Chocolatey, AUR, and `go install`.
+- Distribution: source builds are currently available from the ycsx fork. GitHub Release installers and registry packages require the fork to publish their corresponding artifacts first.
 
 ## Links
 
-- Homepage: https://deusdata.github.io/codebase-memory-mcp/
-- Source code (GitHub): https://github.com/DeusData/codebase-memory-mcp
-- Latest release: https://github.com/DeusData/codebase-memory-mcp/releases/latest
-- Benchmark report: https://github.com/DeusData/codebase-memory-mcp/blob/main/docs/BENCHMARK.md
+- Homepage: https://ycsx.github.io/codebase-memory-mcp/
+- Source code (GitHub): https://github.com/ycsx/codebase-memory-mcp
+- Installation guide: https://github.com/ycsx/codebase-memory-mcp/blob/main/INSTALL.md
+- Releases (when published): https://github.com/ycsx/codebase-memory-mcp/releases
+- Benchmark report: https://github.com/ycsx/codebase-memory-mcp/blob/main/docs/BENCHMARK.md
 - Research paper: https://arxiv.org/abs/2603.27277

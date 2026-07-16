@@ -3,9 +3,9 @@ set -euo pipefail
 
 # codebase-memory-mcp setup script (macOS + Linux)
 # Default: download pre-built binary from GitHub Release
-# --from-source: build from source (requires Go + C compiler)
+# --from-source: build from source (requires C/C++ compilers and zlib)
 
-REPO="DeusData/codebase-memory-mcp"
+REPO="ycsx/codebase-memory-mcp"
 INSTALL_DIR="$HOME/.local/bin"
 BINARY_NAME="codebase-memory-mcp"
 SOURCE_DIR="$HOME/.local/share/codebase-memory-mcp"
@@ -37,14 +37,17 @@ die() { fail "$@"; exit 1; }
 # --- Argument parsing ---
 
 FROM_SOURCE=false
+WITH_UI=false
 for arg in "$@"; do
     case "$arg" in
         --from-source) FROM_SOURCE=true ;;
+        --ui) WITH_UI=true ;;
         --help|-h)
-            echo "Usage: $0 [--from-source]"
+            echo "Usage: $0 [--from-source] [--ui]"
             echo ""
             echo "  Default:        Download pre-built binary from GitHub Release"
-            echo "  --from-source:  Clone and build from source (requires Go 1.23+ and a C compiler)"
+            echo "  --from-source:  Clone and build from source (requires C/C++ compilers and zlib)"
+            echo "  --ui:           Install/build the embedded graph UI variant"
             exit 0
             ;;
         *) die "Unknown argument: $arg" ;;
@@ -93,24 +96,6 @@ check_download_tool() {
     fi
 }
 
-check_go_version() {
-    if ! command -v go &>/dev/null; then
-        die "Go not found. Install Go 1.23+ from https://go.dev/dl/"
-    fi
-
-    local version
-    version=$(go version | grep -oE 'go[0-9]+\.[0-9]+' | head -1)
-    local major minor
-    major=$(echo "$version" | grep -oE '[0-9]+' | head -1)
-    minor=$(echo "$version" | grep -oE '[0-9]+' | sed -n '2p')
-
-    if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 23 ]; }; then
-        die "Go $major.$minor found, but 1.23+ is required. Update from https://go.dev/dl/"
-    fi
-
-    ok "Go $major.$minor"
-}
-
 check_c_compiler() {
     if command -v cc &>/dev/null || command -v gcc &>/dev/null || command -v clang &>/dev/null; then
         ok "C compiler found"
@@ -123,6 +108,31 @@ check_c_compiler() {
         die "No C compiler found. Run: xcode-select --install"
     else
         die "No C compiler found. Install build-essential (Debian/Ubuntu) or gcc (Fedora/RHEL)"
+    fi
+}
+
+check_cxx_compiler() {
+    if command -v c++ &>/dev/null || command -v g++ &>/dev/null || command -v clang++ &>/dev/null; then
+        ok "C++ compiler found"
+    else
+        die "C++ compiler not found. Install Xcode Command Line Tools (macOS) or build-essential (Linux)."
+    fi
+}
+
+check_zlib_headers() {
+    local cc
+    if command -v cc &>/dev/null; then
+        cc=cc
+    elif command -v gcc &>/dev/null; then
+        cc=gcc
+    else
+        cc=clang
+    fi
+
+    if printf '#include <zlib.h>\n' | "$cc" -E - >/dev/null 2>&1; then
+        ok "zlib headers found"
+    else
+        die "zlib development headers not found. Install zlib1g-dev (Debian/Ubuntu) or zlib-devel (Fedora/RHEL)."
     fi
 }
 
@@ -149,15 +159,22 @@ download_binary() {
 
     echo ""
     echo "${BOLD}Fetching latest release...${RESET}"
-    local tag
-    tag=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" "$tool" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+    local release_json tag
+    if ! release_json=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" "$tool"); then
+        die "No fork release is available yet. Re-run with --from-source (and optionally --ui)."
+    fi
+    tag=$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//' || true)
 
     if [ -z "$tag" ]; then
-        die "Could not determine latest release. Check https://github.com/${REPO}/releases"
+        die "No fork release is available yet. Re-run with --from-source (and optionally --ui)."
     fi
     ok "Latest release: $tag"
 
-    local asset="codebase-memory-mcp-${platform}.tar.gz"
+    local prefix="codebase-memory-mcp"
+    if [ "$WITH_UI" = true ]; then
+        prefix="codebase-memory-mcp-ui"
+    fi
+    local asset="${prefix}-${platform}.tar.gz"
     local url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
 
     echo "${BOLD}Downloading ${asset}...${RESET}"
@@ -165,7 +182,9 @@ download_binary() {
     trap 'rm -rf "$CLEANUP_DIR"' EXIT
     local tmpdir="$CLEANUP_DIR"
 
-    fetch "$url" "$tool" > "${tmpdir}/${asset}"
+    if ! fetch "$url" "$tool" > "${tmpdir}/${asset}"; then
+        die "Release asset not found. See https://github.com/${REPO}/blob/main/INSTALL.md"
+    fi
     tar -xzf "${tmpdir}/${asset}" -C "$tmpdir"
 
     mkdir -p "$INSTALL_DIR"
@@ -180,13 +199,19 @@ download_binary() {
 build_from_source() {
     echo ""
     echo "${BOLD}Checking prerequisites...${RESET}"
-    check_go_version
     check_c_compiler
+    check_cxx_compiler
+    check_zlib_headers
     check_git
+    if [ "$WITH_UI" = true ]; then
+        command -v node &>/dev/null || die "Node.js 18+ is required for the UI build"
+        command -v npm &>/dev/null || die "npm is required for the UI build"
+    fi
 
     echo ""
     if [ -d "$SOURCE_DIR/.git" ]; then
         echo "${BOLD}Updating source...${RESET}"
+        git -C "$SOURCE_DIR" remote set-url origin "https://github.com/${REPO}.git"
         git -C "$SOURCE_DIR" pull --ff-only
     else
         echo "${BOLD}Cloning repository...${RESET}"
@@ -199,7 +224,12 @@ build_from_source() {
     echo "${BOLD}Building binary (this may take a minute)...${RESET}"
     mkdir -p "$INSTALL_DIR"
 
-    (cd "$SOURCE_DIR" && scripts/build.sh && cp build/c/codebase-memory-mcp "${INSTALL_DIR}/${BINARY_NAME}")
+    local build_args=()
+    if [ "$WITH_UI" = true ]; then
+        build_args+=(--with-ui)
+    fi
+    (cd "$SOURCE_DIR" && scripts/build.sh "${build_args[@]}" && \
+        cp build/c/codebase-memory-mcp "${INSTALL_DIR}/${BINARY_NAME}")
 
     ok "Built and installed to ${INSTALL_DIR}/${BINARY_NAME}"
 }

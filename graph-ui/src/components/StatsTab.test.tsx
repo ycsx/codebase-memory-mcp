@@ -45,6 +45,7 @@ describe("StatsTab index modal", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("submits a custom path and project name", async () => {
@@ -206,6 +207,33 @@ describe("StatsTab index modal", () => {
     /* Wait past the debounce window; a POSIX path must NOT trigger a re-browse. */
     await new Promise((r) => setTimeout(r, 400));
     expect(browseCalls()).toBe(before);
+  });
+
+  it("shows the backend error when deleting an index fails", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockProjectsFetch((url, init) => {
+      if (url === "/rpc") {
+        const request = JSON.parse(String(init?.body));
+        const payload = request.params.name === "list_projects"
+          ? { projects: [{ name: "locked-project", root_path: "C:/repo" }] }
+          : { node_labels: [], edge_types: [] };
+        return new Response(JSON.stringify({
+          result: { content: [{ text: JSON.stringify(payload) }] },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.startsWith("/api/project?")) {
+        return new Response(JSON.stringify({ error: "database is in use by another process" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return undefined;
+    });
+
+    render(<StatsTab onSelectProject={() => {}} />);
+    fireEvent.click(await screen.findByTitle("Delete index"));
+
+    expect(await screen.findByText("database is in use by another process")).toBeInTheDocument();
   });
 });
 

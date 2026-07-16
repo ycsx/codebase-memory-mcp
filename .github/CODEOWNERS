@@ -9,53 +9,53 @@
 # approval for the matching path.
 
 # Default owner gate: every pull request crosses the project owner's desk.
-* @DeusData
+* @ycsx
 
 # Security-sensitive and authority-sensitive surfaces.
-/.github/ @DeusData
-/scripts/ @DeusData
-/Makefile.cbm @DeusData
-/SECURITY.md @DeusData
-/docs/SECURITY-DISCLOSURE.md @DeusData
-/CONTRIBUTING.md @DeusData
-/CODE_OF_CONDUCT.md @DeusData
-/DCO @DeusData
-/LICENSE @DeusData
-/MAINTAINERS.md @DeusData
+/.github/ @ycsx
+/scripts/ @ycsx
+/Makefile.cbm @ycsx
+/SECURITY.md @ycsx
+/docs/SECURITY-DISCLOSURE.md @ycsx
+/CONTRIBUTING.md @ycsx
+/CODE_OF_CONDUCT.md @ycsx
+/DCO @ycsx
+/LICENSE @ycsx
+/MAINTAINERS.md @ycsx
 
 # Release and distribution surfaces.
-/pkg/ @DeusData
-/install.sh @DeusData
-/install.ps1 @DeusData
-/server.json @DeusData
-/glama.json @DeusData
-/flake.nix @DeusData
-/flake.lock @DeusData
-/THIRD_PARTY.md @DeusData
-/vendored/ @DeusData
-/internal/cbm/vendored/ @DeusData
+/pkg/ @ycsx
+/install.sh @ycsx
+/install.ps1 @ycsx
+/server.json @ycsx
+/glama.json @ycsx
+/flake.nix @ycsx
+/flake.lock @ycsx
+/THIRD_PARTY.md @ycsx
+/vendored/ @ycsx
+/internal/cbm/vendored/ @ycsx
 
 # Core product surfaces.
-/src/foundation/ @DeusData
-/src/store/ @DeusData
-/src/cypher/ @DeusData
-/src/graph_buffer/ @DeusData
-/src/mcp/ @DeusData
-/src/cli/ @DeusData
-/src/discover/ @DeusData
-/src/watcher/ @DeusData
-/src/pipeline/ @DeusData
-/src/git/ @DeusData
-/src/semantic/ @DeusData
-/src/simhash/ @DeusData
-/src/traces/ @DeusData
-/src/ui/ @DeusData
+/src/foundation/ @ycsx
+/src/store/ @ycsx
+/src/cypher/ @ycsx
+/src/graph_buffer/ @ycsx
+/src/mcp/ @ycsx
+/src/cli/ @ycsx
+/src/discover/ @ycsx
+/src/watcher/ @ycsx
+/src/pipeline/ @ycsx
+/src/git/ @ycsx
+/src/semantic/ @ycsx
+/src/simhash/ @ycsx
+/src/traces/ @ycsx
+/src/ui/ @ycsx
 
 # Extraction, language support, and graph UI.
-/internal/cbm/ @DeusData
-/tools/ @DeusData
-/graph-ui/ @DeusData
+/internal/cbm/ @ycsx
+/tools/ @ycsx
+/graph-ui/ @ycsx
 
 # Test and reproduction infrastructure.
-/tests/ @DeusData
-/test-infrastructure/ @DeusData
+/tests/ @ycsx
+/test-infrastructure/ @ycsx

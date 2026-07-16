@@ -502,6 +502,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
   const { projects, loading, error, refresh } = useProjects();
   const [showModal, setShowModal] = useState(false);
   const [indexing, setIndexing] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const aggregate = useMemo(() => {
     let totalNodes = 0, totalEdges = 0;
@@ -514,7 +515,15 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
 
   const deleteProject = useCallback(async (name: string) => {
     if (!confirm(t.projects.deleteConfirm(name))) return;
-    try { await fetch(`/api/project?name=${encodeURIComponent(name)}`, { method: "DELETE" }); refresh(); } catch { /* */ }
+    setDeleteError(null);
+    try {
+      const res = await fetch(`/api/project?name=${encodeURIComponent(name)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? `Delete failed (${res.status})`);
+      refresh();
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Delete failed");
+    }
   }, [refresh, t.projects]);
 
   return (
@@ -545,7 +554,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
           </div>
         </div>
 
-        {error && <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 mb-6"><p className="text-destructive text-[13px]">{error}</p></div>}
+        {(error || deleteError) && <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 mb-6"><p className="text-destructive text-[13px]">{deleteError ?? error}</p></div>}
 
         {!loading && projects.length === 0 && !error && (
           <div className="text-center py-20">

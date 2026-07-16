@@ -4,7 +4,7 @@ set -euo pipefail
 # install.sh — One-line installer for codebase-memory-mcp.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --ui          # Install the UI variant
 #   curl -fsSL ... | bash -s -- --dir /path   # Custom install directory
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 # called because the final line hasn't arrived yet.
 main() {
 
-REPO="DeusData/codebase-memory-mcp"
+REPO="ycsx/codebase-memory-mcp"
 INSTALL_DIR="$HOME/.local/bin"
 VARIANT="standard"
 SKIP_CONFIG=false
@@ -117,9 +117,19 @@ trap 'rm -rf "$DLDIR"' EXIT
 
 echo "Downloading ${ARCHIVE}..."
 if command -v curl &>/dev/null; then
-    curl -fSL --progress-bar -o "$DLDIR/$ARCHIVE" "$URL"
+    if ! curl -fSL --progress-bar -o "$DLDIR/$ARCHIVE" "$URL"; then
+        echo "error: release asset not found in ${REPO}" >&2
+        echo "  publish the matching GitHub Release asset, or install from source:" >&2
+        echo "  https://github.com/${REPO}/blob/main/INSTALL.md" >&2
+        exit 1
+    fi
 elif command -v wget &>/dev/null; then
-    wget -q --show-progress -O "$DLDIR/$ARCHIVE" "$URL"
+    if ! wget -q --show-progress -O "$DLDIR/$ARCHIVE" "$URL"; then
+        echo "error: release asset not found in ${REPO}" >&2
+        echo "  publish the matching GitHub Release asset, or install from source:" >&2
+        echo "  https://github.com/${REPO}/blob/main/INSTALL.md" >&2
+        exit 1
+    fi
 else
     echo "error: curl or wget required" >&2
     exit 1

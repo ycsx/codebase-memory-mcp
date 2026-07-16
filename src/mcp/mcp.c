@@ -3634,7 +3634,10 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
 
     cbm_pipeline_unlock();
 
-    if (srv->watcher) {
+    /* Keep watching when Windows rejects deletion because another process still
+     * has the SQLite file open. A failed delete must not silently disable future
+     * change detection for a project that still exists. */
+    if (srv->watcher && strcmp(status, "delete_failed") != 0) {
         cbm_watcher_unwatch(srv->watcher, name);
     }
 
@@ -8035,7 +8038,7 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
 
 /* ── Background update check ──────────────────────────────────── */
 
-#define UPDATE_CHECK_URL "https://api.github.com/repos/DeusData/codebase-memory-mcp/releases/latest"
+#define UPDATE_CHECK_URL "https://api.github.com/repos/ycsx/codebase-memory-mcp/releases/latest"
 
 static void *update_check_thread(void *arg) {
     cbm_mcp_server_t *srv = (cbm_mcp_server_t *)arg;
@@ -8078,7 +8081,7 @@ static void *update_check_thread(void *arg) {
             snprintf(srv->update_notice, sizeof(srv->update_notice),
                      "Update available: %s -> %s -- run: codebase-memory-mcp update  |  "
                      "Enjoying codebase-memory-mcp? Please leave a star: "
-                     "https://github.com/DeusData/codebase-memory-mcp",
+                     "https://github.com/ycsx/codebase-memory-mcp",
                      current, tag_str);
             cbm_log_info("update.available", "current", current, "latest", tag_str);
         }

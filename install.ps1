@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 # Enforce TLS 1.2+ (older PowerShell defaults to TLS 1.0 which GitHub rejects)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
-$Repo = "DeusData/codebase-memory-mcp"
+$Repo = "ycsx/codebase-memory-mcp"
 $InstallDir = "$env:LOCALAPPDATA\Programs\codebase-memory-mcp"
 $BinName = "codebase-memory-mcp.exe"
 $BaseUrl = if ($env:CBM_DOWNLOAD_URL) { $env:CBM_DOWNLOAD_URL } else { "https://github.com/$Repo/releases/latest/download" }
@@ -76,6 +76,9 @@ try {
     Invoke-WebRequest -Uri $Url -OutFile "$TmpDir\$Archive" -UseBasicParsing
 } catch {
     Write-Host "error: download failed: $_" -ForegroundColor Red
+    Write-Host "No matching release asset was found in $Repo." -ForegroundColor Yellow
+    Write-Host "Publish the GitHub Release asset, or install from source:" -ForegroundColor Yellow
+    Write-Host "https://github.com/$Repo/blob/main/INSTALL.md" -ForegroundColor Yellow
     Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
     exit 1
 }

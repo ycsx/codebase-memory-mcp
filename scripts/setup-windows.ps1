@@ -1,17 +1,19 @@
 # codebase-memory-mcp setup script (Windows)
 # Default: download pre-built native Windows binary
-# -FromSource: build from source inside WSL (requires Go + gcc in WSL)
+# -FromSource: build from source inside WSL (requires C/C++ compilers and zlib)
 
 param(
     [switch]$FromSource,
+    [switch]$WithUI,
     [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "DeusData/codebase-memory-mcp"
+$Repo = "ycsx/codebase-memory-mcp"
 $BinaryName = "codebase-memory-mcp"
 $InstallDir = Join-Path $env:LOCALAPPDATA "codebase-memory-mcp"
+$ReleaseArch = "amd64" # The release workflow currently publishes Windows x86_64 only.
 
 # --- Helpers ---
 
@@ -121,10 +123,11 @@ function Invoke-WSL {
 
 if ($Help) {
     Write-Host ""
-    Write-Host "Usage: .\setup-windows.ps1 [-FromSource] [-Help]"
+    Write-Host "Usage: .\setup-windows.ps1 [-FromSource] [-WithUI] [-Help]"
     Write-Host ""
     Write-Host "  Default:      Download pre-built Windows binary"
-    Write-Host "  -FromSource:  Build from source inside WSL (requires Go 1.23+ and gcc in WSL)"
+    Write-Host "  -FromSource:  Build from source inside WSL (requires C/C++ compilers and zlib)"
+    Write-Host "  -WithUI:      Install/build the embedded graph UI variant"
     Write-Host ""
     exit 0
 }
@@ -138,7 +141,7 @@ if ($FromSource) {
     Write-Host "Checking WSL2 (required for building from source)..." -ForegroundColor White
 
     if (-not (Test-WSL)) {
-        Write-Fail "WSL2 is not available. Required for building from source (CGO needs gcc)."
+        Write-Fail "WSL2 is not available for the scripted source build."
         Write-Host ""
         Write-Host "  Install WSL2:" -ForegroundColor Yellow
         Write-Host "    wsl --install -d Ubuntu"
@@ -166,25 +169,23 @@ if ($FromSource) {
     Write-Host ""
     Write-Host "Checking prerequisites inside WSL..." -ForegroundColor White
 
-    # Check for gcc
+    # Check for the native toolchain and zlib headers.
     try {
-        Invoke-WSL "command -v gcc" | Out-Null
-        Write-Ok "gcc found"
+        Invoke-WSL "command -v gcc && command -v g++ && command -v make && test -f /usr/include/zlib.h" | Out-Null
+        Write-Ok "C/C++ toolchain and zlib headers found"
     } catch {
-        Write-Warn "gcc not found. Installing build-essential..."
-        Invoke-WSL "sudo apt-get update && sudo apt-get install -y build-essential"
+        Write-Warn "Installing build-essential and zlib development headers..."
+        Invoke-WSL "sudo apt-get update && sudo apt-get install -y build-essential zlib1g-dev"
     }
 
-    # Check for Go
-    try {
-        $goVersion = Invoke-WSL "go version"
-        Write-Ok "Go: $goVersion"
-    } catch {
-        Write-Fail "Go not found in WSL."
-        Write-Host ""
-        Write-Host "  Install Go 1.23+ inside WSL:" -ForegroundColor Yellow
-        Write-Host "    See https://go.dev/dl/ for Linux amd64 tarball"
-        exit 1
+    if ($WithUI) {
+        try {
+            Invoke-WSL "command -v node && command -v npm" | Out-Null
+            Write-Ok "Node.js and npm found"
+        } catch {
+            Write-Fail "Node.js 18+ and npm are required for the UI build inside WSL."
+            exit 1
+        }
     }
 
     # Check for git
@@ -202,6 +203,7 @@ if ($FromSource) {
     try {
         Invoke-WSL "test -d $sourceDir/.git" | Out-Null
         Write-Host "Updating source..." -ForegroundColor White
+        Invoke-WSL "git -C $sourceDir remote set-url origin https://github.com/$Repo.git"
         Invoke-WSL "git -C $sourceDir pull --ff-only"
     } catch {
         Write-Host "Cloning repository..." -ForegroundColor White
@@ -213,7 +215,8 @@ if ($FromSource) {
     Write-Host ""
     Write-Host "Building binary (this may take a minute)..." -ForegroundColor White
     $wslBinaryPath = "/home/$wslUser/.local/bin/$BinaryName"
-    Invoke-WSL "mkdir -p /home/$wslUser/.local/bin && cd $sourceDir && scripts/build.sh && cp build/c/codebase-memory-mcp $wslBinaryPath"
+    $buildFlag = if ($WithUI) { " --with-ui" } else { "" }
+    Invoke-WSL "mkdir -p /home/$wslUser/.local/bin && cd $sourceDir && scripts/build.sh$buildFlag && cp build/c/codebase-memory-mcp $wslBinaryPath"
     Write-Ok "Built to $wslBinaryPath (inside WSL)"
 
     # Verify
@@ -247,7 +250,14 @@ if ($FromSource) {
     Write-Host "Fetching latest release..." -ForegroundColor White
 
     $releaseUrl = "https://api.github.com/repos/$Repo/releases/latest"
-    $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "codebase-memory-mcp-setup" }
+    try {
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "codebase-memory-mcp-setup" }
+    } catch {
+        Write-Fail "No fork release is available yet."
+        Write-Host "  Re-run with -FromSource (and optionally -WithUI)." -ForegroundColor Yellow
+        Write-Host "  See: https://github.com/$Repo/blob/main/INSTALL.md" -ForegroundColor Yellow
+        exit 1
+    }
     $tag = $release.tag_name
 
     if (-not $tag) {
@@ -257,7 +267,8 @@ if ($FromSource) {
     }
     Write-Ok "Latest release: $tag"
 
-    $asset = "codebase-memory-mcp-windows-amd64.zip"
+    $assetPrefix = if ($WithUI) { "codebase-memory-mcp-ui" } else { "codebase-memory-mcp" }
+    $asset = "$assetPrefix-windows-$ReleaseArch.zip"
     $downloadUrl = "https://github.com/$Repo/releases/download/$tag/$asset"
 
     Write-Host "Downloading $asset..." -ForegroundColor White
@@ -268,7 +279,13 @@ if ($FromSource) {
     }
 
     $tmpZip = Join-Path $env:TEMP $asset
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpZip -UseBasicParsing
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpZip -UseBasicParsing
+    } catch {
+        Write-Fail "Release asset not found: $asset"
+        Write-Host "  See: https://github.com/$Repo/blob/main/INSTALL.md" -ForegroundColor Yellow
+        exit 1
+    }
 
     # Extract
     Expand-Archive -Path $tmpZip -DestinationPath $InstallDir -Force
