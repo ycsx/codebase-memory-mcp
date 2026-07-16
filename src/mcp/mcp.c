@@ -1793,10 +1793,31 @@ static bool db_internal_project_name(const char *full_path, char *name_out, size
     cbm_project_t *projs = NULL;
     int n = 0;
     bool ok = false;
-    if (cbm_store_list_projects(st, &projs, &n) == CBM_STORE_OK && n == 1 && projs[0].name &&
-        projs[0].name[0]) {
-        snprintf(name_out, name_sz, "%s", projs[0].name);
-        ok = true;
+    if (cbm_store_list_projects(st, &projs, &n) == CBM_STORE_OK) {
+        const char *main_project = NULL;
+        const char missed_suffix[] = "::missed";
+        const size_t missed_suffix_len = sizeof(missed_suffix) - 1U;
+
+        for (int i = 0; i < n; i++) {
+            const char *candidate = projs[i].name;
+            if (!candidate || !candidate[0]) {
+                continue;
+            }
+            size_t candidate_len = strlen(candidate);
+            if (candidate_len >= missed_suffix_len &&
+                strcmp(candidate + candidate_len - missed_suffix_len, missed_suffix) == 0) {
+                continue;
+            }
+            if (main_project) {
+                main_project = NULL; /* Multiple primary projects make the db ambiguous. */
+                break;
+            }
+            main_project = candidate;
+        }
+        if (main_project) {
+            snprintf(name_out, name_sz, "%s", main_project);
+            ok = true;
+        }
     }
     cbm_store_free_projects(projs, n);
     if (ok && out_store) {

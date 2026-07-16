@@ -897,6 +897,31 @@ TEST(cli_editor_mcp_install) {
     PASS();
 }
 
+TEST(cli_editor_mcp_refreshes_legacy_path_command) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-legacy-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/.claude.json", tmpdir);
+    write_test_file(configpath,
+                    "{\"mcpServers\":{\"codebase-memory-mcp\":{\"command\":"
+                    "\"codebase-memory-mcp\"}}}\n");
+
+    const char *installed = "/new/home/.local/bin/codebase-memory-mcp";
+    int rc = cbm_install_editor_mcp(installed, configpath);
+    char *data = read_test_file_alloc(configpath);
+    bool refreshed = rc == 0 && data && strstr(data, installed) &&
+                     !strstr(data, "\"command\":\"codebase-memory-mcp\"");
+    free(data);
+
+    test_rmdir_r(tmpdir);
+    if (!refreshed)
+        FAIL("legacy PATH-based MCP command must migrate to the installed binary path");
+    PASS();
+}
+
 TEST(cli_editor_mcp_idempotent) {
     /* Port of TestEditorMCPInstallIdempotent */
     char tmpdir[256];
@@ -9676,8 +9701,9 @@ SUITE(cli) {
     RUN_TEST(cli_skill_files_content);
     RUN_TEST(cli_codex_instructions);
 
-    /* Editor MCP: Cursor/Windsurf/Gemini (5 tests — install_test.go) */
+    /* Editor MCP: Cursor/Windsurf/Gemini */
     RUN_TEST(cli_editor_mcp_install);
+    RUN_TEST(cli_editor_mcp_refreshes_legacy_path_command);
     RUN_TEST(cli_editor_mcp_idempotent);
     RUN_TEST(cli_editor_mcp_preserves_others);
     RUN_TEST(cli_editor_mcp_uninstall);

@@ -209,6 +209,42 @@ describe("StatsTab index modal", () => {
     expect(browseCalls()).toBe(before);
   });
 
+  it("submits a remote SSH repository with branch and polling settings", async () => {
+    let submitted: unknown = null;
+    mockProjectsFetch((url, init) => {
+      if (url === "/api/remote-index") {
+        submitted = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ status: "indexing", slot: 0 }), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return undefined;
+    });
+
+    render(<StatsTab onSelectProject={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Index your first repository" }));
+    fireEvent.click(screen.getByRole("button", { name: "Git Remote" }));
+    fireEvent.change(screen.getByLabelText("Repository URL"), {
+      target: { value: "git@github.com:company/repository.git" },
+    });
+    fireEvent.change(screen.getByLabelText("Project ID (optional — permanent, cannot be renamed)"), {
+      target: { value: "repository" },
+    });
+    fireEvent.change(screen.getByLabelText("Branch"), { target: { value: "main" } });
+    fireEvent.change(screen.getByLabelText("Poll interval"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Clone and Index" }));
+
+    await waitFor(() => {
+      expect(submitted).toEqual({
+        remote_url: "git@github.com:company/repository.git",
+        branch: "main",
+        poll_interval_sec: 300,
+        project_name: "repository",
+      });
+    });
+  });
+
   it("shows the backend error when deleting an index fails", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     mockProjectsFetch((url, init) => {
@@ -258,8 +294,9 @@ describe("IndexProgress", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const onDone = vi.fn();
-    render(<IndexProgress onDone={onDone} />);
+    const onComplete = vi.fn();
+    const onDismiss = vi.fn();
+    render(<IndexProgress onComplete={onComplete} onDismiss={onDismiss} />);
 
     // Fast-forward initial poll
     await act(async () => {
@@ -269,10 +306,11 @@ describe("IndexProgress", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/index-status");
     expect(screen.getByText(messages.en.projects.indexingInProgress)).toBeInTheDocument();
     expect(screen.getByText("/path/to/project1")).toBeInTheDocument();
-    expect(onDone).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 
-  it("stops polling and calls onDone when indexing finishes successfully", async () => {
+  it("stops polling and keeps a dismissible success message when indexing finishes", async () => {
     // Backend keeps finished jobs listed with status "done" (src/ui/http_server.c
     // handle_index_status only skips idle slots) — success is a "done" entry,
     // not an empty list.
@@ -286,14 +324,15 @@ describe("IndexProgress", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const onDone = vi.fn();
-    render(<IndexProgress onDone={onDone} />);
+    const onComplete = vi.fn();
+    const onDismiss = vi.fn();
+    render(<IndexProgress onComplete={onComplete} onDismiss={onDismiss} />);
 
     // First poll returns active
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
-    expect(onDone).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
 
     // Indexing finishes
     mockData = [
@@ -304,10 +343,15 @@ describe("IndexProgress", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
 
-    expect(onDone).toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(messages.en.projects.indexingComplete)).toBeInTheDocument();
+    expect(screen.getByText("/path/to/project")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: messages.en.common.dismiss }));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps waiting and does NOT call onDone while the jobs list is empty", async () => {
+  it("keeps waiting and does NOT complete while the jobs list is empty", async () => {
     // An empty list mid-index means the job is not visible (e.g. transient
     // backend state loss) — it must NOT be treated as successful completion.
     let mockData: { slot: number; status: string; path: string }[] = [];
@@ -318,8 +362,9 @@ describe("IndexProgress", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const onDone = vi.fn();
-    render(<IndexProgress onDone={onDone} />);
+    const onComplete = vi.fn();
+    const onDismiss = vi.fn();
+    render(<IndexProgress onComplete={onComplete} onDismiss={onDismiss} />);
 
     // Two empty polls: still waiting, no premature completion
     await act(async () => {
@@ -328,7 +373,7 @@ describe("IndexProgress", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
-    expect(onDone).not.toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     // Job becomes visible and finishes — now completion fires
@@ -336,10 +381,11 @@ describe("IndexProgress", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
-    expect(onDone).toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 
-  it("renders error banner and does NOT call onDone when indexing fails with error status", async () => {
+  it("renders error banner and does NOT complete when indexing fails with error status", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       Promise.resolve({
         json: () => Promise.resolve([
@@ -349,8 +395,9 @@ describe("IndexProgress", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const onDone = vi.fn();
-    render(<IndexProgress onDone={onDone} />);
+    const onComplete = vi.fn();
+    const onDismiss = vi.fn();
+    render(<IndexProgress onComplete={onComplete} onDismiss={onDismiss} />);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2000);
@@ -361,8 +408,8 @@ describe("IndexProgress", () => {
     expect(screen.getByText("/path/to/failed-project")).toBeInTheDocument();
     expect(screen.getByText("OOM Error")).toBeInTheDocument();
 
-    // onDone should not be called automatically
-    expect(onDone).not.toHaveBeenCalled();
+    // Completion should not be reported for failed jobs.
+    expect(onComplete).not.toHaveBeenCalled();
 
     // Click Dismiss button
     const dismissBtn = screen.getByRole("button", { name: messages.en.common.dismiss });
@@ -372,7 +419,7 @@ describe("IndexProgress", () => {
       fireEvent.click(dismissBtn);
     });
 
-    // onDone should be called after manual dismissal
-    expect(onDone).toHaveBeenCalled();
+    // onDismiss should be called after manual dismissal
+    expect(onDismiss).toHaveBeenCalled();
   });
 });

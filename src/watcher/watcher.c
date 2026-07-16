@@ -30,6 +30,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
 #include "foundation/str_util.h"
+#include "git/remote_repo.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -60,6 +61,9 @@ typedef struct {
     uint64_t last_dirty_sig;      /* committed dirty-state signature */
     uint64_t pending_dirty_sig;   /* observed at check time */
     char pending_head[CBM_SZ_64]; /* HEAD observed at check time */
+    bool remote_managed;
+    cbm_remote_repo_config_t remote_config;
+    int64_t next_remote_poll_ns;
 } project_state_t;
 
 /* ── Watcher struct ─────────────────────────────────────────────── */
@@ -560,8 +564,22 @@ void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     if (s) {
         /* Reset backoff — poll immediately on next cycle */
         s->next_poll_ns = 0;
+        s->next_remote_poll_ns = 0;
     }
     cbm_mutex_unlock(&w->projects_lock);
+}
+
+static void load_managed_repo(const char *project_name, const char *root_path,
+                              const cbm_remote_repo_config_t *config, void *user_data) {
+    (void)config;
+    cbm_watcher_watch((cbm_watcher_t *)user_data, project_name, root_path);
+}
+
+int cbm_watcher_load_managed(cbm_watcher_t *w) {
+    if (!w) {
+        return 0;
+    }
+    return cbm_remote_repo_foreach(load_managed_repo, w);
 }
 
 int cbm_watcher_watch_count(cbm_watcher_t *w) {
@@ -590,6 +608,8 @@ static void init_baseline(project_state_t *s) {
     s->baseline_done = true;
 
     if (s->is_git) {
+        s->remote_managed = cbm_remote_repo_load(s->root_path, &s->remote_config) == 0;
+        s->next_remote_poll_ns = 0;
         git_head(s->root_path, s->last_head, sizeof(s->last_head));
         /* last_dirty_sig stays 0 ("clean known"): a tree that is ALREADY
          * dirty at baseline reindexes once on the first poll — the watcher
@@ -600,6 +620,10 @@ static void init_baseline(project_state_t *s) {
         s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
         cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "git", "files",
                      s->file_count > 0 ? "yes" : "0");
+        if (s->remote_managed) {
+            cbm_log_info("watcher.remote", "project", s->project_name, "branch",
+                         s->remote_config.branch);
+        }
     } else {
         cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "none");
     }
@@ -737,6 +761,21 @@ static void poll_project(const char *key, void *val, void *ud) {
     /* Respect adaptive interval */
     if (ctx->now < s->next_poll_ns) {
         return;
+    }
+
+    if (s->remote_managed && ctx->now >= s->next_remote_poll_ns) {
+        char remote_sha[65] = {0};
+        char remote_error[512] = {0};
+        int sync_rc = cbm_remote_repo_sync(s->root_path, &s->remote_config, remote_sha,
+                                           sizeof(remote_sha), remote_error, sizeof(remote_error));
+        s->next_remote_poll_ns =
+            ctx->now + ((int64_t)s->remote_config.poll_interval_sec * NS_PER_SEC);
+        if (sync_rc > 0) {
+            cbm_log_info("watcher.remote_updated", "project", s->project_name, "sha", remote_sha);
+        } else if (sync_rc < 0) {
+            cbm_log_warn("watcher.remote_error", "project", s->project_name, "detail",
+                         remote_error[0] ? remote_error : "sync failed");
+        }
     }
 
     /* Check for changes */

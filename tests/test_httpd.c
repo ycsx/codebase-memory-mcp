@@ -17,6 +17,7 @@
 #include "../src/foundation/platform.h"
 #include "../src/cli/cli.h"
 #include "../src/git/git_context.h" /* #798 follow-up: live-socket git-resolve repro */
+#include "../src/git/remote_repo.h"
 #include "../src/ui/http_server.h"
 #include "test_framework.h"
 #include "test_helpers.h"
@@ -492,6 +493,19 @@ static int ui_delete_make_db_file(const ui_delete_fixture_t *fx, const char *pro
     return th_write_file(path, "test db");
 }
 
+static int ui_delete_make_project_db(const ui_delete_fixture_t *fx, const char *project,
+                                     const char *root_path) {
+    char path[1024];
+    ui_delete_db_path(fx, project, path, sizeof(path));
+    cbm_store_t *store = cbm_store_open_path(path);
+    if (!store) {
+        return -1;
+    }
+    int result = cbm_store_upsert_project(store, project, root_path);
+    cbm_store_close(store);
+    return result == CBM_STORE_OK ? 0 : -1;
+}
+
 static int ui_delete_make_sidecars(const ui_delete_fixture_t *fx, const char *project) {
     char path[1024];
     ui_delete_db_path(fx, project, path, sizeof(path));
@@ -650,6 +664,41 @@ TEST(ui_server_browse_traversal_probe) {
     PASS();
 }
 
+TEST(ui_server_browse_utf8_directory) {
+    char *created = th_mktempdir("cbm_browse_utf8");
+    if (!created) {
+        FAIL("temp directory creation failed");
+    }
+    char base[512];
+    char utf8_dir[768];
+    snprintf(base, sizeof(base), "%s", created);
+    snprintf(utf8_dir, sizeof(utf8_dir), "%s/中文目录", base);
+    if (th_mkdir_p(utf8_dir) != 0) {
+        th_rmtree(base);
+        FAIL("UTF-8 directory creation failed");
+    }
+
+    th_server_t ts;
+    if (th_server_start(&ts) != 0) {
+        th_rmtree(base);
+        FAIL("HTTP server start failed");
+    }
+    char request[2048];
+    char response[8192];
+    snprintf(request, sizeof(request),
+             "GET /api/browse?path=%s/%%E4%%B8%%AD%%E6%%96%%87%%E7%%9B%%AE%%E5%%BD%%95 "
+             "HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+             base);
+    int n = th_http(cbm_http_server_port(ts.srv), request, response, sizeof(response));
+    th_server_stop(&ts);
+    th_rmtree(base);
+
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(response), 200);
+    ASSERT_NOT_NULL(strstr(response, "中文目录"));
+    PASS();
+}
+
 TEST(ui_server_delete_project_unwatches_after_delete) {
     ui_delete_fixture_t fx;
     ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
@@ -673,6 +722,69 @@ TEST(ui_server_delete_project_unwatches_after_delete) {
     ASSERT_FALSE(cbm_file_exists(db));
     ASSERT_FALSE(cbm_file_exists(wal));
     ASSERT_FALSE(cbm_file_exists(shm));
+    ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 0);
+
+    th_server_stop(&ts);
+    ui_delete_fixture_cleanup(&fx);
+    PASS();
+}
+
+TEST(ui_server_delete_project_preserves_local_source) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    ASSERT_EQ(ui_delete_make_project_db(&fx, "ui-delete-local", fx.root_dir), 0);
+    char sentinel[1024];
+    snprintf(sentinel, sizeof(sentinel), "%s/source.txt", fx.root_dir);
+    ASSERT_EQ(th_write_file(sentinel, "keep me"), 0);
+    cbm_watcher_watch(fx.watcher, "ui-delete-local", fx.root_dir);
+
+    th_server_t ts;
+    ASSERT_EQ(th_server_start_with_watcher(&ts, fx.watcher), 0);
+    char resp[4096];
+    int n = ui_delete_request(&ts, "/api/project?name=ui-delete-local", resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_TRUE(cbm_is_dir(fx.root_dir));
+    ASSERT_TRUE(cbm_file_exists(sentinel));
+    ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 0);
+
+    th_server_stop(&ts);
+    ui_delete_fixture_cleanup(&fx);
+    PASS();
+}
+
+TEST(ui_server_delete_project_removes_managed_clone) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    const char *project = "ui-delete-remote";
+    char managed_root[1024];
+    ASSERT_TRUE(cbm_remote_repo_managed_path(project, managed_root, sizeof(managed_root)));
+
+    char git_dir[1100];
+    char marker[1200];
+    char nested_dir[1100];
+    char nested_file[1200];
+    snprintf(git_dir, sizeof(git_dir), "%s/.git", managed_root);
+    snprintf(marker, sizeof(marker), "%s/cbm-remote.json", git_dir);
+    snprintf(nested_dir, sizeof(nested_dir), "%s/src/nested", managed_root);
+    snprintf(nested_file, sizeof(nested_file), "%s/example.txt", nested_dir);
+    ASSERT_EQ(th_mkdir_p(git_dir), 0);
+    ASSERT_EQ(th_mkdir_p(nested_dir), 0);
+    ASSERT_EQ(th_write_file(marker,
+                            "{\"version\":1,\"remote_url\":\"git@example.com:team/repo.git\","
+                            "\"branch\":\"main\",\"poll_interval_sec\":300}"),
+              0);
+    ASSERT_EQ(th_write_file(nested_file, "managed clone"), 0);
+    ASSERT_EQ(ui_delete_make_project_db(&fx, project, managed_root), 0);
+    cbm_watcher_watch(fx.watcher, project, managed_root);
+
+    th_server_t ts;
+    ASSERT_EQ(th_server_start_with_watcher(&ts, fx.watcher), 0);
+    char resp[4096];
+    int n = ui_delete_request(&ts, "/api/project?name=ui-delete-remote", resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_FALSE(cbm_is_dir(managed_root));
     ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 0);
 
     th_server_stop(&ts);
@@ -1207,7 +1319,10 @@ SUITE(httpd) {
     RUN_TEST(ui_server_encoded_slash_not_routed);
     RUN_TEST(ui_server_nul_in_target_rejected);
     RUN_TEST(ui_server_browse_traversal_probe);
+    RUN_TEST(ui_server_browse_utf8_directory);
     RUN_TEST(ui_server_delete_project_unwatches_after_delete);
+    RUN_TEST(ui_server_delete_project_preserves_local_source);
+    RUN_TEST(ui_server_delete_project_removes_managed_clone);
     RUN_TEST(ui_server_delete_project_unwatches_missing_db);
     RUN_TEST(ui_server_delete_project_no_watcher_still_deletes);
     RUN_TEST(ui_server_delete_project_missing_name_keeps_watch);

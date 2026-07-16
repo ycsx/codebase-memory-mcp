@@ -21,6 +21,7 @@ typedef struct cbm_dir cbm_dir_t;
 typedef struct {
     char name[CBM_DIRENT_NAME_MAX];
     bool is_dir;
+    bool is_symlink;
     unsigned char d_type; /* DT_REG, DT_DIR, DT_LNK, etc. (POSIX only, 0 on Windows) */
 } cbm_dirent_t;
 
@@ -72,5 +73,11 @@ FILE *cbm_fopen(const char *path, const char *mode);
  * Returns the process exit code, or -1 on fork/exec failure.
  * POSIX: fork() + execvp(). Windows: CreateProcess with proper quoting. */
 int cbm_exec_no_shell(const char *const *argv);
+
+/* Execute a command without shell interpretation and capture stdout+stderr.
+ * output is always NUL-terminated when output_size > 0. Output beyond the
+ * caller's buffer is drained so the child cannot block on a full pipe.
+ * Returns the process exit code, or -1 on spawn/wait failure. */
+int cbm_exec_capture(const char *const *argv, char *output, size_t output_size);
 
 #endif /* CBM_COMPAT_FS_H */

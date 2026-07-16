@@ -239,7 +239,7 @@ TRACES_SRCS = src/traces/traces.c
 WATCHER_SRCS = src/watcher/watcher.c
 
 # Git context module (new)
-GIT_SRCS = src/git/git_context.c
+GIT_SRCS = src/git/git_context.c src/git/remote_repo.c
 
 # CLI module (new)
 CLI_SRCS = src/cli/cli.c src/cli/progress_sink.c src/cli/hook_augment.c \

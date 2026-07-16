@@ -4669,6 +4669,80 @@ static bool issue704_make_db(const char *dir, const char *filename, const char *
     return ok;
 }
 
+TEST(tool_list_projects_ignores_missed_coverage_helper) {
+    char cache[CBM_SZ_4K];
+#ifdef _WIN32
+    snprintf(cache, sizeof(cache), "build/c/cbm-missed-project-XXXXXX");
+#else
+    snprintf(cache, sizeof(cache), "/tmp/cbm-missed-project-XXXXXX");
+#endif
+    if (!cbm_mkdtemp(cache)) {
+        PASS();
+    }
+
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    ASSERT_TRUE(issue704_make_db(cache, "remote-main.db", "remote-main", "remoteMainFunc"));
+    char main_path[700];
+    snprintf(main_path, sizeof(main_path), "%s/remote-main.db", cache);
+    cbm_store_t *main_store = cbm_store_open_path(main_path);
+    ASSERT_NOT_NULL(main_store);
+    ASSERT_EQ(cbm_store_upsert_project(main_store, "remote-main::missed", cache), CBM_STORE_OK);
+    cbm_store_close(main_store);
+
+    ASSERT_TRUE(issue704_make_db(cache, "ambiguous.db", "first-main", "firstMainFunc"));
+    char ambiguous_path[700];
+    snprintf(ambiguous_path, sizeof(ambiguous_path), "%s/ambiguous.db", cache);
+    cbm_store_t *ambiguous_store = cbm_store_open_path(ambiguous_path);
+    ASSERT_NOT_NULL(ambiguous_store);
+    ASSERT_EQ(cbm_store_upsert_project(ambiguous_store, "second-main", cache), CBM_STORE_OK);
+    cbm_store_close(ambiguous_store);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *list =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"list_projects\",\"arguments\":{}}}");
+    ASSERT_NOT_NULL(list);
+    ASSERT_NOT_NULL(strstr(list, "remote-main"));
+    ASSERT_NULL(strstr(list, "::missed"));
+    ASSERT_NULL(strstr(list, "first-main"));
+    ASSERT_NULL(strstr(list, "second-main"));
+    free(list);
+
+    char *query = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
+             "\"project\":\"remote-main\",\"name_pattern\":\"remoteMainFunc\",\"limit\":5}}}");
+    ASSERT_NOT_NULL(query);
+    ASSERT_NOT_NULL(strstr(query, "remoteMainFunc"));
+    ASSERT_NULL(strstr(query, "not found"));
+    free(query);
+    cbm_mcp_server_free(srv);
+
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    cbm_unlink(main_path);
+    cbm_unlink(ambiguous_path);
+    char side[720];
+    snprintf(side, sizeof(side), "%s-wal", main_path);
+    cbm_unlink(side);
+    snprintf(side, sizeof(side), "%s-shm", main_path);
+    cbm_unlink(side);
+    snprintf(side, sizeof(side), "%s-wal", ambiguous_path);
+    cbm_unlink(side);
+    snprintf(side, sizeof(side), "%s-shm", ambiguous_path);
+    cbm_unlink(side);
+    cbm_rmdir(cache);
+    PASS();
+}
+
 TEST(tool_resolve_store_by_internal_name_issue704) {
     char cache[256];
     snprintf(cache, sizeof(cache), "/tmp/cbm-issue704-XXXXXX");
@@ -6438,6 +6512,7 @@ SUITE(mcp) {
     RUN_TEST(snippet_source_invalid_utf8);
     RUN_TEST(tool_bad_project_name_no_overflow_issue235);
     RUN_TEST(tool_bad_project_error_valid_json_issue235);
+    RUN_TEST(tool_list_projects_ignores_missed_coverage_helper);
     RUN_TEST(tool_resolve_store_by_internal_name_issue704);
 
     /* auto_watch gate (distilled from PR #625) */

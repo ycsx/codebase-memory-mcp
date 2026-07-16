@@ -1,5 +1,6 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { CheckCircle2, GitBranch, RefreshCw } from "lucide-react";
 import { useProjects } from "../hooks/useProjects";
 import { colorForLabel } from "../lib/colors";
 import { useUiMessages } from "../lib/i18n";
@@ -59,6 +60,82 @@ function HealthDot({ name }: { name: string }) {
           {info && <p className="text-foreground/35 text-[10px] mt-0.5">{info}</p>}
         </div>
       </div>
+    </div>
+  );
+}
+
+interface RemoteProjectInfo {
+  managed: boolean;
+  remote_url?: string;
+  branch?: string;
+  poll_interval_sec?: number;
+}
+
+function RemoteProjectControls({ project }: { project: string }) {
+  const t = useUiMessages();
+  const [info, setInfo] = useState<RemoteProjectInfo | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"scheduled" | "error" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/remote-info?project=${encodeURIComponent(project)}`)
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? "Failed");
+        return data as RemoteProjectInfo;
+      })
+      .then((data) => { if (!cancelled) setInfo(data); })
+      .catch(() => { if (!cancelled) setInfo({ managed: false }); });
+    return () => { cancelled = true; };
+  }, [project]);
+
+  const syncNow = async () => {
+    setSyncing(true);
+    setSyncStatus(null);
+    try {
+      const res = await fetch(`/api/remote-sync?project=${encodeURIComponent(project)}`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed");
+      setSyncStatus("scheduled");
+    } catch {
+      setSyncStatus("error");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  if (!info?.managed) return null;
+
+  const pollMinutes = Math.max(1, Math.round((info.poll_interval_sec ?? 300) / 60));
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mt-3 pt-3 border-t border-border/20 text-[10px]">
+      <span
+        className="inline-flex min-w-0 items-center gap-1.5 text-foreground/40"
+        title={info.remote_url}
+      >
+        <GitBranch className="w-3.5 h-3.5 text-primary/70 shrink-0" aria-hidden="true" />
+        <span className="font-medium text-primary/80">{t.projects.gitRemote}</span>
+        <span className="font-mono truncate max-w-[180px]">{info.branch}</span>
+        <span className="text-foreground/20">{t.projects.pollEvery(pollMinutes)}</span>
+      </span>
+      <button
+        type="button"
+        onClick={syncNow}
+        disabled={syncing}
+        className="inline-flex items-center gap-1 rounded-md px-2 py-1 bg-white/[0.04] hover:bg-white/[0.07] text-foreground/45 hover:text-foreground/70 transition-all disabled:opacity-30"
+        title={t.projects.syncNow}
+      >
+        <RefreshCw className={`w-3 h-3 ${syncing ? "animate-spin" : ""}`} aria-hidden="true" />
+        {t.projects.syncNow}
+      </button>
+      {syncStatus && (
+        <span className={syncStatus === "scheduled" ? "text-emerald-400/70" : "text-destructive/80"}>
+          {syncStatus === "scheduled" ? t.projects.syncScheduled : t.projects.syncFailed}
+        </span>
+      )}
     </div>
   );
 }
@@ -168,11 +245,15 @@ function joinPath(base: string, dir: string): string {
 
 function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const t = useUiMessages();
+  const [sourceMode, setSourceMode] = useState<"local" | "remote">("local");
   const [currentPath, setCurrentPath] = useState("");
   const [dirs, setDirs] = useState<string[]>([]);
   const [roots, setRoots] = useState<string[]>(["/"]);
   const [parentPath, setParentPath] = useState("");
   const [projectName, setProjectName] = useState("");
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [remoteBranch, setRemoteBranch] = useState("main");
+  const [pollMinutes, setPollMinutes] = useState(5);
   const [filter, setFilter] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -205,8 +286,8 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
     finally { if (!silent) setLoading(false); }
   }, []);
 
-  useEffect(() => { browse(); }, [browse]);
-  useEffect(() => { filterRef.current?.focus(); }, []);
+  useEffect(() => { if (sourceMode === "local") void browse(); }, [browse, sourceMode]);
+  useEffect(() => { if (sourceMode === "local") filterRef.current?.focus(); }, [sourceMode]);
 
   /* Windows only: when the user types a drive path into the Repository path
    * field, refresh the folder listing to match (debounced). On Windows, typing
@@ -228,13 +309,40 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
   useEffect(() => { setActiveIndex(0); }, [filter, currentPath]);
 
-  const submit = async (path = currentPath) => {
+  const submitLocal = async (path = currentPath) => {
     if (!path) return;
     setSubmitting(true); setError(null);
     try {
       const body: { root_path: string; project_name?: string } = { root_path: path };
       if (projectName.trim()) body.project_name = projectName.trim();
       const res = await fetch("/api/index", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed");
+      onCreated(); onClose();
+    } catch (e) { setError(e instanceof Error ? e.message : "Failed"); }
+    finally { setSubmitting(false); }
+  };
+
+  const submitRemote = async () => {
+    if (!remoteUrl.trim() || !remoteBranch.trim()) return;
+    setSubmitting(true); setError(null);
+    try {
+      const body: {
+        remote_url: string;
+        branch: string;
+        poll_interval_sec: number;
+        project_name?: string;
+      } = {
+        remote_url: remoteUrl.trim(),
+        branch: remoteBranch.trim(),
+        poll_interval_sec: pollMinutes * 60,
+      };
+      if (projectName.trim()) body.project_name = projectName.trim();
+      const res = await fetch("/api/remote-index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed");
       onCreated(); onClose();
@@ -252,7 +360,7 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
     } else if (e.key === "Enter" && filteredDirs.length > 0) {
       e.preventDefault();
       const dir = filteredDirs.length === 1 ? filteredDirs[0] : filteredDirs[activeIndex];
-      if (filteredDirs.length === 1) void submit(joinPath(currentPath, dir));
+      if (filteredDirs.length === 1) void submitLocal(joinPath(currentPath, dir));
       else void browse(joinPath(currentPath, dir));
     }
   };
@@ -288,23 +396,57 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-      <div className="relative bg-[#0e2028] border border-border/40 rounded-2xl w-full max-w-2xl shadow-2xl flex flex-col overflow-hidden" style={{ height: "min(82vh, 680px)" }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className="relative bg-[#0e2028] border border-border/40 rounded-2xl w-full max-w-2xl shadow-2xl flex flex-col overflow-hidden"
+        style={sourceMode === "local" ? { height: "min(82vh, 680px)" } : { maxHeight: "min(82vh, 520px)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="px-5 pt-5 pb-3 shrink-0">
-          <h3 className="text-[15px] font-semibold text-foreground/90 mb-1">{t.index.selectRepositoryFolder}</h3>
-          <p className="text-[12px] text-foreground/30">{t.index.instructions}</p>
+          <h3 className="text-[15px] font-semibold text-foreground/90 mb-1">{t.index.createIndex}</h3>
+          <p className="text-[12px] text-foreground/30">
+            {sourceMode === "local" ? t.index.instructions : t.index.remoteInstructions}
+          </p>
+          <div className="inline-flex mt-3 rounded-lg bg-white/[0.04] p-1">
+            <button
+              onClick={() => setSourceMode("local")}
+              aria-pressed={sourceMode === "local"}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${sourceMode === "local" ? "bg-primary/20 text-primary" : "text-foreground/35 hover:text-foreground/60"}`}
+            >
+              {t.index.localSource}
+            </button>
+            <button
+              onClick={() => setSourceMode("remote")}
+              aria-pressed={sourceMode === "remote"}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${sourceMode === "remote" ? "bg-primary/20 text-primary" : "text-foreground/35 hover:text-foreground/60"}`}
+            >
+              {t.index.remoteSource}
+            </button>
+          </div>
         </div>
 
         <div className="px-5 pb-3 grid grid-cols-[1fr_220px] gap-3 shrink-0">
           <label className="block">
-            <span className="block text-[10px] uppercase tracking-widest text-foreground/25 mb-1">{t.index.repositoryPath}</span>
-            <input
-              aria-label={t.index.repositoryPath}
-              value={currentPath}
-              onChange={(e) => setCurrentPath(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && /^[A-Za-z]:/.test(currentPath.replace(/\\/g, "/"))) { e.preventDefault(); void browse(currentPath); } }}
-              className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground font-mono outline-none focus:border-primary/40"
-            />
+            <span className="block text-[10px] uppercase tracking-widest text-foreground/25 mb-1">
+              {sourceMode === "local" ? t.index.repositoryPath : t.index.repositoryUrl}
+            </span>
+            {sourceMode === "local" ? (
+              <input
+                aria-label={t.index.repositoryPath}
+                value={currentPath}
+                onChange={(e) => setCurrentPath(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && /^[A-Za-z]:/.test(currentPath.replace(/\\/g, "/"))) { e.preventDefault(); void browse(currentPath); } }}
+                className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground font-mono outline-none focus:border-primary/40"
+              />
+            ) : (
+              <input
+                aria-label={t.index.repositoryUrl}
+                value={remoteUrl}
+                placeholder={t.index.repositoryUrlPlaceholder}
+                onChange={(e) => setRemoteUrl(e.target.value)}
+                className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground font-mono outline-none focus:border-primary/40 placeholder:text-foreground/20"
+              />
+            )}
           </label>
           <label className="block">
             <span className="block text-[10px] uppercase tracking-widest text-foreground/25 mb-1">{t.index.projectName}</span>
@@ -319,7 +461,36 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
           </label>
         </div>
 
-        <div className="px-5 pb-3 flex items-center gap-2 shrink-0">
+        {sourceMode === "remote" && (
+          <div className="px-5 pb-4 grid grid-cols-2 gap-3 shrink-0">
+            <label className="block">
+              <span className="block text-[10px] uppercase tracking-widest text-foreground/25 mb-1">{t.index.branch}</span>
+              <input
+                aria-label={t.index.branch}
+                value={remoteBranch}
+                onChange={(e) => setRemoteBranch(e.target.value)}
+                className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground font-mono outline-none focus:border-primary/40"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] uppercase tracking-widest text-foreground/25 mb-1">{t.index.pollInterval}</span>
+              <div className="flex items-center gap-2">
+                <input
+                  aria-label={t.index.pollInterval}
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={pollMinutes}
+                  onChange={(e) => setPollMinutes(Math.max(1, Math.min(60, Number(e.target.value) || 1)))}
+                  className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground outline-none focus:border-primary/40"
+                />
+                <span className="text-[11px] text-foreground/25 whitespace-nowrap">{t.index.minutes}</span>
+              </div>
+            </label>
+          </div>
+        )}
+
+        {sourceMode === "local" && <div className="px-5 pb-3 flex items-center gap-2 shrink-0">
           <input
             ref={filterRef}
             value={filter}
@@ -340,10 +511,10 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
               </button>
             ))}
           </div>
-        </div>
+        </div>}
 
         {/* Breadcrumb */}
-        <div className="px-5 py-2 border-y border-border/20 flex items-center gap-0.5 overflow-x-auto text-[11px] shrink-0">
+        {sourceMode === "local" && <div className="px-5 py-2 border-y border-border/20 flex items-center gap-0.5 overflow-x-auto text-[11px] shrink-0">
           {!isWinPath && (
             <button onClick={() => browse("/")} className="text-primary/60 hover:text-primary shrink-0 transition-colors">/</button>
           )}
@@ -358,10 +529,10 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
               </button>
             </span>
           ))}
-        </div>
+        </div>}
 
         {/* Directory list */}
-        <ScrollArea className="flex-1 min-h-0">
+        {sourceMode === "local" ? <ScrollArea className="flex-1 min-h-0">
           <div className="px-2 py-1">
             {/* Go up */}
             {currentPath !== "/" && (
@@ -395,7 +566,7 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
                   </button>
                   <button
                     aria-label={t.index.indexDirectory(d)}
-                    onClick={() => submit(joinPath(currentPath, d))}
+                    onClick={() => submitLocal(joinPath(currentPath, d))}
                     disabled={submitting}
                     className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 px-2 py-1 rounded-md bg-primary/15 hover:bg-primary/25 text-primary text-[10px] font-medium transition-all disabled:opacity-30"
                   >
@@ -405,17 +576,23 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
               ))
             )}
           </div>
-        </ScrollArea>
+        </ScrollArea> : <div className="px-5 py-4 border-y border-border/20">
+          <div className="py-1">
+            <p className="text-[12px] text-foreground/55 font-medium">{remoteBranch || "main"}</p>
+            <p className="text-[11px] text-foreground/25 font-mono mt-1 break-all">{remoteUrl || t.index.repositoryUrlPlaceholder}</p>
+            <p className="text-[10px] text-foreground/20 mt-3">{t.index.pollInterval}: {pollMinutes} {t.index.minutes}</p>
+          </div>
+        </div>}
 
         {/* Footer */}
         <div className="px-5 py-4 border-t border-border/20 shrink-0">
           {error && <div className="rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2 mb-3"><p className="text-destructive text-[11px]">{error}</p></div>}
           <div className="flex items-center justify-between">
-            <p className="text-[11px] text-foreground/25 font-mono truncate max-w-[250px]">{currentPath}</p>
+            <p className="text-[11px] text-foreground/25 font-mono truncate max-w-[250px]">{sourceMode === "local" ? currentPath : remoteUrl}</p>
             <div className="flex gap-2 shrink-0">
               <button onClick={onClose} className="px-3 py-2 rounded-lg text-[12px] text-foreground/40 hover:bg-white/[0.04] font-medium transition-all">{t.common.cancel}</button>
-              <button onClick={() => submit()} disabled={submitting || !currentPath} className="px-4 py-2 rounded-lg bg-primary/20 hover:bg-primary/30 text-primary text-[12px] font-medium transition-all disabled:opacity-30">
-                {submitting ? t.index.starting : t.index.indexThisFolder}
+              <button onClick={() => sourceMode === "local" ? submitLocal() : submitRemote()} disabled={submitting || (sourceMode === "local" ? !currentPath : !remoteUrl.trim() || !remoteBranch.trim())} className="px-4 py-2 rounded-lg bg-primary/20 hover:bg-primary/30 text-primary text-[12px] font-medium transition-all disabled:opacity-30">
+                {submitting ? t.index.starting : sourceMode === "local" ? t.index.indexThisFolder : t.index.cloneAndIndex}
               </button>
             </div>
           </div>
@@ -427,7 +604,13 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
 /* ── Index Progress ─────────────────────────────────────── */
 
-export function IndexProgress({ onDone }: { onDone: () => void }) {
+export function IndexProgress({
+  onComplete,
+  onDismiss,
+}: {
+  onComplete: () => void;
+  onDismiss: () => void;
+}) {
   const t = useUiMessages();
   const [jobs, setJobs] = useState<{ slot: number; status: string; path: string; error?: string }[]>([]);
   const [hasActive, setHasActive] = useState(true);
@@ -445,7 +628,7 @@ export function IndexProgress({ onDone }: { onDone: () => void }) {
           setHasActive(false);
           const hasErrors = data.some((j: { status: string }) => j.status === "error");
           if (!hasErrors) {
-            onDone();
+            onComplete();
           }
         }
       } catch (error) {
@@ -453,12 +636,13 @@ export function IndexProgress({ onDone }: { onDone: () => void }) {
       }
     }, 2000);
     return () => clearInterval(poll);
-  }, [onDone, hasActive]);
+  }, [onComplete, hasActive]);
 
   const active = jobs.filter((j) => j.status === "indexing");
+  const completed = jobs.filter((j) => j.status === "done");
   const errors = jobs.filter((j) => j.status === "error");
 
-  if (active.length === 0 && errors.length === 0) return null;
+  if (active.length === 0 && completed.length === 0 && errors.length === 0) return null;
 
   return (
     <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 mb-6">
@@ -468,6 +652,15 @@ export function IndexProgress({ onDone }: { onDone: () => void }) {
           <div>
             <p className="text-[12px] text-primary font-medium">{t.projects.indexingInProgress}</p>
             <p className="text-[11px] text-foreground/30 font-mono">{j.path}</p>
+          </div>
+        </div>
+      ))}
+      {completed.map((j) => (
+        <div key={j.slot} className="flex items-start gap-3 mt-3 first:mt-0 p-3 border border-emerald-500/20 bg-emerald-500/5 text-emerald-600">
+          <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+          <div className="flex-1 min-w-0">
+            <p className="text-[12px] font-semibold">{t.projects.indexingComplete}</p>
+            <p className="text-[11px] font-mono truncate">{j.path}</p>
           </div>
         </div>
       ))}
@@ -481,11 +674,11 @@ export function IndexProgress({ onDone }: { onDone: () => void }) {
           </div>
         </div>
       ))}
-      {errors.length > 0 && (
+      {(completed.length > 0 || errors.length > 0) && (
         <div className="flex justify-end mt-3">
           <button
-            onClick={onDone}
-            className="px-3 py-1 rounded bg-destructive/10 hover:bg-destructive/20 text-destructive text-[11px] font-medium transition-all"
+            onClick={onDismiss}
+            className="px-3 py-1 rounded bg-foreground/5 hover:bg-foreground/10 text-foreground/60 text-[11px] font-medium transition-all"
           >
             {t.common.dismiss}
           </button>
@@ -544,7 +737,9 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
           </div>
         )}
 
-        {indexing && <IndexProgress onDone={() => { setIndexing(false); refresh(); }} />}
+        {indexing && (
+          <IndexProgress onComplete={refresh} onDismiss={() => setIndexing(false)} />
+        )}
 
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-[15px] font-semibold text-foreground/80">{t.projects.indexedProjects}</h2>
@@ -599,6 +794,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
                     </div>
                   </>
                 )}
+                <RemoteProjectControls project={p.project.name} />
               </div>
             );
           })}

@@ -114,6 +114,7 @@ cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
     d->entry.name[nlen] = '\0';
     free(u8);
     d->entry.is_dir = (d->find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    d->entry.is_symlink = (d->find_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
     d->entry.d_type = 0;
     return &d->entry;
 }
@@ -607,6 +608,97 @@ int cbm_exec_no_shell(const char *const *argv) {
     return (int)exit_code;
 }
 
+int cbm_exec_capture(const char *const *argv, char *output, size_t output_size) {
+    if (output && output_size > 0) {
+        output[0] = '\0';
+    }
+    if (!argv || !argv[0]) {
+        return CBM_NOT_FOUND;
+    }
+
+    SECURITY_ATTRIBUTES sa = {.nLength = sizeof(sa), .bInheritHandle = TRUE};
+    HANDLE read_pipe = NULL;
+    HANDLE write_pipe = NULL;
+    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
+        return CBM_NOT_FOUND;
+    }
+    (void)SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    wchar_t *cmdline = cbm_build_cmdline(argv);
+    if (nul == INVALID_HANDLE_VALUE || !cmdline) {
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+        if (nul != INVALID_HANDLE_VALUE) {
+            CloseHandle(nul);
+        }
+        free(cmdline);
+        return CBM_NOT_FOUND;
+    }
+
+    HANDLE inherit[] = {write_pipe, nul};
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attr = malloc(attr_size);
+    BOOL attr_initialized =
+        attr && InitializeProcThreadAttributeList(attr, 1, 0, &attr_size);
+    BOOL attr_ready =
+        attr_initialized &&
+        UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                  sizeof(inherit), NULL, NULL);
+
+    STARTUPINFOEXW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdOutput = write_pipe;
+    si.StartupInfo.hStdError = write_pipe;
+    si.StartupInfo.hStdInput = nul;
+    si.lpAttributeList = attr;
+
+    BOOL started =
+        attr_ready &&
+        CreateProcessW(NULL, cmdline, NULL, NULL, TRUE,
+                       CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                       &si.StartupInfo, &pi);
+    free(cmdline);
+    if (attr) {
+        if (attr_initialized) {
+            DeleteProcThreadAttributeList(attr);
+        }
+        free(attr);
+    }
+    CloseHandle(write_pipe);
+    CloseHandle(nul);
+    if (!started) {
+        CloseHandle(read_pipe);
+        return CBM_NOT_FOUND;
+    }
+
+    size_t used = 0;
+    char chunk[1024];
+    DWORD got = 0;
+    while (ReadFile(read_pipe, chunk, (DWORD)sizeof(chunk), &got, NULL) && got > 0) {
+        if (output && output_size > 1 && used < output_size - 1) {
+            size_t room = output_size - 1 - used;
+            size_t take = got < room ? (size_t)got : room;
+            memcpy(output + used, chunk, take);
+            used += take;
+            output[used] = '\0';
+        }
+    }
+    CloseHandle(read_pipe);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = (DWORD)CBM_NOT_FOUND;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)exit_code;
+}
+
 #else /* POSIX */
 
 /* ── POSIX implementation ────────────────────────────────── */
@@ -659,6 +751,7 @@ cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
         memcpy(d->entry.name, de->d_name, nlen);
         d->entry.name[nlen] = '\0';
         d->entry.is_dir = (de->d_type == DT_DIR);
+        d->entry.is_symlink = (de->d_type == DT_LNK);
         d->entry.d_type = de->d_type;
         return &d->entry;
     }
@@ -798,6 +891,57 @@ int cbm_exec_no_shell(const char *const *argv) {
         return WEXITSTATUS(status);
     }
     return CBM_NOT_FOUND; /* killed by signal */
+}
+
+int cbm_exec_capture(const char *const *argv, char *output, size_t output_size) {
+    if (output && output_size > 0) {
+        output[0] = '\0';
+    }
+    if (!argv || !argv[0]) {
+        return CBM_NOT_FOUND;
+    }
+
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return CBM_NOT_FOUND;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return CBM_NOT_FOUND;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        (void)dup2(fds[1], STDOUT_FILENO);
+        (void)dup2(fds[1], STDERR_FILENO);
+        if (fds[1] > STDERR_FILENO) {
+            close(fds[1]);
+        }
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+
+    close(fds[1]);
+    size_t used = 0;
+    char chunk[1024];
+    ssize_t got;
+    while ((got = read(fds[0], chunk, sizeof(chunk))) > 0) {
+        if (output && output_size > 1 && used < output_size - 1) {
+            size_t room = output_size - 1 - used;
+            size_t take = (size_t)got < room ? (size_t)got : room;
+            memcpy(output + used, chunk, take);
+            used += take;
+            output[used] = '\0';
+        }
+    }
+    close(fds[0]);
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return CBM_NOT_FOUND;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : CBM_NOT_FOUND;
 }
 
 #endif /* _WIN32 */

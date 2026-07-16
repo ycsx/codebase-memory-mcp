@@ -53,6 +53,10 @@ void cbm_watcher_unwatch(cbm_watcher_t *w, const char *project_name);
 /* Refresh a project's timestamp (resets adaptive backoff). */
 void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name);
 
+/* Discover repositories cloned into the managed remote-repository cache and
+ * add them to the watch list. Returns the number discovered. */
+int cbm_watcher_load_managed(cbm_watcher_t *w);
+
 /* ── Polling ────────────────────────────────────────────────────── */
 
 /* Run a single poll cycle — check each watched project for changes.

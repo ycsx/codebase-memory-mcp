@@ -22,6 +22,7 @@
 #include "watcher/watcher.h"
 #include "cli/cli.h"
 #include "git/git_context.h"
+#include "git/remote_repo.h"
 
 #if defined(HAVE_LIBGIT2)
 #include <git2.h> /* git_repository_open, git_remote_lookup, git_remote_url */
@@ -143,6 +144,10 @@ struct cbm_http_server {
 typedef struct {
     char root_path[1024];
     char project_name[256];
+    char remote_url[CBM_REMOTE_URL_MAX];
+    char remote_branch[CBM_REMOTE_BRANCH_MAX];
+    int poll_interval_sec;
+    struct cbm_watcher *watcher;
     atomic_int status; /* 0=idle, 1=running, 2=done, 3=error */
     char error_msg[256];
 #ifndef _WIN32
@@ -648,8 +653,6 @@ static void handle_process_kill(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
 /* ── Directory browser ────────────────────────────────────────── */
 
-#include <dirent.h>
-
 static void append_roots_json(char *buf, size_t bufsz, int *pos) {
     http_appendf(buf, bufsz, pos, ",\"roots\":[");
 #ifdef _WIN32
@@ -693,7 +696,7 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         return;
     }
 
-    DIR *dir = opendir(path);
+    cbm_dir_t *dir = cbm_opendir(path);
     if (!dir) {
         cbm_http_replyf(c, 403, g_cors_json, "{\"error\":\"cannot open directory\"}");
         return;
@@ -702,19 +705,18 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     /* Build JSON response */
     char buf[32768];
     int pos = 0;
-    http_appendf(buf, sizeof(buf), &pos, "{\"path\":\"%s\",\"dirs\":[", path);
+    char escaped_path[2048];
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), path);
+    http_appendf(buf, sizeof(buf), &pos, "{\"path\":\"%s\",\"dirs\":[", escaped_path);
 
-    struct dirent *ent;
+    cbm_dirent_t *ent;
     int count = 0;
-    while ((ent = readdir(dir)) != NULL) {
+    while ((ent = cbm_readdir(dir)) != NULL) {
         /* Skip hidden dirs and . / .. */
-        if (ent->d_name[0] == '.')
+        if (ent->name[0] == '.')
             continue;
 
-        /* Check if it's actually a directory */
-        char full[2048];
-        snprintf(full, sizeof(full), "%s/%s", path, ent->d_name);
-        if (!cbm_is_dir(full))
+        if (!ent->is_dir)
             continue;
 
         if (count > 0)
@@ -722,7 +724,7 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         /* Escape directory name to prevent XSS (e.g., names with quotes/angle brackets) */
         {
             char esc[512];
-            cbm_json_escape(esc, (int)sizeof(esc), ent->d_name);
+            cbm_json_escape(esc, (int)sizeof(esc), ent->name);
             http_appendf(buf, sizeof(buf), &pos, "\"%s\"", esc);
         }
         if (pos >= (int)sizeof(buf)) {
@@ -733,7 +735,7 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         if (count >= 200)
             break; /* safety limit */
     }
-    closedir(dir);
+    cbm_closedir(dir);
 
     /* Parent path — escape to prevent injection */
     char parent[1024];
@@ -946,6 +948,32 @@ static bool resolve_self_executable(char *out, size_t outsz) {
 }
 #endif
 
+static bool root_path_for_project(const char *project, char *root_path, size_t root_path_size) {
+    if (!root_path || root_path_size == 0) {
+        return false;
+    }
+    root_path[0] = '\0';
+    char db_path[1024];
+    db_path_for_project(project, db_path, sizeof(db_path));
+    if (db_path[0] == '\0' || !cbm_file_exists(db_path)) {
+        return false;
+    }
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    if (!store) {
+        return false;
+    }
+    cbm_project_t stored_project;
+    memset(&stored_project, 0, sizeof(stored_project));
+    bool found = cbm_store_get_project(store, project, &stored_project) == CBM_STORE_OK &&
+                 stored_project.root_path && stored_project.root_path[0];
+    if (found) {
+        snprintf(root_path, root_path_size, "%s", stored_project.root_path);
+    }
+    cbm_project_free_fields(&stored_project);
+    cbm_store_close(store);
+    return found;
+}
+
 bool cbm_http_server_resolve_binary_path(const char *argv0, char *out, size_t outsz) {
     if (!out || outsz == 0) {
         return false;
@@ -985,9 +1013,38 @@ void cbm_http_server_set_binary_path(const char *path) {
 }
 
 /* Index via subprocess — isolates crashes from the main process. */
+static void set_job_error(index_job_t *job, const char *message) {
+    if (!job) {
+        return;
+    }
+    snprintf(job->error_msg, sizeof(job->error_msg), "%s",
+             message && message[0] ? message : "operation failed");
+    for (char *p = job->error_msg; *p; p++) {
+        if (*p == '\r' || *p == '\n' || *p == '\t') {
+            *p = ' ';
+        }
+    }
+}
+
 static void *index_thread_fn(void *arg) {
     index_job_t *job = arg;
     cbm_log_info("ui.index.start", "path", job->root_path);
+
+    if (job->remote_url[0]) {
+        char remote_error[1024] = {0};
+        if (cbm_remote_repo_prepare(job->project_name, job->remote_url, job->remote_branch,
+                                    job->poll_interval_sec, job->root_path,
+                                    sizeof(job->root_path), remote_error,
+                                    sizeof(remote_error)) != 0) {
+            set_job_error(job, remote_error);
+            atomic_store(&job->status, 3);
+            cbm_log_warn("ui.remote.prepare_failed", "project", job->project_name, "detail",
+                         job->error_msg);
+            return NULL;
+        }
+        cbm_log_info("ui.remote.prepared", "project", job->project_name, "branch",
+                     job->remote_branch);
+    }
 
     /* Use stored binary path, or try to find it */
     const char *bin = g_binary_path;
@@ -1170,13 +1227,17 @@ static void *index_thread_fn(void *arg) {
         atomic_store(&job->status, 3);
     } else {
         atomic_store(&job->status, 2);
+        if (job->remote_url[0] && job->watcher) {
+            cbm_watcher_watch(job->watcher, job->project_name, job->root_path);
+        }
     }
     cbm_log_info("ui.index.done", "path", job->root_path, "rc", exit_code == 0 ? "ok" : "err");
     return NULL;
 }
 
 /* POST /api/index — body: {"root_path": "/abs/path", "project_name": "..."} */
-static void handle_index_start(cbm_http_conn_t *c, const cbm_http_req_t *req) {
+static void handle_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
+                               const cbm_http_req_t *req) {
     if (req->body_len == 0 || req->body_len > 4096) {
         cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
         return;
@@ -1223,6 +1284,10 @@ static void handle_index_start(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     index_job_t *job = &g_index_jobs[slot];
     snprintf(job->root_path, sizeof(job->root_path), "%s", rpath);
     snprintf(job->project_name, sizeof(job->project_name), "%s", project_name);
+    job->remote_url[0] = '\0';
+    job->remote_branch[0] = '\0';
+    job->poll_interval_sec = 0;
+    job->watcher = srv->watcher;
     job->error_msg[0] = '\0';
     atomic_store(&job->status, 1);
     yyjson_doc_free(doc);
@@ -1239,6 +1304,179 @@ static void handle_index_start(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
     cbm_http_replyf(c, 202, g_cors_json, "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\"}",
                     slot, job->root_path);
+}
+
+/* POST /api/remote-index — clone a managed SSH repository and index it. */
+static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
+                                      const cbm_http_req_t *req) {
+    if (req->body_len == 0 || req->body_len > 4096) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
+        return;
+    }
+    yyjson_doc *doc = yyjson_read(req->body, req->body_len, 0);
+    if (!doc) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
+        return;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *url_value = yyjson_obj_get(root, "remote_url");
+    yyjson_val *branch_value = yyjson_obj_get(root, "branch");
+    yyjson_val *project_value = yyjson_obj_get(root, "project_name");
+    yyjson_val *poll_value = yyjson_obj_get(root, "poll_interval_sec");
+    const char *remote_url = yyjson_is_str(url_value) ? yyjson_get_str(url_value) : NULL;
+    const char *branch = yyjson_is_str(branch_value) ? yyjson_get_str(branch_value) : "main";
+    const char *requested_project =
+        yyjson_is_str(project_value) ? yyjson_get_str(project_value) : "";
+    int poll_interval_sec = yyjson_is_int(poll_value) ? (int)yyjson_get_int(poll_value) : 300;
+
+    char normalized_url[CBM_REMOTE_URL_MAX] = {0};
+    if (!cbm_remote_repo_normalize_url(remote_url, normalized_url, sizeof(normalized_url))) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 400, g_cors_json,
+                        "{\"error\":\"unsupported repository URL; use git@host:path, ssh://, or https://host/path\"}");
+        return;
+    }
+    if (!cbm_remote_repo_validate_branch(branch)) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid branch name\"}");
+        return;
+    }
+    if (poll_interval_sec < 60 || poll_interval_sec > 3600) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 400, g_cors_json,
+                        "{\"error\":\"poll interval must be between 60 and 3600 seconds\"}");
+        return;
+    }
+
+    char project_name[CBM_REMOTE_PROJECT_MAX] = {0};
+    bool project_ok = false;
+    if (requested_project[0]) {
+        size_t project_len = strlen(requested_project);
+        project_ok = project_len < sizeof(project_name) &&
+                     cbm_validate_project_name(requested_project);
+        if (project_ok) {
+            memcpy(project_name, requested_project, project_len + 1);
+        }
+    } else {
+        project_ok = cbm_remote_repo_default_project(normalized_url, project_name,
+                                                      sizeof(project_name));
+    }
+    if (!project_ok) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid project ID\"}");
+        return;
+    }
+
+    char managed_path[1024];
+    if (!cbm_remote_repo_managed_path(project_name, managed_path, sizeof(managed_path))) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"cannot resolve managed path\"}");
+        return;
+    }
+    char current_root[1024];
+    if (root_path_for_project(project_name, current_root, sizeof(current_root)) &&
+        strcmp(current_root, managed_path) != 0) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 409, g_cors_json,
+                        "{\"error\":\"project ID is already used by another repository\"}");
+        return;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        int status = atomic_load(&g_index_jobs[i].status);
+        if (status == 1 && strcmp(g_index_jobs[i].project_name, project_name) == 0) {
+            yyjson_doc_free(doc);
+            cbm_http_replyf(c, 409, g_cors_json,
+                            "{\"error\":\"repository is already being indexed\"}");
+            return;
+        }
+        if (slot < 0 && (status == 0 || status == 2 || status == 3)) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
+        return;
+    }
+
+    index_job_t *job = &g_index_jobs[slot];
+    snprintf(job->root_path, sizeof(job->root_path), "%s", managed_path);
+    snprintf(job->project_name, sizeof(job->project_name), "%s", project_name);
+    snprintf(job->remote_url, sizeof(job->remote_url), "%s", normalized_url);
+    snprintf(job->remote_branch, sizeof(job->remote_branch), "%s", branch);
+    job->poll_interval_sec = poll_interval_sec;
+    job->watcher = srv->watcher;
+    job->error_msg[0] = '\0';
+    atomic_store(&job->status, 1);
+    yyjson_doc_free(doc);
+
+    cbm_thread_t tid;
+    if (cbm_thread_create(&tid, 0, index_thread_fn, job) != 0) {
+        atomic_store(&job->status, 3);
+        set_job_error(job, "thread creation failed");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
+        return;
+    }
+    cbm_thread_detach(&tid);
+
+    char escaped_path[2048];
+    char escaped_project[512];
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), job->root_path);
+    cbm_json_escape(escaped_project, (int)sizeof(escaped_project), project_name);
+    cbm_http_replyf(c, 202, g_cors_json,
+                    "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\",\"project\":\"%s\"}",
+                    slot, escaped_path, escaped_project);
+}
+
+static void handle_remote_info(cbm_http_conn_t *c, const cbm_http_req_t *req) {
+    char project[256] = {0};
+    if (!cbm_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
+        !cbm_validate_project_name(project)) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project\"}");
+        return;
+    }
+    char root_path[1024];
+    if (!root_path_for_project(project, root_path, sizeof(root_path))) {
+        cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
+        return;
+    }
+    cbm_remote_repo_config_t config;
+    if (cbm_remote_repo_load(root_path, &config) != 0) {
+        cbm_http_replyf(c, 200, g_cors_json, "{\"managed\":false}");
+        return;
+    }
+    char escaped_url[2048];
+    char escaped_branch[512];
+    cbm_json_escape(escaped_url, (int)sizeof(escaped_url), config.remote_url);
+    cbm_json_escape(escaped_branch, (int)sizeof(escaped_branch), config.branch);
+    cbm_http_replyf(c, 200, g_cors_json,
+                    "{\"managed\":true,\"remote_url\":\"%s\",\"branch\":\"%s\",\"poll_interval_sec\":%d}",
+                    escaped_url, escaped_branch, config.poll_interval_sec);
+}
+
+static void handle_remote_sync(cbm_http_server_t *srv, cbm_http_conn_t *c,
+                               const cbm_http_req_t *req) {
+    char project[256] = {0};
+    if (!cbm_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
+        !cbm_validate_project_name(project)) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project\"}");
+        return;
+    }
+    char root_path[1024];
+    cbm_remote_repo_config_t config;
+    if (!root_path_for_project(project, root_path, sizeof(root_path)) ||
+        cbm_remote_repo_load(root_path, &config) != 0) {
+        cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"managed repository not found\"}");
+        return;
+    }
+    if (!srv->watcher) {
+        cbm_http_replyf(c, 503, g_cors_json, "{\"error\":\"watcher unavailable\"}");
+        return;
+    }
+    cbm_watcher_touch(srv->watcher, project);
+    cbm_http_replyf(c, 202, g_cors_json, "{\"status\":\"scheduled\"}");
 }
 
 /* GET /api/index-status — returns status of all index jobs */
@@ -1279,6 +1517,9 @@ static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
+    char managed_root[1024] = {0};
+    bool has_managed_root = root_path_for_project(name, managed_root, sizeof(managed_root));
+
     /* The MCP implementation closes its cached SQLite store before unlinking.
      * Calling it here matters on Windows, where an open database handle prevents
      * deletion; the previous direct unlink always failed after the UI loaded a graph. */
@@ -1306,12 +1547,19 @@ static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
     yyjson_doc *payload_doc = yyjson_read(payload, strlen(payload), 0);
     yyjson_val *payload_root = payload_doc ? yyjson_doc_get_root(payload_doc) : NULL;
     yyjson_val *status_val = payload_root ? yyjson_obj_get(payload_root, "status") : NULL;
-    const char *status = status_val && yyjson_is_str(status_val) ? yyjson_get_str(status_val) : NULL;
+    const char *status =
+        status_val && yyjson_is_str(status_val) ? yyjson_get_str(status_val) : NULL;
     if (status && strcmp(status, "not_found") == 0) {
         http_status = 404;
     }
 
     if (http_status == 200) {
+        if (has_managed_root) {
+            int cleanup = cbm_remote_repo_remove_managed(name, managed_root);
+            if (cleanup < 0) {
+                cbm_log_warn("ui.project.clone_cleanup_failed", "name", name, "path", managed_root);
+            }
+        }
         cbm_log_info("ui.project.deleted", "name", name);
     } else {
         cbm_log_warn("ui.project.delete_failed", "name", name, "detail", payload);
@@ -1804,7 +2052,26 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
 
     /* POST /api/index → start background indexing */
     if (is_post && cbm_http_path_match(req->path, "/api/index")) {
-        handle_index_start(c, req);
+        handle_index_start(srv, c, req);
+        return;
+    }
+
+
+    /* POST /api/remote-index → clone a managed Git repository and index it */
+    if (is_post && cbm_http_path_match(req->path, "/api/remote-index")) {
+        handle_remote_index_start(srv, c, req);
+        return;
+    }
+
+    /* GET /api/remote-info → managed remote settings for a project */
+    if (is_get && cbm_http_path_match(req->path, "/api/remote-info*")) {
+        handle_remote_info(c, req);
+        return;
+    }
+
+    /* POST /api/remote-sync → schedule an immediate remote poll */
+    if (is_post && cbm_http_path_match(req->path, "/api/remote-sync*")) {
+        handle_remote_sync(srv, c, req);
         return;
     }
 

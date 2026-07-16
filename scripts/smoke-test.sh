@@ -2656,16 +2656,22 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
     fi
   fi
 
-  # Pre-install agent config with a WRONG binary path (simulates stale config)
-  echo '{"mcpServers":{"codebase-memory-mcp":{"command":"/old/stale/path"}}}' > "$UPDATE_HOME/.claude.json"
+  # Pre-install the legacy PATH-based command. This is an owned configuration
+  # that update must migrate without treating an arbitrary user command as ours.
+  echo '{"mcpServers":{"codebase-memory-mcp":{"command":"codebase-memory-mcp"}}}' > "$UPDATE_HOME/.claude.json"
 
   # 14a: Run actual update command (detect variant from available archive)
   UPDATE_VARIANT="--standard"
   if curl -sf "$SMOKE_DOWNLOAD_URL/" 2>/dev/null | grep -q "ui-"; then
     UPDATE_VARIANT="--ui"
   fi
-  HOME="$UPDATE_HOME" CBM_DOWNLOAD_URL="$SMOKE_DOWNLOAD_URL" \
-    "$BINARY" update $UPDATE_VARIANT -y 2>&1 || true
+  if HOME="$UPDATE_HOME" CBM_DOWNLOAD_URL="$SMOKE_DOWNLOAD_URL" \
+    "$BINARY" update "$UPDATE_VARIANT" -y 2>&1; then
+    echo "OK 14a: update command completed"
+  else
+    echo "FAIL 14a: update command failed"
+    exit 1
+  fi
 
   # 14b: Verify new binary exists and runs
   if [ ! -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp" ]; then
@@ -2682,17 +2688,13 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
   fi
   echo "OK 14b: updated binary runs"
 
-  # 14c: Verify agent config was refreshed (stale path replaced)
+  # 14c: Verify the legacy PATH command was replaced with the installed binary.
   UPD_CMD=$(cat "$UPDATE_HOME/.claude.json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('mcpServers',{}).get('codebase-memory-mcp',{}).get('command',''))" 2>/dev/null || echo "")
-  if [ "$UPD_CMD" = "/old/stale/path" ]; then
-    echo "FAIL 14c: agent config still has stale path after update"
+  if [ "$UPD_CMD" != "$UPD_BIN" ]; then
+    echo "FAIL 14c: agent config path mismatch after update (expected=$UPD_BIN actual=$UPD_CMD)"
     exit 1
   fi
-  if [ -n "$UPD_CMD" ]; then
-    echo "OK 14c: agent config refreshed (path=$UPD_CMD)"
-  else
-    echo "OK 14c: agent config refreshed (no stale path)"
-  fi
+  echo "OK 14c: agent config refreshed (path=$UPD_CMD)"
 
   # ── 14d-f: Real uninstall with binary removal ──
   # First verify binary + configs exist

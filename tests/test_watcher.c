@@ -8,6 +8,7 @@
 #include "../src/foundation/platform.h"
 #include "test_framework.h"
 #include "test_helpers.h"
+#include <git/remote_repo.h>
 #include <watcher/watcher.h>
 #include <store/store.h>
 #include <errno.h>
@@ -32,6 +33,100 @@ static int wt_git(const char *dir, const char *args) {
 static const char *wt_path(char *buf, size_t n, const char *dir, const char *rel) {
     snprintf(buf, n, "%s/%s", dir, rel);
     return buf;
+}
+
+/* Local bare repositories exercise the complete remote flow without network
+ * access or SSH credentials. */
+typedef struct {
+    char cache_dir[256];
+    char work_dir[256];
+    char bare_dir[256];
+    char remote_url[512];
+    char managed_dir[1024];
+    char saved_cache_dir[1024];
+    bool had_cache_dir;
+    bool cache_overridden;
+} remote_fixture_t;
+
+static void wt_file_url(const char *path, char *out, size_t out_size) {
+    char normalized[512];
+    snprintf(normalized, sizeof(normalized), "%s", path);
+    for (char *p = normalized; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    if (normalized[0] == '/') {
+        snprintf(out, out_size, "file://%s", normalized);
+    } else {
+        snprintf(out, out_size, "file:///%s", normalized);
+    }
+}
+
+static void remote_fixture_teardown(remote_fixture_t *f) {
+    if (f->cache_overridden) {
+        if (f->had_cache_dir) {
+            cbm_setenv("CBM_CACHE_DIR", f->saved_cache_dir, 1);
+        } else {
+            cbm_unsetenv("CBM_CACHE_DIR");
+        }
+    }
+    th_rmtree(f->cache_dir);
+    th_rmtree(f->work_dir);
+    th_rmtree(f->bare_dir);
+}
+
+static bool remote_fixture_setup(remote_fixture_t *f, const char *project_name) {
+    memset(f, 0, sizeof(*f));
+    snprintf(f->cache_dir, sizeof(f->cache_dir), "/tmp/cbm_remote_cache_XXXXXX");
+    snprintf(f->work_dir, sizeof(f->work_dir), "/tmp/cbm_remote_work_XXXXXX");
+    snprintf(f->bare_dir, sizeof(f->bare_dir), "/tmp/cbm_remote_bare_XXXXXX");
+    if (!cbm_mkdtemp(f->cache_dir) || !cbm_mkdtemp(f->work_dir) ||
+        !cbm_mkdtemp(f->bare_dir)) {
+        remote_fixture_teardown(f);
+        return false;
+    }
+
+    f->had_cache_dir = cbm_safe_getenv("CBM_CACHE_DIR", f->saved_cache_dir,
+                                       sizeof(f->saved_cache_dir), NULL) != NULL;
+    cbm_setenv("CBM_CACHE_DIR", f->cache_dir, 1);
+    f->cache_overridden = true;
+    wt_file_url(f->bare_dir, f->remote_url, sizeof(f->remote_url));
+
+    if (wt_git(f->bare_dir, "init -q --bare") != 0 ||
+        wt_git(f->work_dir, "init -q") != 0 ||
+        wt_git(f->work_dir, "branch -M main") != 0 ||
+        th_write_file(wt_path(f->managed_dir, sizeof(f->managed_dir), f->work_dir,
+                              "file.txt"),
+                      "initial\n") != 0 ||
+        wt_git(f->work_dir, "add file.txt") != 0 ||
+        wt_git(f->work_dir, "commit -q -m initial") != 0) {
+        remote_fixture_teardown(f);
+        return false;
+    }
+
+    char push_args[768];
+    snprintf(push_args, sizeof(push_args), "push -q \"%s\" main:main", f->remote_url);
+    if (wt_git(f->work_dir, push_args) != 0 ||
+        !cbm_remote_repo_managed_path(project_name, f->managed_dir,
+                                      sizeof(f->managed_dir))) {
+        remote_fixture_teardown(f);
+        return false;
+    }
+    return true;
+}
+
+static int remote_fixture_push(remote_fixture_t *f, const char *content) {
+    char file_path[512];
+    if (th_append_file(wt_path(file_path, sizeof(file_path), f->work_dir, "file.txt"),
+                       content) != 0 ||
+        wt_git(f->work_dir, "add file.txt") != 0 ||
+        wt_git(f->work_dir, "commit -q -m update") != 0) {
+        return -1;
+    }
+    char push_args[768];
+    snprintf(push_args, sizeof(push_args), "push -q \"%s\" main:main", f->remote_url);
+    return wt_git(f->work_dir, push_args);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -2057,10 +2152,140 @@ TEST(watcher_null_watch_count) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  MANAGED REMOTE REPOSITORIES
+ * ══════════════════════════════════════════════════════════════════ */
+
+TEST(remote_repo_validates_configuration) {
+    char project[CBM_REMOTE_PROJECT_MAX];
+    char normalized[CBM_REMOTE_URL_MAX];
+
+    ASSERT_TRUE(cbm_remote_repo_validate_url("git@example.com:team/repository.git"));
+    ASSERT_TRUE(cbm_remote_repo_validate_url("ssh://git@example.com/team/repository.git"));
+    ASSERT_TRUE(cbm_remote_repo_validate_url("file:///tmp/repository.git"));
+    ASSERT_FALSE(cbm_remote_repo_validate_url("https://example.com/team/repository.git"));
+    ASSERT_FALSE(cbm_remote_repo_validate_url("git@example.com"));
+    ASSERT_FALSE(cbm_remote_repo_validate_url("git@example.com:team/bad repo.git"));
+    ASSERT_TRUE(cbm_remote_repo_normalize_url("https://github.com/team/repository.git",
+                                              normalized, sizeof(normalized)));
+    ASSERT_STR_EQ(normalized, "git@github.com:team/repository.git");
+    ASSERT_FALSE(cbm_remote_repo_normalize_url("https://example.com:8443/team/repository.git",
+                                               normalized, sizeof(normalized)));
+
+    ASSERT_TRUE(cbm_remote_repo_validate_branch("main"));
+    ASSERT_TRUE(cbm_remote_repo_validate_branch("release/v1.2"));
+    ASSERT_FALSE(cbm_remote_repo_validate_branch("-main"));
+    ASSERT_FALSE(cbm_remote_repo_validate_branch("../main"));
+    ASSERT_FALSE(cbm_remote_repo_validate_branch("main.lock"));
+    ASSERT_FALSE(cbm_remote_repo_validate_branch("main~1"));
+
+    ASSERT_TRUE(cbm_remote_repo_default_project("git@example.com:team/repository.git", project,
+                                                sizeof(project)));
+    ASSERT_STR_EQ(project, "repository");
+    PASS();
+}
+
+TEST(remote_repo_prepare_and_incremental_sync) {
+    remote_fixture_t fixture;
+    if (!remote_fixture_setup(&fixture, "remote-sync")) {
+        FAIL("remote fixture setup failed");
+    }
+
+    char error[1024] = {0};
+    char remote_sha[65] = {0};
+    cbm_remote_repo_config_t config;
+    memset(&config, 0, sizeof(config));
+
+    int prepare_rc = cbm_remote_repo_prepare(
+        "remote-sync", fixture.remote_url, "main", 60, fixture.managed_dir,
+        sizeof(fixture.managed_dir), error, sizeof(error));
+    bool clone_exists = cbm_is_dir(fixture.managed_dir);
+    int load_rc = prepare_rc == 0 ? cbm_remote_repo_load(fixture.managed_dir, &config) : -1;
+    int initial_sync_rc = load_rc == 0
+                              ? cbm_remote_repo_sync(fixture.managed_dir, &config, remote_sha,
+                                                     sizeof(remote_sha), error, sizeof(error))
+                              : -1;
+    int push_rc = initial_sync_rc == 0 ? remote_fixture_push(&fixture, "second\n") : -1;
+    int changed_sync_rc = push_rc == 0
+                              ? cbm_remote_repo_sync(fixture.managed_dir, &config, remote_sha,
+                                                     sizeof(remote_sha), error, sizeof(error))
+                              : -1;
+    int unchanged_sync_rc = changed_sync_rc == 1
+                                ? cbm_remote_repo_sync(fixture.managed_dir, &config, remote_sha,
+                                                       sizeof(remote_sha), error, sizeof(error))
+                                : -1;
+    int poll_interval = config.poll_interval_sec;
+    char loaded_branch[CBM_REMOTE_BRANCH_MAX];
+    snprintf(loaded_branch, sizeof(loaded_branch), "%s", config.branch);
+    remote_fixture_teardown(&fixture);
+
+    ASSERT_EQ(prepare_rc, 0);
+    ASSERT_TRUE(clone_exists);
+    ASSERT_EQ(load_rc, 0);
+    ASSERT_STR_EQ(loaded_branch, "main");
+    ASSERT_EQ(poll_interval, 60);
+    ASSERT_EQ(initial_sync_rc, 0);
+    ASSERT_EQ(push_rc, 0);
+    ASSERT_EQ(changed_sync_rc, 1);
+    ASSERT_EQ(unchanged_sync_rc, 0);
+    ASSERT_TRUE(remote_sha[0] != '\0');
+    PASS();
+}
+
+TEST(watcher_polls_changed_remote_branch_once) {
+    remote_fixture_t fixture;
+    if (!remote_fixture_setup(&fixture, "remote-watcher")) {
+        FAIL("remote fixture setup failed");
+    }
+
+    char error[1024] = {0};
+    int prepare_rc = cbm_remote_repo_prepare(
+        "remote-watcher", fixture.remote_url, "main", 60, fixture.managed_dir,
+        sizeof(fixture.managed_dir), error, sizeof(error));
+    cbm_store_t *store = prepare_rc == 0 ? cbm_store_open_memory() : NULL;
+    cbm_watcher_t *watcher = store ? cbm_watcher_new(store, index_callback, NULL) : NULL;
+
+    index_call_count = 0;
+    int loaded = watcher ? cbm_watcher_load_managed(watcher) : -1;
+    int baseline_rc = watcher ? cbm_watcher_poll_once(watcher) : -1;
+    int baseline_calls = index_call_count;
+    int push_rc = baseline_rc == 0 ? remote_fixture_push(&fixture, "watcher update\n") : -1;
+    if (watcher && push_rc == 0) {
+        cbm_watcher_touch(watcher, "remote-watcher");
+    }
+    int changed_rc = watcher && push_rc == 0 ? cbm_watcher_poll_once(watcher) : -1;
+    int changed_calls = index_call_count;
+    if (watcher && changed_rc == 1) {
+        cbm_watcher_touch(watcher, "remote-watcher");
+    }
+    int unchanged_rc = watcher && changed_rc == 1 ? cbm_watcher_poll_once(watcher) : -1;
+    int unchanged_calls = index_call_count;
+
+    cbm_watcher_free(watcher);
+    cbm_store_close(store);
+    remote_fixture_teardown(&fixture);
+
+    ASSERT_EQ(prepare_rc, 0);
+    ASSERT_EQ(loaded, 1);
+    ASSERT_EQ(baseline_rc, 0);
+    ASSERT_EQ(baseline_calls, 0);
+    ASSERT_EQ(push_rc, 0);
+    ASSERT_EQ(changed_rc, 1);
+    ASSERT_EQ(changed_calls, 1);
+    ASSERT_EQ(unchanged_rc, 0);
+    ASSERT_EQ(unchanged_calls, 1);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
 SUITE(watcher) {
+    /* Managed remote repositories */
+    RUN_TEST(remote_repo_validates_configuration);
+    RUN_TEST(remote_repo_prepare_and_incremental_sync);
+    RUN_TEST(watcher_polls_changed_remote_branch_once);
+
     /* Adaptive interval */
     RUN_TEST(poll_interval_base);
     RUN_TEST(poll_interval_scaling);

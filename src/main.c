@@ -795,6 +795,7 @@ int main(int argc, char **argv) {
     if (!restricted_tool_profile) {
         watch_store = cbm_store_open_memory();
         g_watcher = cbm_watcher_new(watch_store, watcher_index_fn, NULL);
+        (void)cbm_watcher_load_managed(g_watcher);
         /* Wire watcher + config into MCP server for session auto-index. */
         cbm_mcp_server_set_watcher(g_server, g_watcher);
         cbm_mcp_server_set_config(g_server, runtime_config);
