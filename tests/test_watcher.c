@@ -77,10 +77,11 @@ static void remote_fixture_teardown(remote_fixture_t *f) {
 }
 
 static bool remote_fixture_setup(remote_fixture_t *f, const char *project_name) {
-    memset(f, 0, sizeof(*f));
-    snprintf(f->cache_dir, sizeof(f->cache_dir), "/tmp/cbm_remote_cache_XXXXXX");
-    snprintf(f->work_dir, sizeof(f->work_dir), "/tmp/cbm_remote_work_XXXXXX");
-    snprintf(f->bare_dir, sizeof(f->bare_dir), "/tmp/cbm_remote_bare_XXXXXX");
+    *f = (remote_fixture_t){
+        .cache_dir = "/tmp/cbm_remote_cache_XXXXXX",
+        .work_dir = "/tmp/cbm_remote_work_XXXXXX",
+        .bare_dir = "/tmp/cbm_remote_bare_XXXXXX",
+    };
     if (!cbm_mkdtemp(f->cache_dir) || !cbm_mkdtemp(f->work_dir) ||
         !cbm_mkdtemp(f->bare_dir)) {
         remote_fixture_teardown(f);
