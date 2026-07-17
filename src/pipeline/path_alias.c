@@ -53,8 +53,8 @@ static char *strip_resolved_ext(char *path) {
         return path;
     }
     size_t len = strlen(path);
-    static const char *exts[] = {".tsx", ".jsx", ".vue", ".mts", ".cts", ".mjs", ".cjs",
-                                 ".ts",  ".js",  NULL};
+    static const char *exts[] = {".tsx", ".jsx", ".vue", ".mts", ".cts",
+                                 ".mjs", ".cjs", ".ts",  ".js",  NULL};
     for (const char **ext = exts; *ext; ext++) {
         size_t ext_len = strlen(*ext);
         if (len > ext_len && strcmp(path + len - ext_len, *ext) == 0) {
@@ -441,8 +441,8 @@ static const char *find_matching_js_brace(const char *open) {
 }
 
 static bool js_identifier_boundary(char c) {
-    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-             (c >= '0' && c <= '9') || c == '_' || c == '$');
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+             c == '_' || c == '$');
 }
 
 static const char *find_alias_object(const char *source, const char *after) {
@@ -485,8 +485,8 @@ static bool extract_static_alias_target(const char *expr, const char *line_end, 
     if (end >= line_end || *end != delimiter || end == quote) {
         return false;
     }
-    bool relative_literal = quote[0] == '.' && quote + 1 < end &&
-                            (quote[1] == '/' || quote[1] == '\\');
+    bool relative_literal =
+        quote[0] == '.' && quote + 1 < end && (quote[1] == '/' || quote[1] == '\\');
     bool static_path_call = false;
     for (const char *p = expr; p < quote; p++) {
         size_t remaining = (size_t)(quote - p);
@@ -558,8 +558,7 @@ static void parse_static_alias_object(cbm_path_alias_map_t *map, const char *dir
     }
 }
 
-static cbm_path_alias_map_t *load_static_build_config(const char *abs_path,
-                                                      const char *dir_prefix,
+static cbm_path_alias_map_t *load_static_build_config(const char *abs_path, const char *dir_prefix,
                                                       bool vue_cli_config) {
     FILE *f = cbm_fopen(abs_path, "r");
     if (!f) {

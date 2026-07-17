@@ -641,12 +641,10 @@ int cbm_exec_capture(const char *const *argv, char *output, size_t output_size) 
     SIZE_T attr_size = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attr = malloc(attr_size);
-    BOOL attr_initialized =
-        attr && InitializeProcThreadAttributeList(attr, 1, 0, &attr_size);
+    BOOL attr_initialized = attr && InitializeProcThreadAttributeList(attr, 1, 0, &attr_size);
     BOOL attr_ready =
-        attr_initialized &&
-        UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
-                                  sizeof(inherit), NULL, NULL);
+        attr_initialized && UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                                      inherit, sizeof(inherit), NULL, NULL);
 
     STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;
@@ -659,11 +657,9 @@ int cbm_exec_capture(const char *const *argv, char *output, size_t output_size) 
     si.StartupInfo.hStdInput = nul;
     si.lpAttributeList = attr;
 
-    BOOL started =
-        attr_ready &&
-        CreateProcessW(NULL, cmdline, NULL, NULL, TRUE,
-                       CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
-                       &si.StartupInfo, &pi);
+    BOOL started = attr_ready && CreateProcessW(NULL, cmdline, NULL, NULL, TRUE,
+                                                CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                                                NULL, NULL, &si.StartupInfo, &pi);
     free(cmdline);
     if (attr) {
         if (attr_initialized) {

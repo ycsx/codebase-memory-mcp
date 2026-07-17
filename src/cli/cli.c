@@ -9029,8 +9029,7 @@ static bool prefix_icase(const char *s, const char *prefix) {
  * Returns heap-allocated tag (e.g. "v0.5.7") or NULL on failure. */
 static char *fetch_latest_tag(void) {
     FILE *fp = cbm_popen(
-        "curl -sfI https://github.com/ycsx/codebase-memory-mcp/releases/latest 2>/dev/null",
-        "r");
+        "curl -sfI https://github.com/ycsx/codebase-memory-mcp/releases/latest 2>/dev/null", "r");
     if (!fp) {
         return NULL;
     }
