@@ -713,7 +713,7 @@ TEST(ui_server_delete_project_unwatches_after_delete) {
     int n = ui_delete_request(&ts, "/api/project?name=ui-delete-watch", resp, sizeof(resp));
     ASSERT_GT(n, 0);
     ASSERT_EQ(th_status(resp), 200);
-    ASSERT_NOT_NULL(strstr(resp, "{\"deleted\":true}"));
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"deleted\""));
 
     char db[1024], wal[1040], shm[1040];
     ui_delete_db_path(&fx, "ui-delete-watch", db, sizeof(db));
@@ -804,7 +804,7 @@ TEST(ui_server_delete_project_unwatches_missing_db) {
     int n = ui_delete_request(&ts, "/api/project?name=ui-delete-missing", resp, sizeof(resp));
     ASSERT_GT(n, 0);
     ASSERT_EQ(th_status(resp), 404);
-    ASSERT_NOT_NULL(strstr(resp, "{\"error\":\"project not found\"}"));
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"not_found\""));
     ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 0);
 
     th_server_stop(&ts);
@@ -865,7 +865,7 @@ TEST(ui_server_delete_project_invalid_name_keeps_watch) {
     int n = ui_delete_request(&ts, "/api/project?name=bad%2Fname", resp, sizeof(resp));
     ASSERT_GT(n, 0);
     ASSERT_EQ(th_status(resp), 404);
-    ASSERT_NOT_NULL(strstr(resp, "{\"error\":\"project not found\"}"));
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"not_found\""));
     ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 1);
 
     th_server_stop(&ts);
@@ -887,8 +887,8 @@ TEST(ui_server_delete_project_unlink_failure_keeps_watch) {
     char resp[4096];
     int n = ui_delete_request(&ts, "/api/project?name=ui-delete-unlink-fails", resp, sizeof(resp));
     ASSERT_GT(n, 0);
-    ASSERT_EQ(th_status(resp), 500);
-    ASSERT_NOT_NULL(strstr(resp, "{\"error\":\"failed to delete\"}"));
+    ASSERT_EQ(th_status(resp), 409);
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"delete_failed\""));
     ASSERT_TRUE(cbm_file_exists(db));
     ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 1);
 

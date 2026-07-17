@@ -56,6 +56,18 @@ static void wt_file_url(const char *path, char *out, size_t out_size) {
             *p = '/';
         }
     }
+#ifdef _WIN32
+    /* MSYS2 Git treats file:///C:/path as the POSIX path /C:/path. Use its
+     * drive mount form, which Git for Windows also accepts. */
+    if (normalized[0] != '\0' && normalized[1] == ':' && normalized[2] == '/') {
+        char drive = normalized[0];
+        if (drive >= 'A' && drive <= 'Z') {
+            drive = (char)(drive - 'A' + 'a');
+        }
+        snprintf(out, out_size, "file:///%c/%s", drive, normalized + 3);
+        return;
+    }
+#endif
     if (normalized[0] == '/') {
         snprintf(out, out_size, "file://%s", normalized);
     } else {
