@@ -1004,11 +1004,12 @@ static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
 
     static const char EXPLORE_TEMPLATE[] =
         "Explore project \"%s\" to answer: %s\n\n"
-        "Use graph tools first: search_graph to find relevant symbols, get_code_snippet for "
-        "exact source, and trace_path(direction=\"both\") for callers and callees. Use "
+        "Route discovery by question. For symbols and relationships, use search_graph to find "
+        "relevant symbols, get_code_snippet for exact source, and trace_path(direction=\"both\") "
+        "for callers and callees. Use "
         "get_architecture for broad orientation and query_graph only for multi-hop patterns. "
-        "Check has_more and paginate. Fall back to search_code or grep only for literal or "
-        "non-code text, or where graph coverage is incomplete.";
+        "Check has_more and paginate. Use search_code or grep directly for exact literals, known "
+        "paths, configs, and non-code text, and use them to verify incomplete graph coverage.";
     static const char REVIEW_TEMPLATE[] =
         "Review change impact in project \"%s\" for: %s\n\n"
         "Use detect_changes with base_branch \"%s\", then trace_path(direction=\"both\", "
@@ -1031,7 +1032,7 @@ static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
     }
 
     char *result = mcp_prompt_result(
-        is_explore ? "Graph-first codebase exploration" : "Graph-first change-impact review", text);
+        is_explore ? "Hybrid codebase exploration" : "Graph-based change-impact review", text);
     free(text);
     yyjson_doc_free(params_doc);
     return result;
@@ -1049,10 +1050,11 @@ static const int SUPPORTED_VERSION_COUNT =
     (int)(sizeof(SUPPORTED_PROTOCOL_VERSIONS) / sizeof(SUPPORTED_PROTOCOL_VERSIONS[0]));
 
 static const char MCP_SERVER_INSTRUCTIONS[] =
-    "Use graph tools first for structural code discovery: search_graph to find symbols, "
+    "Route discovery by question. For structural discovery, use search_graph to find symbols, "
     "trace_path for callers and callees, get_code_snippet for exact source, query_graph for "
     "complex multi-hop patterns, and get_architecture for orientation. Use search_code or "
-    "filesystem grep for literal or non-code text, or when graph coverage is insufficient. "
+    "filesystem grep directly for exact literals, known paths, configs, and non-code text, and "
+    "when graph coverage is insufficient. "
     "Call list_projects before initial use and index_repository only when a repository is not "
     "indexed or to force immediate freshness after a large external update. Once indexed, "
     "watched projects auto-refresh in the background; use index_status for project health and "

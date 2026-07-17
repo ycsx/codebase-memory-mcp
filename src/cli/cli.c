@@ -610,7 +610,8 @@ static const char codex_instructions_content[] =
     "- `query_graph` — run Cypher queries for complex patterns\n"
     "- `get_architecture` — high-level project summary\n"
     "\n"
-    "Always prefer graph tools over grep for code discovery.\n";
+    "Use graph tools for symbols, relationships, impact, and architecture. Use grep/file search "
+    "for exact literals, known paths, configs, and non-code text.\n";
 
 /* Old skill names — cleaned up during install to remove stale directories. */
 static const char *old_skill_names[] = {
@@ -1639,7 +1640,8 @@ static const char agent_instructions_content[] =
     "## Codebase Knowledge Graph (codebase-memory-mcp)\n"
     "\n"
     "This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.\n"
-    "ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.\n"
+    "Route discovery by question: use MCP graph tools for symbols and relationships; use "
+    "grep/glob/file-search for exact literals, known paths, configs, and non-code text.\n"
     "\n"
     "### Priority Order\n"
     "1. `search_graph` — find functions, classes, routes, variables by pattern\n"
@@ -1664,7 +1666,7 @@ static const char agent_instructions_content[] =
     "recorded gap, not proof of completeness. For partial, skipped, excluded, stale, pending, or "
     "unknown coverage, read/grep the reported ranges or scope before relying on graph results.\n"
     "\n"
-    "### When to fall back to grep/glob\n"
+    "### When to use grep/glob directly\n"
     "- Searching for string literals, error messages, config values\n"
     "- Searching non-code files (Dockerfiles, shell scripts, configs)\n"
     "- When MCP tools return insufficient results\n"
@@ -2046,7 +2048,8 @@ static const char aider_instructions_content[] =
     "\n"
     "This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.\n"
     "Aider has no MCP support, so invoke the graph through the CLI (e.g. via /run).\n"
-    "ALWAYS prefer these commands over grep/glob/file-search for code discovery.\n"
+    "Use these commands for symbols and relationships. Use grep/glob/file-search directly for "
+    "exact literals, known paths, configs, and non-code text.\n"
     "\n"
     "## Priority Order (CLI form)\n"
     "1. Find functions/classes/routes:\n"
@@ -3864,16 +3867,16 @@ static const char cmm_released_session_script[] =
     "# SessionStart hook: remind agent to use codebase-memory-mcp tools.\n"
     "# Installed by codebase-memory-mcp. Fires on startup/resume/clear/compact.\n"
     "cat << 'REMINDER'\n"
-    "CRITICAL - Code Discovery Protocol:\n"
-    "1. ALWAYS use codebase-memory-mcp tools FIRST for ANY code exploration:\n"
+    "Code Discovery Routing:\n"
+    "1. Use codebase-memory-mcp for structural questions:\n"
     "   - search_graph(name_pattern/label/qn_pattern) to find functions/classes/routes\n"
     "   - trace_path(function_name, mode=calls|data_flow|cross_service) for call chains\n"
     "   - get_code_snippet(qualified_name) for exact symbol source (precise ranges)\n"
     "   - query_graph(query) for complex Cypher patterns\n"
     "   - get_architecture(aspects) for project structure\n"
     "   - search_code(pattern) for text search (graph-augmented grep)\n"
-    "2. Use Grep/Glob/Read freely for text, configs, non-code files, and\n"
-    "   always Read a file before editing it.\n"
+    "2. Use Grep/Glob/Read directly for exact literals, known paths, configs,\n"
+    "   non-code files, and source verification. Always Read before editing.\n"
     "3. If a project is not indexed yet, run index_repository FIRST.\n"
     "REMINDER\n";
 
@@ -3884,10 +3887,10 @@ static const char cmm_released_subagent_script[] =
     "# SubagentStart injects context via JSON additionalContext, not plain stdout.\n"
     "cat << 'REMINDER'\n"
     "{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","
-    "\"additionalContext\":\"Code discovery: prefer codebase-memory-mcp tools "
+    "\"additionalContext\":\"Code discovery routing: use codebase-memory-mcp tools "
     "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "
-    "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
-    "text, configs, and non-code files.\"}}\n"
+    "search_code) for symbols and relationships. Use Grep/Glob/Read directly for exact "
+    "literals, known paths, configs, non-code files, and verification.\"}}\n"
     "REMINDER\n";
 
 static int cbm_build_released_gate_script(const char *binary_path, char *script,
@@ -4298,11 +4301,12 @@ int cbm_remove_claude_subagent_hooks(const char *settings_path) {
 /* Matcher excludes read_file for consistency with the Claude fix: the hook
  * is an advisory reminder, not a gate over the agent's file reads. */
 #define GEMINI_HOOK_MATCHER "google_web_search|grep_search"
-#define GEMINI_HOOK_COMMAND                                                            \
-    "node -e \"process.stdout.write(JSON.stringify({hookSpecificOutput:{"              \
-    "hookEventName:'BeforeTool',additionalContext:'Code discovery: prefer "            \
-    "codebase-memory-mcp search_graph, trace_path, and get_code_snippet over grep or " \
-    "file search.'}}))\""
+#define GEMINI_HOOK_COMMAND                                                               \
+    "node -e \"process.stdout.write(JSON.stringify({hookSpecificOutput:{"                 \
+    "hookEventName:'BeforeTool',additionalContext:'Code discovery routing: use grep or "  \
+    "file search for exact literals, known paths, configs, and non-code text; use "       \
+    "codebase-memory-mcp search_graph, trace_path, and get_code_snippet for symbols and " \
+    "relationships.'}}))\""
 static const char *const cmm_gemini_released_hook_commands[] = {
     "echo 'Reminder: prefer codebase-memory-mcp search_graph/trace_path/get_code_snippet over "
     "grep/file search for code discovery.' >&2",
@@ -4370,11 +4374,13 @@ static int cbm_remove_gemini_coverage_hook(const char *settings_path, const char
 
 /* Gemini CLI SessionStart reminder. settings.json uses the same
  * hooks.<Event>[].hooks[] JSON shape as Claude, so it reuses upsert_hooks_json. */
-#define GEMINI_SESSION_COMMAND                                                          \
-    "node -e \"process.stdout.write(JSON.stringify({hookSpecificOutput:{"               \
-    "hookEventName:'SessionStart',additionalContext:'Code discovery: prefer "           \
-    "codebase-memory-mcp search_graph, trace_path, get_code_snippet, query_graph, and " \
-    "search_code; run index_repository first when needed.'}}))\""
+#define GEMINI_SESSION_COMMAND                                                            \
+    "node -e \"process.stdout.write(JSON.stringify({hookSpecificOutput:{"                 \
+    "hookEventName:'SessionStart',additionalContext:'Code discovery routing: use "        \
+    "codebase-memory-mcp search_graph, trace_path, get_code_snippet, query_graph, and "   \
+    "search_code for symbols and relationships; use grep/file search directly for exact " \
+    "literals, known paths, configs, and non-code text; run index_repository when "       \
+    "needed.'}}))\""
 static const char *const cmm_gemini_released_session_commands[] = {
     "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, "
     "get_code_snippet, query_graph, search_code) over grep/file-read; run index_repository "

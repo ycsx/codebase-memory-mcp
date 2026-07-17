@@ -1147,10 +1147,11 @@ static char *ha_lifecycle_json_from_root(yyjson_val *root, const char *forced_ev
                  "%s. Router: scout=Tier 1 quick, verify=Tier 2 verification, auditor=Tier 3 "
                  "full graph verification. Coverage invariant for every tier: call "
                  "check_index_coverage for every file relied on; if incomplete, read the "
-                 "reported missed lines directly and qualify conclusions. For structural "
-                 "code discovery use search_graph, then trace_path, then get_code_snippet; "
-                 "use query_graph or get_architecture for broader structure. Use grep, glob, "
-                 "and file reads for literals, configs, non-code files, and verification.",
+                 "reported missed lines directly and qualify conclusions. Route discovery by "
+                 "question: for symbols and relationships use search_graph, then trace_path, "
+                 "then get_code_snippet; use query_graph or get_architecture for broader "
+                 "structure. Use grep, glob, and file reads directly for exact literals, known "
+                 "paths, configs, non-code files, and verification.",
                  scope, safe_project, tier);
     } else {
         const char *index_guidance = ha_no_project_index_guidance(event);
@@ -1161,8 +1162,9 @@ static char *ha_lifecycle_json_from_root(yyjson_val *root, const char *forced_ev
                  "auditor=Tier 3 full graph verification. Coverage invariant for every tier: "
                  "call check_index_coverage for every file relied on; if incomplete, read the "
                  "reported missed lines directly and qualify conclusions. Use search_graph, "
-                 "trace_path, and get_code_snippet first; use grep for "
-                 "literals, configs, non-code files, and verification.",
+                 "trace_path, and get_code_snippet for symbols and relationships; use grep "
+                 "directly for exact literals, known paths, configs, non-code files, and "
+                 "verification.",
                  scope, index_guidance, tier);
     }
     free(project);

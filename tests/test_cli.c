@@ -905,9 +905,8 @@ TEST(cli_editor_mcp_refreshes_legacy_path_command) {
 
     char configpath[512];
     snprintf(configpath, sizeof(configpath), "%s/.claude.json", tmpdir);
-    write_test_file(configpath,
-                    "{\"mcpServers\":{\"codebase-memory-mcp\":{\"command\":"
-                    "\"codebase-memory-mcp\"}}}\n");
+    write_test_file(configpath, "{\"mcpServers\":{\"codebase-memory-mcp\":{\"command\":"
+                                "\"codebase-memory-mcp\"}}}\n");
 
     const char *installed = "/new/home/.local/bin/codebase-memory-mcp";
     int rc = cbm_install_editor_mcp(installed, configpath);
@@ -7361,16 +7360,16 @@ static const char test_released_session_hook_script[] =
     "# SessionStart hook: remind agent to use codebase-memory-mcp tools.\n"
     "# Installed by codebase-memory-mcp. Fires on startup/resume/clear/compact.\n"
     "cat << 'REMINDER'\n"
-    "CRITICAL - Code Discovery Protocol:\n"
-    "1. ALWAYS use codebase-memory-mcp tools FIRST for ANY code exploration:\n"
+    "Code Discovery Routing:\n"
+    "1. Use codebase-memory-mcp for structural questions:\n"
     "   - search_graph(name_pattern/label/qn_pattern) to find functions/classes/routes\n"
     "   - trace_path(function_name, mode=calls|data_flow|cross_service) for call chains\n"
     "   - get_code_snippet(qualified_name) for exact symbol source (precise ranges)\n"
     "   - query_graph(query) for complex Cypher patterns\n"
     "   - get_architecture(aspects) for project structure\n"
     "   - search_code(pattern) for text search (graph-augmented grep)\n"
-    "2. Use Grep/Glob/Read freely for text, configs, non-code files, and\n"
-    "   always Read a file before editing it.\n"
+    "2. Use Grep/Glob/Read directly for exact literals, known paths, configs,\n"
+    "   non-code files, and source verification. Always Read before editing.\n"
     "3. If a project is not indexed yet, run index_repository FIRST.\n"
     "REMINDER\n";
 
@@ -7381,10 +7380,10 @@ static const char test_released_subagent_hook_script[] =
     "# SubagentStart injects context via JSON additionalContext, not plain stdout.\n"
     "cat << 'REMINDER'\n"
     "{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","
-    "\"additionalContext\":\"Code discovery: prefer codebase-memory-mcp tools "
+    "\"additionalContext\":\"Code discovery routing: use codebase-memory-mcp tools "
     "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "
-    "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
-    "text, configs, and non-code files.\"}}\n"
+    "search_code) for symbols and relationships. Use Grep/Glob/Read directly for exact "
+    "literals, known paths, configs, non-code files, and verification.\"}}\n"
     "REMINDER\n";
 
 static bool test_build_released_gate_hook_script(const char *binary_path, char *script,
