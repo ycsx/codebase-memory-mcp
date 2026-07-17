@@ -1636,6 +1636,113 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
     return NULL;
 }
 
+static bool import_symbol_is_function_in_target(const cbm_gbuf_node_t *node,
+                                                const cbm_gbuf_node_t *target_module) {
+    if (!node || !target_module || !node->label || strcmp(node->label, "Function") != 0) {
+        return false;
+    }
+    if (target_module->file_path && target_module->file_path[0]) {
+        return node->file_path && strcmp(node->file_path, target_module->file_path) == 0;
+    }
+    return true;
+}
+
+const cbm_gbuf_node_t *cbm_pipeline_resolve_import_symbol_node(const cbm_pipeline_ctx_t *ctx,
+                                                               const cbm_gbuf_node_t *target_module,
+                                                               const CBMImport *imp) {
+    if (!ctx || !ctx->gbuf || !target_module || !target_module->qualified_name || !imp ||
+        !imp->imported_name || !imp->imported_name[0]) {
+        return NULL;
+    }
+
+    char candidate_qn[CBM_SZ_1K];
+    snprintf(candidate_qn, sizeof(candidate_qn), "%s.%s", target_module->qualified_name,
+             imp->imported_name);
+    const cbm_gbuf_node_t *candidate = cbm_gbuf_find_by_qn(ctx->gbuf, candidate_qn);
+    if (import_symbol_is_function_in_target(candidate, target_module)) {
+        return candidate;
+    }
+
+    /* Some module layouts do not compose definition QNs from the module node. */
+    /* Fall back only for one matching Function in the resolved target file. */
+    const cbm_gbuf_node_t **hits = NULL;
+    int hit_count = 0;
+    if (cbm_gbuf_find_by_name(ctx->gbuf, imp->imported_name, &hits, &hit_count) != 0 || !hits) {
+        return NULL;
+    }
+    const cbm_gbuf_node_t *match = NULL;
+    for (int i = 0; i < hit_count; i++) {
+        if (!import_symbol_is_function_in_target(hits[i], target_module)) {
+            continue;
+        }
+        if (match && match->id != hits[i]->id) {
+            return NULL;
+        }
+        match = hits[i];
+    }
+    return match;
+}
+
+static void format_import_edge_properties(const CBMImport *imp, bool symbol_binding, char *out,
+                                          size_t out_size) {
+    char escaped_local[CBM_SZ_256];
+    char escaped_imported[CBM_SZ_256];
+    cbm_json_escape(escaped_local, sizeof(escaped_local),
+                    imp && imp->local_name ? imp->local_name : "");
+    if (imp && imp->imported_name && imp->imported_name[0]) {
+        cbm_json_escape(escaped_imported, sizeof(escaped_imported), imp->imported_name);
+        snprintf(out, out_size,
+                 "{\"local_name\":\"%s\",\"imported_name\":\"%s\",\"binding\":\"%s\"}",
+                 escaped_local, escaped_imported, symbol_binding ? "symbol" : "module");
+        return;
+    }
+    snprintf(out, out_size, "{\"local_name\":\"%s\"}", escaped_local);
+}
+
+int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+                                     const char *rel, CBMHashTable *namespace_map) {
+    if (!ctx || !ctx->gbuf || !result || !rel) {
+        return 0;
+    }
+    int count = 0;
+    char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+    const cbm_gbuf_node_t *source_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
+    if (!source_node) {
+        free(file_qn);
+        return 0;
+    }
+
+    for (int j = 0; j < result->imports.count; j++) {
+        const CBMImport *imp = &result->imports.items[j];
+        if (!imp->module_path) {
+            continue;
+        }
+        const cbm_gbuf_node_t *target =
+            cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
+        if (!target || target->id == source_node->id) {
+            continue;
+        }
+
+        char properties[CBM_SZ_1K];
+        format_import_edge_properties(imp, false, properties, sizeof(properties));
+        if (cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", properties) >
+            0) {
+            count++;
+        }
+
+        const cbm_gbuf_node_t *symbol = cbm_pipeline_resolve_import_symbol_node(ctx, target, imp);
+        if (symbol && symbol->id != source_node->id && symbol->id != target->id) {
+            format_import_edge_properties(imp, true, properties, sizeof(properties));
+            if (cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, symbol->id, "IMPORTS",
+                                     properties) > 0) {
+                count++;
+            }
+        }
+    }
+    free(file_qn);
+    return count;
+}
+
 /* ── Namespace map ───────────────────────────────────────────────── */
 
 CBMHashTable *cbm_pipeline_namespace_map_build(const char *project_name,

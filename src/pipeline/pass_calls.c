@@ -119,22 +119,34 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         const char **keys = calloc((size_t)result->imports.count, sizeof(const char *));
         const char **vals = calloc((size_t)result->imports.count, sizeof(const char *));
         int count = 0;
+        char *file_qn = NULL;
 
         for (int i = 0; i < result->imports.count; i++) {
             const CBMImport *imp = &result->imports.items[i];
             if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
                 continue;
             }
-            char *target_qn = cbm_pipeline_fqn_module(ctx->project_name, imp->module_path);
-            const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
-            free(target_qn);
+            const cbm_gbuf_node_t *target = NULL;
+            const cbm_gbuf_node_t *symbol = NULL;
+            if (imp->imported_name && imp->imported_name[0]) {
+                if (!file_qn) {
+                    file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
+                }
+                target = cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
+                symbol = cbm_pipeline_resolve_import_symbol_node(ctx, target, imp);
+            } else {
+                char *target_qn = cbm_pipeline_fqn_module(ctx->project_name, imp->module_path);
+                target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
+                free(target_qn);
+            }
             if (!target) {
                 continue;
             }
             keys[count] = strdup(imp->local_name);
-            vals[count] = target->qualified_name; /* borrowed from gbuf */
+            vals[count] = symbol ? symbol->qualified_name : target->qualified_name;
             count++;
         }
+        free(file_qn);
 
         *out_keys = keys;
         *out_vals = vals;
@@ -158,8 +170,8 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         return 0;
     }
 
-    const char **keys = calloc(edge_count, sizeof(const char *));
-    const char **vals = calloc(edge_count, sizeof(const char *));
+    const char **keys = calloc((size_t)edge_count, sizeof(const char *));
+    const char **vals = calloc((size_t)edge_count, sizeof(const char *));
     int count = 0;
 
     for (int i = 0; i < edge_count; i++) {
@@ -170,6 +182,22 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         }
         char *key = extract_local_name_from_json(e->properties_json);
         if (key) {
+            bool is_symbol =
+                e->properties_json && strstr(e->properties_json, "\"binding\":\"symbol\"");
+            int existing = CBM_NOT_FOUND;
+            for (int k = 0; k < count; k++) {
+                if (strcmp(keys[k], key) == 0) {
+                    existing = k;
+                    break;
+                }
+            }
+            if (existing != CBM_NOT_FOUND) {
+                if (is_symbol) {
+                    vals[existing] = target->qualified_name;
+                }
+                free(key);
+                continue;
+            }
             keys[count] = key;
             vals[count] = target->qualified_name;
             count++;

@@ -246,8 +246,9 @@ typedef struct {
 } CBMCall;
 
 typedef struct {
-    const char *local_name;  // local alias or name
-    const char *module_path; // resolved module path / QN
+    const char *local_name;    // local alias or name
+    const char *module_path;   // resolved module path / QN
+    const char *imported_name; // original named export; NULL for module/default/namespace imports
 } CBMImport;
 
 typedef struct {

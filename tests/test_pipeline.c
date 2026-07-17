@@ -2055,12 +2055,8 @@ TEST(pipeline_python_project) {
     PASS();
 }
 
-/* #768 end-to-end: `import { A, B } from './lib'` must survive the REAL
- * pipeline (extract -> gbuf dedup -> raw SQLite dump) as TWO IMPORTS edges
- * with distinct local_name — and the dumped DB must satisfy its own schema.
- * With only the graph-buffer half of the fix, both edges reach the dump but
- * violate an unwidened UNIQUE(source_id,target_id,type), which PRAGMA
- * integrity_check flags as a non-unique autoindex entry. */
+/* #768 end-to-end: named imports must survive extraction, dedup, and SQLite dump. */
+/* Each name now produces one module edge and one exact Function edge. */
 TEST(pipeline_imports_multi_symbol_edges) {
     const char *files[] = {"consumer.ts", "lib.ts"};
     const char *contents[] = {
@@ -2089,7 +2085,7 @@ TEST(pipeline_imports_multi_symbol_edges) {
     sqlite3_finalize(stmt);
     sqlite3_close(raw);
 
-    /* Both named imports must be queryable as separate IMPORTS edges. */
+    /* Keep the module dependency and add an exact target for structural tracing. */
     cbm_store_t *s = cbm_store_open_path(db);
     ASSERT_NOT_NULL(s);
     const char *proj = cbm_pipeline_project_name(p);
@@ -2097,12 +2093,93 @@ TEST(pipeline_imports_multi_symbol_edges) {
     cbm_edge_t *edges = NULL;
     int count = 0;
     ASSERT_EQ(cbm_store_find_edges_by_type(s, proj, "IMPORTS", &edges, &count), CBM_STORE_OK);
-    ASSERT_EQ(count, 2);
-    ASSERT_TRUE(strstr(edges[0].properties_json, "\"local_name\":\"A\"") != NULL ||
-                strstr(edges[1].properties_json, "\"local_name\":\"A\"") != NULL);
-    ASSERT_TRUE(strstr(edges[0].properties_json, "\"local_name\":\"B\"") != NULL ||
-                strstr(edges[1].properties_json, "\"local_name\":\"B\"") != NULL);
+    ASSERT_EQ(count, 4);
+    int function_targets = 0;
+    bool found_a = false;
+    bool found_b = false;
+    for (int i = 0; i < count; i++) {
+        cbm_node_t target = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].target_id, &target) == CBM_STORE_OK &&
+            target.label && strcmp(target.label, "Function") == 0) {
+            function_targets++;
+            ASSERT_TRUE(strstr(edges[i].properties_json, "\"binding\":\"symbol\"") != NULL);
+            if (strcmp(target.name, "A") == 0) {
+                found_a = true;
+            } else if (strcmp(target.name, "B") == 0) {
+                found_b = true;
+            }
+        }
+        cbm_node_free_fields(&target);
+    }
+    ASSERT_EQ(function_targets, 2);
+    ASSERT_TRUE(found_a);
+    ASSERT_TRUE(found_b);
     cbm_store_free_edges(edges, count);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    PASS();
+}
+
+TEST(pipeline_aliased_named_import_links_exported_function) {
+    const char *files[] = {"consumer.ts", "lib.ts"};
+    const char *contents[] = {
+        "import { helper as h } from './lib';\n\n"
+        "export function run(value: number): number { return h(value); }\n",
+        "export function helper(value: number): number { return value + 1; }\n"};
+
+    if (setup_lang_repo(files, contents, 2) != 0) {
+        FAIL("tmpdir");
+    }
+    char db[512];
+    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+
+    cbm_edge_t *imports = NULL;
+    int import_count = 0;
+    ASSERT_EQ(cbm_store_find_edges_by_type(s, proj, "IMPORTS", &imports, &import_count),
+              CBM_STORE_OK);
+    bool found_symbol_import = false;
+    for (int i = 0; i < import_count; i++) {
+        cbm_node_t target = {0};
+        if (cbm_store_find_node_by_id(s, imports[i].target_id, &target) == CBM_STORE_OK &&
+            target.label && target.name && strcmp(target.label, "Function") == 0 &&
+            strcmp(target.name, "helper") == 0 && imports[i].properties_json &&
+            strstr(imports[i].properties_json, "\"local_name\":\"h\"") &&
+            strstr(imports[i].properties_json, "\"imported_name\":\"helper\"") &&
+            strstr(imports[i].properties_json, "\"binding\":\"symbol\"")) {
+            found_symbol_import = true;
+        }
+        cbm_node_free_fields(&target);
+    }
+    cbm_store_free_edges(imports, import_count);
+    ASSERT_TRUE(found_symbol_import);
+
+    cbm_edge_t *calls = NULL;
+    int call_count = 0;
+    ASSERT_EQ(cbm_store_find_edges_by_type(s, proj, "CALLS", &calls, &call_count), CBM_STORE_OK);
+    bool found_aliased_call = false;
+    for (int i = 0; i < call_count; i++) {
+        cbm_node_t source = {0};
+        cbm_node_t target = {0};
+        if (cbm_store_find_node_by_id(s, calls[i].source_id, &source) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, calls[i].target_id, &target) == CBM_STORE_OK &&
+            source.name && target.name && strcmp(source.name, "run") == 0 &&
+            strcmp(target.name, "helper") == 0) {
+            found_aliased_call = true;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    cbm_store_free_edges(calls, call_count);
+    ASSERT_TRUE(found_aliased_call);
 
     cbm_store_close(s);
     cbm_pipeline_free(p);
@@ -6946,6 +7023,7 @@ SUITE(pipeline) {
     /* Language integration tests */
     RUN_TEST(pipeline_python_project);
     RUN_TEST(pipeline_imports_multi_symbol_edges);
+    RUN_TEST(pipeline_aliased_named_import_links_exported_function);
     RUN_TEST(pipeline_go_cross_package_call);
     RUN_TEST(pipeline_python_cross_module_call);
     RUN_TEST(pipeline_go_type_classification);

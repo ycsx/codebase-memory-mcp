@@ -173,6 +173,16 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                                                         const CBMImport *imp,
                                                         CBMHashTable *namespace_map);
 
+/* Resolve an ES named import to the exported Function node in target_module. */
+/* Return NULL for other import kinds or when resolution would require guessing. */
+const cbm_gbuf_node_t *cbm_pipeline_resolve_import_symbol_node(const cbm_pipeline_ctx_t *ctx,
+                                                               const cbm_gbuf_node_t *target_module,
+                                                               const CBMImport *imp);
+
+/* Create file-level IMPORTS edges plus Function edges for resolved named imports. */
+int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+                                     const char *rel, CBMHashTable *namespace_map);
+
 /* Build a namespace → File-node-QN map from a set of extraction results.
  * Each result that declared a namespace/package contributes one entry keyed by
  * the namespace string (e.g. "App.Utils", "com.example").  Returns NULL when no

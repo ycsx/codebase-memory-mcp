@@ -1551,8 +1551,8 @@ TEST(vue_component) {
 }
 
 TEST(js_main_module_is_entry_point) {
-    CBMFileResult *r = extract("export default {};\n", CBM_LANG_JAVASCRIPT, "t",
-                               "src/main.build.js");
+    CBMFileResult *r =
+        extract("export default {};\n", CBM_LANG_JAVASCRIPT, "t", "src/main.build.js");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->defs.count, 1);
@@ -2173,6 +2173,31 @@ TEST(js_imports) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(js_named_import_preserves_exported_and_local_names) {
+    CBMFileResult *r = extract("import { helper as h, validate } from './utils';\n",
+                               CBM_LANG_JAVASCRIPT, "t", "app.js");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(r->imports.count, 2);
+
+    bool found_alias = false;
+    bool found_direct = false;
+    for (int i = 0; i < r->imports.count; i++) {
+        const CBMImport *imp = &r->imports.items[i];
+        if (imp->local_name && strcmp(imp->local_name, "h") == 0) {
+            ASSERT_STR_EQ(imp->imported_name, "helper");
+            found_alias = true;
+        } else if (imp->local_name && strcmp(imp->local_name, "validate") == 0) {
+            ASSERT_STR_EQ(imp->imported_name, "validate");
+            found_direct = true;
+        }
+    }
+    ASSERT_TRUE(found_alias);
+    ASSERT_TRUE(found_direct);
     cbm_free_result(r);
     PASS();
 }
@@ -4599,6 +4624,7 @@ SUITE(extraction) {
     RUN_TEST(go_calls);
     RUN_TEST(python_imports);
     RUN_TEST(js_imports);
+    RUN_TEST(js_named_import_preserves_exported_and_local_names);
     RUN_TEST(go_imports);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);

@@ -350,9 +350,14 @@ static bool process_named_imports(CBMExtractCtx *ctx, TSNode sub, const char *pa
             orig = ts_node_child(imp_spec, 0);
         }
         if (!ts_node_is_null(orig)) {
-            char *local_name = !ts_node_is_null(local) ? cbm_node_text(a, local, ctx->source)
-                                                       : cbm_node_text(a, orig, ctx->source);
-            CBMImport imp = {.local_name = local_name, .module_path = path};
+            char *imported_name = cbm_node_text(a, orig, ctx->source);
+            char *local_name =
+                !ts_node_is_null(local) ? cbm_node_text(a, local, ctx->source) : imported_name;
+            CBMImport imp = {
+                .local_name = local_name,
+                .module_path = path,
+                .imported_name = imported_name,
+            };
             cbm_imports_push(&ctx->result->imports, a, imp);
             found = true;
         }
