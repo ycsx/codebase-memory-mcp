@@ -1686,10 +1686,10 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_symbol_node(const cbm_pipelin
 static void format_import_edge_properties(const CBMImport *imp, bool symbol_binding, char *out,
                                           size_t out_size) {
     char escaped_local[CBM_SZ_256];
-    char escaped_imported[CBM_SZ_256];
     cbm_json_escape(escaped_local, sizeof(escaped_local),
                     imp && imp->local_name ? imp->local_name : "");
     if (imp && imp->imported_name && imp->imported_name[0]) {
+        char escaped_imported[CBM_SZ_256];
         cbm_json_escape(escaped_imported, sizeof(escaped_imported), imp->imported_name);
         snprintf(out, out_size,
                  "{\"local_name\":\"%s\",\"imported_name\":\"%s\",\"binding\":\"%s\"}",
