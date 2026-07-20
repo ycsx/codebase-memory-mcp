@@ -1333,7 +1333,7 @@ static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c
     if (!cbm_remote_repo_normalize_url(remote_url, normalized_url, sizeof(normalized_url))) {
         yyjson_doc_free(doc);
         cbm_http_replyf(c, 400, g_cors_json,
-                        "{\"error\":\"unsupported repository URL; use git@host:path, ssh://, or https://host/path\"}");
+                        "{\"error\":\"unsupported repository URL; use an SSH or HTTPS repository URL\"}");
         return;
     }
     if (!cbm_remote_repo_validate_branch(branch)) {

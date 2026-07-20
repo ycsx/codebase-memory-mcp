@@ -2673,12 +2673,16 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
     exit 1
   fi
 
-  # 14b: Verify new binary exists and runs
-  if [ ! -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp" ]; then
+  # 14b: Verify new binary exists and runs. MSYS resolves an extensionless
+  # command to .exe, but the config stores the explicit executable path.
+  UPD_BIN="$UPDATE_HOME/.local/bin/codebase-memory-mcp"
+  if [[ "$BINARY" == *.exe ]]; then
+    UPD_BIN="${UPD_BIN}.exe"
+  fi
+  if [ ! -f "$UPD_BIN" ]; then
     echo "FAIL 14b: binary missing after update"
     exit 1
   fi
-  UPD_BIN="$UPDATE_HOME/.local/bin/codebase-memory-mcp"
   if [ "$(uname -s)" = "Darwin" ]; then
     codesign --sign - --force "$UPD_BIN" 2>/dev/null || true
   fi
@@ -2690,8 +2694,12 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
 
   # 14c: Verify the legacy PATH command was replaced with the installed binary.
   UPD_CMD=$(cat "$UPDATE_HOME/.claude.json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('mcpServers',{}).get('codebase-memory-mcp',{}).get('command',''))" 2>/dev/null || echo "")
-  if [ "$UPD_CMD" != "$UPD_BIN" ]; then
-    echo "FAIL 14c: agent config path mismatch after update (expected=$UPD_BIN actual=$UPD_CMD)"
+  EXPECTED_UPD_CMD="$UPD_BIN"
+  if command -v cygpath &>/dev/null; then
+    EXPECTED_UPD_CMD=$(cygpath -m "$UPD_BIN")
+  fi
+  if [ "$UPD_CMD" != "$EXPECTED_UPD_CMD" ]; then
+    echo "FAIL 14c: agent config path mismatch after update (expected=$EXPECTED_UPD_CMD actual=$UPD_CMD)"
     exit 1
   fi
   echo "OK 14c: agent config refreshed (path=$UPD_CMD)"

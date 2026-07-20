@@ -304,7 +304,7 @@ jobs:
   # listing integration against drift (Dockerfile breakage, release-asset
   # renames, introspection regressions).
   #
-  # Also tests the brew tap/install flow.
+  # Also tests the Homebrew formula against the current workflow artifact.
   #
   # continue-on-error: a broken *directory* image must never block a release —
   # the shipped product binaries are unaffected. The red X is the signal to fix
@@ -315,14 +315,54 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: binaries-linux-amd64-portable
+
       - name: Build Glama image and verify MCP introspection
-        run: bash pkg/glama/verify.sh
+        env:
+          DOCKER_BUILD_ARGS: --network=host --build-arg CBM_DOWNLOAD_BASE_URL=http://127.0.0.1:18081
+        run: |
+          python3 -m http.server 18081 --bind 127.0.0.1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          bash pkg/glama/verify.sh
       - name: Test homebrew installation
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-          brew tap ycsx/codebase-memory-mcp "$GITHUB_WORKSPACE"
-          brew trust ycsx/codebase-memory-mcp
-          brew install codebase-memory-mcp
+          ARCHIVE=codebase-memory-mcp-linux-amd64-portable.tar.gz
+          SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+          TEST_FORMULA="$RUNNER_TEMP/codebase-memory-mcp.rb"
+          cp pkg/homebrew/Formula/codebase-memory-mcp.rb "$TEST_FORMULA"
+          python3 - "$TEST_FORMULA" "$ARCHIVE" "$SHA256" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          archive = sys.argv[2]
+          sha256 = sys.argv[3]
+          formula = path.read_text()
+          formula, version_count = re.subn(
+              r'^  version ".*"$', '  version "0.0.0"', formula, count=1, flags=re.MULTILINE
+          )
+          formula, linux_count = re.subn(
+              r'^  on_linux do\n.*?^  end\n\n  def install',
+              f'  url "http://127.0.0.1:18082/{archive}"\n'
+              f'  sha256 "{sha256}"\n\n  def install',
+              formula,
+              count=1,
+              flags=re.MULTILINE | re.DOTALL,
+          )
+          if version_count != 1 or linux_count != 1:
+              raise SystemExit("failed to prepare local Homebrew formula")
+          path.write_text(formula)
+          PY
+          python3 -m http.server 18082 --bind 127.0.0.1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          brew install --formula "$TEST_FORMULA"
           codebase-memory-mcp --version
