@@ -164,6 +164,15 @@ static int exec_sql(cbm_store_t *s, const char *sql) {
     return CBM_STORE_OK;
 }
 
+static void close_sqlite_connection(sqlite3 **db) {
+    if (!db || !*db) {
+        return;
+    }
+
+    (void)sqlite3_close_v2(*db);
+    *db = NULL;
+}
+
 /* Safe string: returns "" if NULL. */
 static const char *safe_str(const char *s) {
     return s ? s : "";
@@ -648,6 +657,7 @@ static cbm_store_t *store_open_internal(const char *path, bool in_memory) {
 
     int rc = sqlite3_open_v2(path, &s->db, flags, NULL);
     if (rc != SQLITE_OK) {
+        close_sqlite_connection(&s->db);
         free(s);
         return NULL;
     }
@@ -675,7 +685,7 @@ static cbm_store_t *store_open_internal(const char *path, bool in_memory) {
 
     if (configure_pragmas(s, in_memory, false) != CBM_STORE_OK || init_schema(s) != CBM_STORE_OK ||
         create_user_indexes(s) != CBM_STORE_OK) {
-        sqlite3_close(s->db);
+        close_sqlite_connection(&s->db);
         safe_str_free(&s->db_path);
         free(s);
         return NULL;
@@ -786,14 +796,12 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
         /* Force first DB access so a read-only-FS WAL failure surfaces now. */
         if (sqlite3_exec(s->db, "SELECT 1 FROM sqlite_master LIMIT 1;", NULL, NULL, NULL) !=
             SQLITE_OK) {
-            sqlite3_close(s->db);
-            s->db = NULL;
+            close_sqlite_connection(&s->db);
             rc = SQLITE_CANTOPEN; /* trigger immutable fallback */
         }
     }
     if (rc != SQLITE_OK) {
-        sqlite3_close(s->db); /* no-op if already NULL */
-        s->db = NULL;
+        close_sqlite_connection(&s->db);
         /* A genuinely missing DB must return NULL without creating anything —
          * only retry with the immutable URI when the file exists but could not
          * be opened (the read-only-filesystem case). This also keeps the
@@ -810,7 +818,7 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
         rc = sqlite3_open_v2(uri, &s->db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, NULL);
         if (rc != SQLITE_OK) {
             /* sqlite3_open_v2 allocates a handle even on failure — must close it. */
-            sqlite3_close(s->db);
+            close_sqlite_connection(&s->db);
             free(s);
             return NULL;
         }
@@ -832,7 +840,7 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
                             NULL, sqlite_camel_split, NULL, NULL);
 
     if (configure_pragmas(s, false, true) != CBM_STORE_OK) {
-        sqlite3_close(s->db);
+        close_sqlite_connection(&s->db);
         safe_str_free(&s->db_path);
         free(s);
         return NULL;
@@ -989,9 +997,8 @@ void cbm_store_close(cbm_store_t *s) {
     finalize_stmt(&s->stmt_delete_file_hash);
     finalize_stmt(&s->stmt_delete_file_hashes);
 
-    /* Use sqlite3_close_v2 — auto-deallocates when last statement finalizes.
-     * Prevents ASan false-positive leaks from sqlite3 internal state. */
-    sqlite3_close_v2(s->db);
+    /* close_v2 defers deallocation until SQLite releases any remaining statement. */
+    close_sqlite_connection(&s->db);
     safe_str_free(&s->db_path);
     free(s);
 }
