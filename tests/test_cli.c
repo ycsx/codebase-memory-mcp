@@ -9432,6 +9432,50 @@ TEST(cli_config_persists) {
     PASS();
 }
 
+TEST(cli_index_removal_preserves_config_db) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-indexes-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char *saved_cache = save_test_env("CBM_CACHE_DIR");
+    cbm_setenv("CBM_CACHE_DIR", tmpdir, 1);
+
+    cbm_config_t *cfg = cbm_config_open(tmpdir);
+    bool config_created = cfg != NULL;
+    if (cfg) {
+        config_created = cbm_config_set(cfg, "preserved", "yes") == 0;
+        cbm_config_close(cfg);
+    }
+
+    char config_path[512];
+    char index_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/_config.db", tmpdir);
+    snprintf(index_path, sizeof(index_path), "%s/example-project.db", tmpdir);
+    bool index_created = write_test_file(index_path, "project index") == 0;
+
+    int listed = cbm_list_indexes(tmpdir);
+    int removed = cbm_remove_indexes(tmpdir);
+
+    struct stat st;
+    bool index_removed = stat(index_path, &st) != 0;
+    bool config_preserved = stat(config_path, &st) == 0;
+    cfg = config_preserved ? cbm_config_open(tmpdir) : NULL;
+    bool config_readable = cfg && strcmp(cbm_config_get(cfg, "preserved", ""), "yes") == 0;
+    if (cfg) {
+        cbm_config_close(cfg);
+    }
+
+    restore_test_env("CBM_CACHE_DIR", saved_cache);
+    test_rmdir_r(tmpdir);
+
+    if (!config_created || !index_created || listed != 1 || removed != 1 || !index_removed ||
+        !config_preserved || !config_readable) {
+        FAIL("project index removal must preserve the internal config database");
+    }
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  Group H: cbm_replace_binary (update command helper)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -9940,13 +9984,14 @@ SUITE(cli) {
     /* Skill directive descriptions (1 test — group E) */
     RUN_TEST(cli_skill_descriptions_directive);
 
-    /* Config store (6 tests — group F) */
+    /* Config store and index isolation (7 tests — group F) */
     RUN_TEST(cli_config_open_close);
     RUN_TEST(cli_config_get_set);
     RUN_TEST(cli_config_get_bool);
     RUN_TEST(cli_config_get_int);
     RUN_TEST(cli_config_delete);
     RUN_TEST(cli_config_persists);
+    RUN_TEST(cli_index_removal_preserves_config_db);
 
     /* Replace binary (update command helper — group H) */
 #ifndef _WIN32
