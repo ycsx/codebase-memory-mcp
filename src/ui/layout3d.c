@@ -504,9 +504,136 @@ static int find_node_index(const node_id_entry_t *map, int count, int64_t id) {
 
 /* ── Public API ───────────────────────────────────────────────── */
 
-cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
-                                        cbm_layout_level_t level, const char *center_node,
-                                        int radius, int max_nodes) {
+static bool required_node_contains(const int64_t *ids, int count, int64_t id) {
+    for (int i = 0; i < count; i++) {
+        if (ids[i] == id)
+            return true;
+    }
+    return false;
+}
+
+static void search_result_free_fields(cbm_search_result_t *r) {
+    if (!r)
+        return;
+    cbm_node_free_fields(&r->node);
+    for (int i = 0; i < r->connected_count; i++)
+        free((void *)r->connected_names[i]);
+    free(r->connected_names);
+    memset(r, 0, sizeof(*r));
+}
+
+/* Replace low-priority sampled nodes with required endpoints. The returned
+ * node count never exceeds max_nodes, so pinning cannot bypass UI safeguards. */
+static void pin_required_nodes(cbm_store_t *store, const char *project, int max_nodes,
+                               const int64_t *required_ids, int required_count,
+                               cbm_search_output_t *out) {
+    if (!required_ids || required_count <= 0 || !out || max_nodes <= 0)
+        return;
+
+    int replacement = out->count - 1;
+    for (int ri = 0; ri < required_count; ri++) {
+        int64_t id = required_ids[ri];
+        if (id <= 0 || required_node_contains(required_ids, ri, id))
+            continue;
+
+        bool present = false;
+        for (int i = 0; i < out->count; i++) {
+            if (out->results[i].node.id == id) {
+                present = true;
+                break;
+            }
+        }
+        if (present)
+            continue;
+
+        cbm_node_t node;
+        memset(&node, 0, sizeof(node));
+        if (cbm_store_find_node_by_id(store, id, &node) != CBM_STORE_OK)
+            continue;
+        if (!node.project || strcmp(node.project, project) != 0) {
+            cbm_node_free_fields(&node);
+            continue;
+        }
+
+        int slot = -1;
+        if (out->count < max_nodes) {
+            cbm_search_result_t *grown =
+                realloc(out->results, (size_t)(out->count + 1) * sizeof(*grown));
+            if (grown) {
+                out->results = grown;
+                slot = out->count++;
+            }
+        } else {
+            while (replacement >= 0 &&
+                   required_node_contains(required_ids, required_count,
+                                          out->results[replacement].node.id))
+                replacement--;
+            if (replacement >= 0) {
+                slot = replacement--;
+                search_result_free_fields(&out->results[slot]);
+            }
+        }
+
+        if (slot < 0) {
+            cbm_node_free_fields(&node);
+            continue;
+        }
+        memset(&out->results[slot], 0, sizeof(out->results[slot]));
+        out->results[slot].node = node;
+    }
+}
+
+int64_t cbm_layout_resolve_cross_target(cbm_store_t *store, const char *project,
+                                        const char *target_qualified_name,
+                                        const char *target_file, const char *target_function,
+                                        const char *route_qualified_name) {
+    if (!store || !project)
+        return 0;
+
+    cbm_node_t node;
+    memset(&node, 0, sizeof(node));
+    if (target_qualified_name && target_qualified_name[0] &&
+        cbm_store_find_node_by_qn(store, project, target_qualified_name, &node) == CBM_STORE_OK) {
+        int64_t id = node.id;
+        cbm_node_free_fields(&node);
+        return id;
+    }
+
+    if (target_file && target_file[0] && target_function && target_function[0]) {
+        cbm_node_t *nodes = NULL;
+        int count = 0;
+        if (cbm_store_find_nodes_by_file(store, project, target_file, &nodes, &count) ==
+            CBM_STORE_OK) {
+            int64_t name_match = 0;
+            for (int i = 0; i < count; i++) {
+                if (nodes[i].qualified_name &&
+                    strcmp(nodes[i].qualified_name, target_function) == 0) {
+                    int64_t id = nodes[i].id;
+                    cbm_store_free_nodes(nodes, count);
+                    return id;
+                }
+                if (!name_match && nodes[i].name && strcmp(nodes[i].name, target_function) == 0)
+                    name_match = nodes[i].id;
+            }
+            cbm_store_free_nodes(nodes, count);
+            if (name_match)
+                return name_match;
+        }
+    }
+
+    memset(&node, 0, sizeof(node));
+    if (route_qualified_name && route_qualified_name[0] &&
+        cbm_store_find_node_by_qn(store, project, route_qualified_name, &node) == CBM_STORE_OK) {
+        int64_t id = node.id;
+        cbm_node_free_fields(&node);
+        return id;
+    }
+    return 0;
+}
+
+cbm_layout_result_t *cbm_layout_compute_with_required_nodes(
+    cbm_store_t *store, const char *project, cbm_layout_level_t level, const char *center_node,
+    int radius, int max_nodes, const int64_t *required_node_ids, int required_node_count) {
     if (!store || !project)
         return NULL;
     max_nodes = clamp_max_nodes(max_nodes);
@@ -526,6 +653,9 @@ cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
     memset(&search_out, 0, sizeof(search_out));
     if (cbm_store_search(store, &params, &search_out) != CBM_STORE_OK)
         return calloc(CBM_ALLOC_ONE, sizeof(cbm_layout_result_t));
+
+    pin_required_nodes(store, project, max_nodes, required_node_ids, required_node_count,
+                       &search_out);
 
     int n = search_out.count, total_count = search_out.total;
     if (n == 0) {
@@ -774,6 +904,13 @@ cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
     free_edge_array(all_edges, mapped);
     cbm_store_search_free(&search_out);
     return result;
+}
+
+cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
+                                        cbm_layout_level_t level, const char *center_node,
+                                        int radius, int max_nodes) {
+    return cbm_layout_compute_with_required_nodes(store, project, level, center_node, radius,
+                                                  max_nodes, NULL, 0);
 }
 
 void cbm_layout_free(cbm_layout_result_t *r) {

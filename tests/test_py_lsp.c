@@ -96,6 +96,52 @@ TEST(pylsp_no_crash_on_syntax_error) {
     PASS();
 }
 
+/* Regression for Python-to-service cross-repository route extraction. */
+TEST(pylsp_http_url_propagation) {
+    CBMFileResult *r = extract_py(
+        "import asyncio\n"
+        "import requests\n"
+        "BASE = 'http://java-service'\n"
+        "def run(item_id):\n"
+        "    url = BASE + f'/api/items/{item_id}'\n"
+        "    requests.post(url=url, method='POST')\n"
+        "    endpoint = '/api/session'\n"
+        "    session.request(method='POST', url=endpoint)\n"
+        "    CallJavaFunc.nvwa_analysis_service_call(method='POST', url='/api/bridge')\n"
+        "    return asyncio.to_thread(requests.post, url='/api/nested')\n");
+    ASSERT_NOT_NULL(r);
+    bool found_requests = false, found_session = false, found_bridge = false;
+    bool found_nested = false;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *call = &r->calls.items[i];
+        if (!call->callee_name || !call->first_string_arg) {
+            continue;
+        }
+        if (strstr(call->callee_name, "requests.post") &&
+            strstr(call->first_string_arg, "/api/items/{}")) {
+            found_requests = call->http_method && strcmp(call->http_method, "POST") == 0;
+        }
+        if (strstr(call->callee_name, "session.request") &&
+            strcmp(call->first_string_arg, "/api/session") == 0) {
+            found_session = call->http_method && strcmp(call->http_method, "POST") == 0;
+        }
+        if (strstr(call->callee_name, "nvwa_analysis_service_call") &&
+            strcmp(call->first_string_arg, "/api/bridge") == 0) {
+            found_bridge = call->http_method && strcmp(call->http_method, "POST") == 0;
+        }
+        if (strstr(call->callee_name, "requests.post") &&
+            strcmp(call->first_string_arg, "/api/nested") == 0) {
+            found_nested = true;
+        }
+    }
+    ASSERT_TRUE(found_requests);
+    ASSERT_TRUE(found_session);
+    ASSERT_TRUE(found_bridge);
+    ASSERT_TRUE(found_nested);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(pylsp_smoke_imports_passed_through) {
     /* Imports populate ctx->import_local_names — Phase 2 just verifies
      * the unified extractor still produces them; resolution happens in
@@ -1424,6 +1470,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_smoke_one_function);
     RUN_TEST(pylsp_smoke_one_class);
     RUN_TEST(pylsp_no_crash_on_syntax_error);
+    RUN_TEST(pylsp_http_url_propagation);
     RUN_TEST(pylsp_smoke_imports_passed_through);
     /* Phase 3 — imports → scope */
     RUN_TEST(pylsp_import_simple);

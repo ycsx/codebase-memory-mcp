@@ -6309,6 +6309,35 @@ TEST(index_repository_honors_allowed_root) {
     PASS();
 }
 
+TEST(cross_repo_intelligence_honors_name_override) {
+    const char *saved_supervisor = getenv("CBM_INDEX_SUPERVISOR");
+    char *saved_copy = saved_supervisor ? strdup(saved_supervisor) : NULL;
+    cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_handle_tool(
+        srv, "index_repository",
+        "{\"repo_path\":\"C:/source-directory\","
+        "\"name\":\"custom-source-index\","
+        "\"mode\":\"cross-repo-intelligence\","
+        "\"target_projects\":[\"missing-target\"]}");
+
+    ASSERT_NOT_NULL(resp);
+    ASSERT_TRUE(response_contains_json_fragment(resp, "\"status\":\"success\""));
+    ASSERT_TRUE(response_contains_json_fragment(resp, "\"project\":\"custom-source-index\""));
+
+    free(resp);
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_INDEX_SUPERVISOR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_INDEX_SUPERVISOR");
+    }
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -6317,6 +6346,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_path_within_root_rejects_escape);
     RUN_TEST(detect_changes_rejects_option_like_base_branch);
     RUN_TEST(index_repository_honors_allowed_root);
+    RUN_TEST(cross_repo_intelligence_honors_name_override);
     /* JSON-RPC parsing */
     RUN_TEST(jsonrpc_parse_request);
     RUN_TEST(jsonrpc_parse_notification);

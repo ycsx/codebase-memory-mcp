@@ -11,6 +11,7 @@
 #include "foundation/mem.h" // cbm_mem_init/budget (back-pressure futile-nap test)
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/pass_cross_repo.h"
 #include "store/store.h"
 #include "git/git_context.h"
 #include "foundation/dump_verify.h"
@@ -992,6 +993,204 @@ static int count_nodes_named(cbm_store_t *s, const char *project, const char *na
     return n;
 }
 
+static bool http_edge_has(cbm_store_t *s, const char *project, const char *url,
+                          const char *method) {
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    if (cbm_store_find_edges_by_type(s, project, "HTTP_CALLS", &edges, &count) != CBM_STORE_OK) {
+        return false;
+    }
+    char url_prop[CBM_SZ_512];
+    char method_prop[CBM_SZ_64];
+    snprintf(url_prop, sizeof(url_prop), "\"url_path\":\"%s\"", url);
+    if (method) {
+        snprintf(method_prop, sizeof(method_prop), "\"method\":\"%s\"", method);
+    }
+    bool found = false;
+    for (int i = 0; i < count; i++) {
+        const char *props = edges[i].properties_json;
+        if (props && strstr(props, url_prop) && (!method || strstr(props, method_prop))) {
+            found = true;
+            break;
+        }
+    }
+    cbm_store_free_edges(edges, count);
+    return found;
+}
+
+static void write_web_http_fixture(const char *tmp) {
+    write_temp_file(tmp, "src/web.js",
+                    "const ModuleApi = { save: '/api/module/save' };\n"
+                    "export function send(ordinary, apiClient) {\n"
+                    "  this.$http.post('/api/orders?preview=true', {});\n"
+                    "  this.context.getPlugin('http').get('api/users');\n"
+                    "  http.patch('v2/api/items/42', {});\n"
+                    "  apiClient.delete('/api/items/42');\n"
+                    "  const localUrl = ordinary.enabled ? '/api/local/on' : '/api/local/off';\n"
+                    "  this.$http.post(localUrl, {});\n"
+                    "  const LocalApi = { detail: '/api/local/detail' };\n"
+                    "  apiClient.patch(LocalApi.detail, {});\n"
+                    "  apiClient.get(ModuleApi.save);\n"
+                    "  ordinary.post('/api/not-http', {});\n"
+                    "}\n"
+                    "export function register(router, handler) {\n"
+                    "  router.post('/api/server', handler);\n"
+                    "  httpRouter.put('/api/http-server', handler);\n"
+                    "}\n");
+}
+
+static int assert_web_http_edges(cbm_store_t *s, const char *project) {
+    ASSERT_TRUE(http_edge_has(s, project, "/api/orders", "POST"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/users", "GET"));
+    ASSERT_TRUE(http_edge_has(s, project, "/v2/api/items/42", "PATCH"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/items/42", "DELETE"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/local/on", "POST"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/local/off", "POST"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/local/detail", "PATCH"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/module/save", "GET"));
+    ASSERT_FALSE(http_edge_has(s, project, "/api/not-http", "POST"));
+    ASSERT_FALSE(http_edge_has(s, project, "/api/server", "POST"));
+    ASSERT_FALSE(http_edge_has(s, project, "/api/http-server", "PUT"));
+    return 0;
+}
+
+TEST(pipeline_web_http_receivers_sequential) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_web_http_seq_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_web_http_fixture(tmp);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/web_http_seq.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(assert_web_http_edges(s, project), 0);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_web_http_receivers_parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_web_http_par_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_web_http_fixture(tmp);
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.js", i);
+        snprintf(body, sizeof(body), "export function filler%d() { return %d; }\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/web_http_par.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(assert_web_http_edges(s, project), 0);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_web_java_gateway_prefix_cross_match) {
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cbm_cross_alias_XXXXXX");
+    if (!cbm_mkdtemp(root)) {
+        FAIL("tmpdir");
+    }
+
+    char web_dir[512];
+    char java_dir[512];
+    char cache_dir[512];
+    snprintf(web_dir, sizeof(web_dir), "%s/web", root);
+    snprintf(java_dir, sizeof(java_dir), "%s/java", root);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", root);
+    ASSERT_EQ(cbm_mkdir(web_dir), 0);
+    ASSERT_EQ(cbm_mkdir(java_dir), 0);
+    ASSERT_EQ(cbm_mkdir(cache_dir), 0);
+
+    write_temp_file(web_dir, "src/api.js",
+                    "import axios from 'axios';\n"
+                    "export function fetchChat() {\n"
+                    "  return axios.post('/api/public/chat/completions', {});\n"
+                    "}\n");
+    write_temp_file(java_dir, "src/ChatController.java",
+                    "import org.springframework.web.bind.annotation.*;\n"
+                    "@RestController\n"
+                    "@RequestMapping(\"/api/nwgpt\")\n"
+                    "public class ChatController {\n"
+                    "  @PostMapping(\"/chat/completions\")\n"
+                    "  public String chatCompletions() { return \"ok\"; }\n"
+                    "}\n");
+
+    char *web_project = cbm_project_name_from_path(web_dir);
+    char *java_project = cbm_project_name_from_path(java_dir);
+    ASSERT_NOT_NULL(web_project);
+    ASSERT_NOT_NULL(java_project);
+
+    char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? strdup(old_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
+
+    char web_db[768];
+    char java_db[768];
+    snprintf(web_db, sizeof(web_db), "%s/%s.db", cache_dir, web_project);
+    snprintf(java_db, sizeof(java_db), "%s/%s.db", cache_dir, java_project);
+
+    cbm_pipeline_t *web_pipeline = cbm_pipeline_new(web_dir, web_db, CBM_MODE_FULL);
+    cbm_pipeline_t *java_pipeline = cbm_pipeline_new(java_dir, java_db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(web_pipeline);
+    ASSERT_NOT_NULL(java_pipeline);
+    ASSERT_EQ(cbm_pipeline_run(web_pipeline), 0);
+    ASSERT_EQ(cbm_pipeline_run(java_pipeline), 0);
+
+    const char *target = java_project;
+    cbm_cross_repo_result_t cross = cbm_cross_repo_match(web_project, &target, 1);
+    ASSERT_EQ(cross.http_edges, 1);
+
+    cbm_store_t *web_store = cbm_store_open_path(web_db);
+    ASSERT_NOT_NULL(web_store);
+    ASSERT_EQ(cbm_store_count_edges_by_type(web_store, web_project, "CROSS_HTTP_CALLS"), 1);
+    cbm_store_close(web_store);
+
+    cbm_pipeline_free(web_pipeline);
+    cbm_pipeline_free(java_pipeline);
+    if (saved_cache) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache, 1);
+        free(saved_cache);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(web_project);
+    free(java_project);
+    th_rmtree(root);
+    PASS();
+}
+
 /* Parallel-resolver regression for the TS/JS receiver guard (>= 50 files forces
  * pass_parallel.c's resolve_file_calls). The guard must not drop a weak member
  * match before the service classification runs — it suppresses ONLY the plain
@@ -1094,16 +1293,12 @@ TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges) {
     cbm_store_t *s = cbm_store_open_path(db_path);
     ASSERT_NOT_NULL(s);
 
-    /* (1) Genuine HTTP_CALLS survive under the guard (>= 3):
-     *   - axios.get('/api/orders') -> 2 edges (recognized lib #523 callee bypass
-     *     + detect_url_in_args), and
-     *   - dev.load('/api/data')    -> 1 edge via detect_url_in_args, which runs
-     *     unconditionally after emit_service_edge's branch even when the plain
-     *     fall-through is suppressed.
-     * dev.load is the class the predicate-duplicating guard lost: `.load` is not
-     * a route suffix and `dev` is not an HTTP lib, so it was dropped before
-     * emit_service_edge ran (RED on that guard: only axios's 2). */
-    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 3);
+    /* (1) Genuine HTTP_CALLS survive under the guard without duplicate ANY
+     * edges: axios.get emits one GET edge, while dev.load is recovered by the
+     * generic URL-argument scan as one ANY edge. */
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 2);
+    ASSERT_TRUE(http_edge_has(s, project, "/api/orders", "GET"));
+    ASSERT_TRUE(http_edge_has(s, project, "/api/data", NULL));
     /* (2) The verb-suffix + route-path member calls keep their route
      * registrations (edge type CALLS -> a Route node named by the path). These
      * classify as route_registration on main, NOT HTTP_CALLS — Option A preserves
@@ -1225,6 +1420,226 @@ TEST(pipeline_native_fetch_parallel_classified_as_http_calls) {
         cbm_unsetenv("CBM_WORKERS");
     }
     th_rmtree(tmp);
+    PASS();
+}
+
+/* Python HTTP propagation: local URL variables, f-strings/concatenation,
+ * keyword url/method arguments, injected clients, and nested
+ * asyncio.to_thread(requests.post, ...). */
+TEST(pipeline_python_http_propagation_and_helpers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_http_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "client.py",
+                    "import asyncio\n"
+                    "import requests\n"
+                    "BASE = 'http://java-service'\n"
+                    "\n"
+                    "def load(item_id):\n"
+                    "    url = BASE + f'/api/items/{item_id}'\n"
+                    "    return requests.post(url=url, method='POST')\n"
+                    "\n"
+                    "def injected():\n"
+                    "    endpoint = '/api/injected'\n"
+                    "    return self._client.post(url=endpoint)\n"
+                    "\n"
+                    "def session_call():\n"
+                    "    endpoint = '/api/session'\n"
+                    "    return session.request(method='POST', url=endpoint)\n"
+                    "\n"
+                    "def java_bridge():\n"
+                    "    path = '/api/bridge'\n"
+                    "    return CallJavaFunc.nvwa_analysis_service_call(method='POST', url=path)\n"
+                    "\n"
+                    "async def nested():\n"
+                    "    return await asyncio.to_thread(requests.post, url='/api/nested')\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/py_http.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 5);
+    cbm_edge_t *http_edges = NULL;
+    int http_count = 0;
+    ASSERT_EQ(cbm_store_find_edges_by_type(s, project, "HTTP_CALLS", &http_edges, &http_count),
+              CBM_STORE_OK);
+    bool found_load = false, found_injected = false, found_session = false, found_bridge = false;
+    bool found_nested = false;
+    for (int i = 0; i < http_count; i++) {
+        const char *props = http_edges[i].properties_json;
+        if (!props) {
+            continue;
+        }
+        if (strstr(props, "\"url_path\":\"http://java-service/api/items/{}\"") &&
+            strstr(props, "\"method\":\"POST\"")) {
+            found_load = true;
+        }
+        if (strstr(props, "\"url_path\":\"/api/injected\"")) {
+            found_injected = true;
+        }
+        if (strstr(props, "\"url_path\":\"/api/session\"") &&
+            strstr(props, "\"method\":\"POST\"")) {
+            found_session = true;
+        }
+        if (strstr(props, "\"url_path\":\"/api/bridge\"") &&
+            strstr(props, "\"method\":\"POST\"")) {
+            found_bridge = true;
+        }
+        if (strstr(props, "\"url_path\":\"/api/nested\"")) {
+            found_nested = true;
+        }
+    }
+    cbm_store_free_edges(http_edges, http_count);
+    ASSERT_TRUE(found_load);
+    ASSERT_TRUE(found_injected);
+    ASSERT_TRUE(found_session);
+    ASSERT_TRUE(found_bridge);
+    ASSERT_TRUE(found_nested);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_python_chained_imported_route_registration) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_chained_route_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "api.py",
+                    "from fastapi import FastAPI\n\n"
+                    "app = FastAPI()\n\n"
+                    "def create_app():\n"
+                    "    from handlers import create_item, read_item\n"
+                    "    app.post(\n"
+                    "        '/v2/api/items/create',\n"
+                    "        tags=['items'],\n"
+                    "        summary='create'\n"
+                    "    )(create_item)\n"
+                    "    app.get(\n"
+                    "        '/v2/api/items/read',\n"
+                    "        tags=['items']\n"
+                    "    )(read_item)\n");
+    write_temp_file(tmp, "handlers.py",
+                    "async def create_item():\n    return {'ok': True}\n\n"
+                    "async def read_item():\n    return {'ok': True}\n\n"
+                    "def post():\n    return None\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/chained_route.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HANDLES"), 2);
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 0);
+    ASSERT_EQ(count_nodes_named(s, project, "/v2/api/items/create"), 1);
+    ASSERT_EQ(count_nodes_named(s, project, "/v2/api/items/read"), 1);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+static void write_java_http_wrapper_fixture(const char *tmp) {
+    write_temp_file(tmp, "src/.keep", "");
+    write_temp_file(tmp, "src/api/PythonApiConst.java",
+                    "package api;\n"
+                    "public final class PythonApiConst {\n"
+                    "  public static final String RUN_TASK = \"/python/tasks/run\";\n"
+                    "}\n");
+    write_temp_file(tmp, "src/http/RestTemplate.java",
+                    "package http;\n"
+                    "public class RestTemplate {\n"
+                    "  public Object exchange(String url, String method) { return null; }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/client/PythonBridge.java",
+                    "package client;\n"
+                    "import http.RestTemplate;\n"
+                    "public class PythonBridge {\n"
+                    "  private final RestTemplate restTemplate = new RestTemplate();\n"
+                    "  private final String host = \"http://python-service\";\n"
+                    "  public Object invoke(String url, String method) {\n"
+                    "    String finalUrl = host + url;\n"
+                    "    return restTemplate.exchange(finalUrl, method);\n"
+                    "  }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/jobs/RunJob.java",
+                    "package jobs;\n"
+                    "import api.PythonApiConst;\n"
+                    "import client.PythonBridge;\n"
+                    "public class RunJob {\n"
+                    "  private final PythonBridge bridge = new PythonBridge();\n"
+                    "  public Object run() {\n"
+                    "    return bridge.invoke(PythonApiConst.RUN_TASK, \"POST\");\n"
+                    "  }\n"
+                    "}\n");
+}
+
+static int run_java_http_wrapper_pipeline(bool parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), parallel ? "/tmp/cbm_java_http_par_XXXXXX"
+                                        : "/tmp/cbm_java_http_seq_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_java_http_wrapper_fixture(tmp);
+    if (parallel) {
+        for (int i = 0; i < 52; i++) {
+            char name[64];
+            char body[160];
+            snprintf(name, sizeof(name), "src/filler/Filler%d.java", i);
+            snprintf(body, sizeof(body),
+                     "package filler; public class Filler%d { public int value() { return %d; } }\n",
+                     i, i);
+            write_temp_file(tmp, name, body);
+        }
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    if (parallel) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/java_http.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_TRUE(http_edge_has(s, project, "/python/tasks/run", "POST"));
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (parallel) {
+        if (saved) {
+            cbm_setenv("CBM_WORKERS", saved, 1);
+        } else {
+            cbm_unsetenv("CBM_WORKERS");
+        }
+    }
+    free(saved);
+    th_rmtree(tmp);
+    return 0;
+}
+
+TEST(pipeline_java_http_wrapper_propagation_sequential) {
+    ASSERT_EQ(run_java_http_wrapper_pipeline(false), 0);
+    PASS();
+}
+
+TEST(pipeline_java_http_wrapper_propagation_parallel) {
+    ASSERT_EQ(run_java_http_wrapper_pipeline(true), 0);
     PASS();
 }
 
@@ -6998,9 +7413,16 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_calls_resolution);
     RUN_TEST(pipeline_incremental_preserves_cross_file_calls);
     RUN_TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_web_http_receivers_sequential);
+    RUN_TEST(pipeline_web_http_receivers_parallel);
+    RUN_TEST(pipeline_web_java_gateway_prefix_cross_match);
     RUN_TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges);
     RUN_TEST(pipeline_native_fetch_classified_as_http_calls);
     RUN_TEST(pipeline_native_fetch_parallel_classified_as_http_calls);
+    RUN_TEST(pipeline_python_http_propagation_and_helpers);
+    RUN_TEST(pipeline_python_chained_imported_route_registration);
+    RUN_TEST(pipeline_java_http_wrapper_propagation_sequential);
+    RUN_TEST(pipeline_java_http_wrapper_propagation_parallel);
     RUN_TEST(pipeline_local_fetch_shadow_not_classified_as_http);
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);

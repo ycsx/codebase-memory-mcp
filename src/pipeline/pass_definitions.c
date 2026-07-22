@@ -291,6 +291,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     append_json_str_array(buf, bufsize, &pos, "param_names", def->param_names);
     append_json_str_array(buf, bufsize, &pos, "param_types", def->param_types);
     append_json_string(buf, bufsize, &pos, "route_path", def->route_path);
+    append_json_str_array(buf, bufsize, &pos, "route_paths", def->route_paths);
     append_json_string(buf, bufsize, &pos, "route_method", def->route_method);
 
     /* MinHash fingerprint — append if present and buffer has room. */

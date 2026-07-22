@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { StatsTab, IndexProgress } from "./StatsTab";
+import { CrossRepositoryPanel, StatsTab, IndexProgress } from "./StatsTab";
 import { messages } from "../lib/i18n";
 
 function mockProjectsFetch(extra?: (url: string, init?: RequestInit) => Response | undefined) {
@@ -421,5 +421,96 @@ describe("IndexProgress", () => {
 
     // onDismiss should be called after manual dismissal
     expect(onDismiss).toHaveBeenCalled();
+  });
+});
+
+describe("CrossRepositoryPanel", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const projects = [
+    { project: { name: "aikb-web-enhanced", root_path: "C:/project/aikb-web" } },
+    { project: { name: "C-project-aikb-java", root_path: "C:/project/aikb-java" } },
+  ];
+
+  it("runs cross-repository intelligence with the exact source index name", async () => {
+    let submitted: unknown = null;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/ui-config") {
+        return new Response(JSON.stringify({ lang: "en" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/rpc") {
+        const request = JSON.parse(String(init?.body));
+        submitted = request.params;
+        return new Response(JSON.stringify({
+          result: { content: [{ text: JSON.stringify({
+            status: "success",
+            project: "aikb-web-enhanced",
+            projects_scanned: 1,
+            cross_http_calls: 838,
+            cross_async_calls: 2,
+            cross_channel: 1,
+            cross_grpc_calls: 0,
+            cross_graphql_calls: 0,
+            cross_trpc_calls: 0,
+            total_cross_edges: 841,
+            elapsed_ms: 24.6,
+          }) }] },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onComplete = vi.fn();
+
+    render(<CrossRepositoryPanel projects={projects} onComplete={onComplete} />);
+    const source = await screen.findByLabelText(messages.en.crossRepo.source);
+    fireEvent.change(source, { target: { value: "aikb-web-enhanced" } });
+    fireEvent.click(await screen.findByRole("button", { name: messages.en.crossRepo.run }));
+
+    await waitFor(() => {
+      expect(submitted).toEqual({
+        name: "index_repository",
+        arguments: {
+          repo_path: "C:/project/aikb-web",
+          name: "aikb-web-enhanced",
+          mode: "cross-repo-intelligence",
+          target_projects: ["C-project-aikb-java"],
+        },
+      });
+    });
+    expect(await screen.findByText(messages.en.crossRepo.complete)).toBeInTheDocument();
+    expect(screen.getByText("841")).toBeInTheDocument();
+    expect(screen.getByText("838")).toBeInTheDocument();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows MCP errors without refreshing project data", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/ui-config") {
+        return new Response(JSON.stringify({ lang: "en" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({
+        error: { code: -32000, message: "source index is unavailable" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onComplete = vi.fn();
+
+    render(<CrossRepositoryPanel projects={projects} onComplete={onComplete} />);
+    fireEvent.click(await screen.findByRole("button", { name: messages.en.crossRepo.run }));
+
+    expect(await screen.findByText("source index is unavailable")).toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
   });
 });

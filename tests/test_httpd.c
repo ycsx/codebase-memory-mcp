@@ -26,6 +26,8 @@
 #include <store/store.h>
 #include <watcher/watcher.h>
 
+#include <yyjson/yyjson.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -519,6 +521,184 @@ static int ui_delete_request(th_server_t *ts, const char *target, char *resp, si
     char req[512];
     snprintf(req, sizeof(req), "DELETE %s HTTP/1.1\r\n\r\n", target);
     return th_http(cbm_http_server_port(ts->srv), req, resp, respsz);
+}
+
+static bool ui_layout_json_has_node(yyjson_val *nodes, int64_t id) {
+    size_t idx, max;
+    yyjson_val *node;
+    yyjson_arr_foreach(nodes, idx, max, node) {
+        yyjson_val *node_id = yyjson_obj_get(node, "id");
+        if (node_id && yyjson_get_sint(node_id) == id)
+            return true;
+    }
+    return false;
+}
+
+/* Java as the primary project must retain both caller endpoints and return
+ * independently sampled Web + Python satellites. The target handler QNs are
+ * intentionally different from the local Route QNs, reproducing the old
+ * cross_edges=0 behavior. */
+TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges) {
+    /* Keep the SQLite fixture path ASCII even when the workspace's absolute
+     * Windows path contains non-ASCII user-name characters. */
+    char temp_pattern[] = "build/c/cbm_httpd_layout_XXXXXX";
+    char *tmpdir = cbm_mkdtemp(temp_pattern);
+    ASSERT_NOT_NULL(tmpdir);
+    char cache_dir[512];
+    /* The freshly-created temp directory can serve directly as CBM_CACHE_DIR.
+     * This also avoids platform-specific mixed-separator mkdir behavior. */
+    snprintf(cache_dir, sizeof(cache_dir), "%s", tmpdir);
+    const char *old_cache_raw = getenv("CBM_CACHE_DIR");
+    char *old_cache = old_cache_raw ? strdup(old_cache_raw) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/java.db", cache_dir);
+    cbm_store_t *java = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(java);
+    ASSERT_EQ(cbm_store_upsert_project(java, "java", "/tmp/java"), CBM_STORE_OK);
+    cbm_node_t java_web = {.project = "java",
+                           .label = "Method",
+                           .name = "javaToWeb",
+                           .qualified_name = "java.Controller.javaToWeb",
+                           .file_path = "src/Controller.java"};
+    cbm_node_t java_python = {.project = "java",
+                              .label = "Method",
+                              .name = "javaToPython",
+                              .qualified_name = "java.Controller.javaToPython",
+                              .file_path = "src/Controller.java"};
+    cbm_node_t web_route = {.project = "java",
+                            .label = "Route",
+                            .name = "POST /web",
+                            .qualified_name = "__route__POST/web"};
+    cbm_node_t python_route = {.project = "java",
+                               .label = "Route",
+                               .name = "POST /python",
+                               .qualified_name = "__route__POST/python"};
+    int64_t java_web_id = cbm_store_upsert_node(java, &java_web);
+    int64_t java_python_id = cbm_store_upsert_node(java, &java_python);
+    int64_t web_route_id = cbm_store_upsert_node(java, &web_route);
+    int64_t python_route_id = cbm_store_upsert_node(java, &python_route);
+    ASSERT_GT(java_web_id, 0);
+    ASSERT_GT(java_python_id, 0);
+    cbm_edge_t to_web = {
+        .project = "java",
+        .source_id = java_web_id,
+        .target_id = web_route_id,
+        .type = "CROSS_HTTP_CALLS",
+        .properties_json =
+            "{\"target_project\":\"web\",\"target_function\":\"callJava\","
+            "\"target_file\":\"src/api.ts\"}"};
+    cbm_edge_t to_python = {
+        .project = "java",
+        .source_id = java_python_id,
+        .target_id = python_route_id,
+        .type = "CROSS_HTTP_CALLS",
+        .properties_json =
+            "{\"target_project\":\"python\",\"target_function\":\"call_java\","
+            "\"target_file\":\"server/client.py\"}"};
+    ASSERT_GT(cbm_store_insert_edge(java, &to_web), 0);
+    ASSERT_GT(cbm_store_insert_edge(java, &to_python), 0);
+    cbm_store_close(java);
+
+    snprintf(path, sizeof(path), "%s/web.db", cache_dir);
+    cbm_store_t *web = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(web);
+    ASSERT_EQ(cbm_store_upsert_project(web, "web", "/tmp/web"), CBM_STORE_OK);
+    cbm_node_t web_noise1 = {.project = "web",
+                             .label = "Function",
+                             .name = "aaa",
+                             .qualified_name = "web.aaa"};
+    cbm_node_t web_noise2 = {.project = "web",
+                             .label = "Function",
+                             .name = "bbb",
+                             .qualified_name = "web.bbb"};
+    cbm_node_t web_handler = {.project = "web",
+                              .label = "Function",
+                              .name = "callJava",
+                              .qualified_name = "web.api.callJava",
+                              .file_path = "src/api.ts"};
+    cbm_store_upsert_node(web, &web_noise1);
+    cbm_store_upsert_node(web, &web_noise2);
+    int64_t web_handler_id = cbm_store_upsert_node(web, &web_handler);
+    ASSERT_GT(web_handler_id, 0);
+    cbm_store_close(web);
+
+    snprintf(path, sizeof(path), "%s/python.db", cache_dir);
+    cbm_store_t *python = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(python);
+    ASSERT_EQ(cbm_store_upsert_project(python, "python", "/tmp/python"), CBM_STORE_OK);
+    cbm_node_t python_noise1 = {.project = "python",
+                                .label = "Function",
+                                .name = "aaa",
+                                .qualified_name = "python.aaa"};
+    cbm_node_t python_noise2 = {.project = "python",
+                                .label = "Function",
+                                .name = "bbb",
+                                .qualified_name = "python.bbb"};
+    cbm_node_t python_handler = {.project = "python",
+                                 .label = "Function",
+                                 .name = "call_java",
+                                 .qualified_name = "python.client.call_java",
+                                 .file_path = "server/client.py"};
+    cbm_store_upsert_node(python, &python_noise1);
+    cbm_store_upsert_node(python, &python_noise2);
+    int64_t python_handler_id = cbm_store_upsert_node(python, &python_handler);
+    ASSERT_GT(python_handler_id, 0);
+    cbm_store_close(python);
+
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char response[65536];
+    int response_len =
+        th_http(cbm_http_server_port(ts.srv),
+                "GET /api/layout?project=java&max_nodes=2 HTTP/1.1\r\n\r\n", response,
+                sizeof(response));
+    ASSERT_GT(response_len, 0);
+    ASSERT_EQ(th_status(response), 200);
+    th_server_stop(&ts);
+
+    const char *body = strstr(response, "\r\n\r\n");
+    ASSERT_NOT_NULL(body);
+    body += 4;
+    yyjson_doc *doc = yyjson_read(body, strlen(body), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *primary_nodes = yyjson_obj_get(root, "nodes");
+    ASSERT_TRUE(ui_layout_json_has_node(primary_nodes, java_web_id));
+    ASSERT_TRUE(ui_layout_json_has_node(primary_nodes, java_python_id));
+
+    yyjson_val *linked = yyjson_obj_get(root, "linked_projects");
+    ASSERT_EQ(yyjson_arr_size(linked), 2);
+    bool found_web = false, found_python = false;
+    size_t idx, max;
+    yyjson_val *entry;
+    yyjson_arr_foreach(linked, idx, max, entry) {
+        const char *project = yyjson_get_str(yyjson_obj_get(entry, "project"));
+        yyjson_val *cross_edges = yyjson_obj_get(entry, "cross_edges");
+        ASSERT_EQ(yyjson_arr_size(cross_edges), 1);
+        yyjson_val *edge = yyjson_arr_get_first(cross_edges);
+        int64_t target = yyjson_get_sint(yyjson_obj_get(edge, "target"));
+        yyjson_val *nodes = yyjson_obj_get(entry, "nodes");
+        ASSERT_TRUE(ui_layout_json_has_node(nodes, target));
+        if (project && strcmp(project, "web") == 0) {
+            found_web = target == web_handler_id;
+        } else if (project && strcmp(project, "python") == 0) {
+            found_python = target == python_handler_id;
+        }
+    }
+    ASSERT_TRUE(found_web);
+    ASSERT_TRUE(found_python);
+    yyjson_doc_free(doc);
+
+    if (old_cache) {
+        cbm_setenv("CBM_CACHE_DIR", old_cache, 1);
+        free(old_cache);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_cleanup(tmpdir);
+    PASS();
 }
 
 TEST(ui_server_unknown_path_404) {
@@ -1318,6 +1498,7 @@ SUITE(httpd) {
     RUN_TEST(ui_server_oversized_body_rejected);
     RUN_TEST(ui_server_encoded_slash_not_routed);
     RUN_TEST(ui_server_nul_in_target_rejected);
+    RUN_TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges);
     RUN_TEST(ui_server_browse_traversal_probe);
     RUN_TEST(ui_server_browse_utf8_directory);
     RUN_TEST(ui_server_delete_project_unwatches_after_delete);

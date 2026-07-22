@@ -361,7 +361,81 @@ TEST(handles_spring_java) {
 }
 
 /* Spring (Kotlin) — same prefix contract, including Kotlin's named array form
- * for class-level RequestMapping values. */
+ * Relative path and array regressions follow before the Kotlin fixture. */
+TEST(handles_spring_java_relative_paths) {
+    static const char *routes[] = {"/api/nwgpt/list", "/api/nwgpt/migration/list", NULL};
+    static const EtFile f[] = {
+        {"RelativeController.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.*;\n\n"
+         "@RequestMapping(\"/api/nwgpt\")\npublic class RelativeController {\n"
+         "    @PostMapping(\"list\")\n"
+         "    public String list() { return \"ok\"; }\n\n"
+         "    @GetMapping(path = \"migration/list\", produces = \"application/json\")\n"
+         "    public String migrationList() { return \"ok\"; }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* FastAPI callable registration form used by apps that keep route declarations
+ * separate from handler implementations: app.post(path)(handler). */
+TEST(handles_fastapi_chained_registration_python) {
+    static const EtFile f[] = {
+        {"api.py",
+         "from fastapi import FastAPI\n\napp = FastAPI()\n\n"
+         "async def create_item():\n    return {'ok': True}\n\n"
+         "async def read_item():\n    return {'ok': True}\n\n"
+         "app.post('/v2/api/items/create')(create_item)\n"
+         "app.get('/v2/api/items/read')(read_item)\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    PASS();
+}
+
+/* Real FastAPI applications commonly import handlers inside create_app() and
+ * register them with the callable decorator form. A project-level `post`
+ * symbol must not make the registration look like an outbound HTTP call. */
+TEST(handles_fastapi_chained_imported_registration_python) {
+    static const EtFile f[] = {
+        {"api.py",
+         "from fastapi import FastAPI\n\napp = FastAPI()\n\n"
+         "def create_app():\n"
+         "    from handlers import create_item, read_item\n"
+         "    app.post(\n"
+         "        '/v2/api/items/create',\n"
+         "        tags=['items'],\n"
+         "        summary='create'\n"
+         "    )(create_item)\n"
+         "    app.get(\n"
+         "        '/v2/api/items/read',\n"
+         "        tags=['items']\n"
+         "    )(read_item)\n"},
+        {"handlers.py",
+         "async def create_item():\n    return {'ok': True}\n\n"
+         "async def read_item():\n    return {'ok': True}\n\n"
+         "def post():\n    return None\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 2));
+    PASS();
+}
+
+TEST(handles_spring_java_array_paths) {
+    static const char *routes[] = {
+        "/api/nwgpt/migration/list", "/anon/api/nwgpt/migration/list",
+        "/api/nwgpt/migration/batch/run", "/anon/api/nwgpt/migration/batch/run", NULL};
+    static const EtFile f[] = {
+        {"MigrationController.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.*;\n\n"
+         "@RequestMapping({\"/api/nwgpt/migration\", \"/anon/api/nwgpt/migration/\"})\n"
+         "public class MigrationController {\n"
+         "    @PostMapping({\"list\", \"batch/run\"})\n"
+         "    public String migrate() { return \"ok\"; }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 4));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Kotlin named-array form for a class-level RequestMapping value. */
 TEST(handles_spring_kotlin) {
     static const char *routes[] = {"/internal/v1/api/orders", "/internal/v1/api/orders/{id}", NULL};
     static const EtFile f[] = {
@@ -1491,11 +1565,15 @@ SUITE(edge_types_probe) {
     /* HANDLES — route→handler across web frameworks (8 frameworks) */
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
+    RUN_TEST(handles_fastapi_chained_registration_python);
+    RUN_TEST(handles_fastapi_chained_imported_registration_python);
     RUN_TEST(handles_drf_action_python);
     RUN_TEST(handles_express_ts);
     RUN_TEST(handles_fastify_js);
     RUN_TEST(handles_gin_go);
     RUN_TEST(handles_spring_java);
+    RUN_TEST(handles_spring_java_relative_paths);
+    RUN_TEST(handles_spring_java_array_paths);
     RUN_TEST(handles_spring_kotlin);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_laravel_php);

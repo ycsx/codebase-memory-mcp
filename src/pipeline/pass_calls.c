@@ -364,8 +364,13 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                  const cbm_resolution_t *res, cbm_svc_kind_t svc,
                                  bool suppress_plain_calls) {
     const char *url_or_topic = call->first_string_arg;
-    bool is_url = (url_or_topic && url_or_topic[0] != '\0' &&
-                   (url_or_topic[0] == '/' || strstr(url_or_topic, "://") != NULL));
+    char normalized_url[CBM_SZ_1K];
+    bool is_url = svc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                               url_or_topic, normalized_url,
+                                               sizeof(normalized_url));
+    if (is_url) {
+        url_or_topic = normalized_url;
+    }
     bool is_topic = (url_or_topic && url_or_topic[0] != '\0' && svc == CBM_SVC_ASYNC &&
                      strlen(url_or_topic) > PAIR_LEN);
     if (!is_url && !is_topic) {
@@ -387,8 +392,11 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         return;
     }
     const char *edge_type = (svc == CBM_SVC_HTTP) ? "HTTP_CALLS" : "ASYNC_CALLS";
-    const char *method =
-        (svc == CBM_SVC_HTTP) ? cbm_service_pattern_http_method(call->callee_name) : NULL;
+    const char *method = (svc == CBM_SVC_HTTP)
+                             ? (call->http_method
+                                    ? call->http_method
+                                    : cbm_service_pattern_http_method(call->callee_name))
+                             : NULL;
     const char *broker =
         (svc == CBM_SVC_ASYNC) ? cbm_service_pattern_broker(res->qualified_name) : NULL;
     int64_t route_id = create_svc_route_node(ctx, url_or_topic, svc, method, broker);
@@ -428,6 +436,19 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                  const char **imp_keys, const char **imp_vals, int imp_count,
                                  bool suppress_plain_calls) {
     cbm_svc_kind_t svc = cbm_service_pattern_match(res->qualified_name);
+    if (svc == CBM_SVC_NONE) {
+        svc = cbm_service_pattern_match(call->callee_name);
+    }
+    /* A receiver method such as FastAPI's app.get/app.post can be weakly
+     * resolved by the language layer to an unrelated indexed method (for
+     * example dict.get).  Preserve the route-registration signal carried by
+     * the raw callee suffix, matching the parallel pipeline's fallback. */
+    if (call->is_route_registration) {
+        svc = CBM_SVC_ROUTE_REG;
+    } else if (svc == CBM_SVC_NONE &&
+               cbm_service_pattern_route_method(call->callee_name) != NULL) {
+        svc = CBM_SVC_ROUTE_REG;
+    }
     if (svc == CBM_SVC_ROUTE_REG && call->first_string_arg && call->first_string_arg[0] == '/') {
         handle_route_registration(ctx, call, source, module_qn, imp_keys, imp_vals, imp_count);
         return;
@@ -492,6 +513,15 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         return 0;
     }
 
+    if (call->is_http_wrapper) {
+        cbm_resolution_t wrapper_res = {.qualified_name = call->callee_name,
+                                        .confidence = PC_SVC_PATTERN_CONF,
+                                        .strategy = "java_http_wrapper",
+                                        .candidate_count = 1};
+        emit_http_async_edge(ctx, call, source_node, NULL, &wrapper_res, CBM_SVC_HTTP, false);
+        return SKIP_ONE;
+    }
+
     /* LSP-resolved calls take precedence over registry-textual matching.
      * Unique-tail fallbacks are JVM-only (see cbm_pipeline_lsp_allow_tail_match). */
     bool allow_tail = cbm_pipeline_lsp_allow_tail_match(lang);
@@ -524,9 +554,11 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     cbm_svc_kind_t csvc = cbm_service_pattern_match(call->callee_name);
     if (csvc == CBM_SVC_HTTP || csvc == CBM_SVC_ASYNC) {
         const char *cu = call->first_string_arg;
-        bool chas_url = cu && cu[0] != '\0' &&
-                        (cu[0] == '/' || strstr(cu, "://") != NULL ||
-                         (csvc == CBM_SVC_ASYNC && strlen(cu) > PAIR_LEN));
+        char normalized_url[CBM_SZ_1K];
+        bool chas_url =
+            (csvc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                         cu, normalized_url, sizeof(normalized_url))) ||
+            (csvc == CBM_SVC_ASYNC && cu && strlen(cu) > PAIR_LEN);
         if (chas_url) {
             cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
                                         .confidence = PC_SVC_PATTERN_CONF,
@@ -571,9 +603,11 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         }
         if (esvc == CBM_SVC_HTTP || esvc == CBM_SVC_ASYNC) {
             const char *u = call->first_string_arg;
-            bool has_url_or_topic = u && u[0] != '\0' &&
-                                    (u[0] == '/' || strstr(u, "://") != NULL ||
-                                     (esvc == CBM_SVC_ASYNC && strlen(u) > PAIR_LEN));
+            char normalized_url[CBM_SZ_1K];
+            bool has_url_or_topic =
+                (esvc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                             u, normalized_url, sizeof(normalized_url))) ||
+                (esvc == CBM_SVC_ASYNC && u && strlen(u) > PAIR_LEN);
             if (has_url_or_topic) {
                 cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
                                             .confidence = PC_SVC_PATTERN_CONF,
@@ -625,9 +659,11 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     cbm_svc_kind_t svc = cbm_service_pattern_match(res.qualified_name);
     if (svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) {
         const char *u = call->first_string_arg;
-        bool has_url_or_topic = u && u[0] != '\0' &&
-                                (u[0] == '/' || strstr(u, "://") != NULL ||
-                                 (svc == CBM_SVC_ASYNC && strlen(u) > PAIR_LEN));
+        char normalized_url[CBM_SZ_1K];
+        bool has_url_or_topic =
+            (svc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                        u, normalized_url, sizeof(normalized_url))) ||
+            (svc == CBM_SVC_ASYNC && u && strlen(u) > PAIR_LEN);
         if (has_url_or_topic) {
             emit_http_async_edge(ctx, call, source_node, NULL, &res, svc, false);
             return SKIP_ONE;
@@ -743,6 +779,10 @@ static CBMFileResult *calls_get_or_extract(cbm_pipeline_ctx_t *ctx, int idx,
 
 int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count) {
     cbm_log_info("pass.start", "pass", "calls", "files", itoa_log(file_count));
+
+    if (ctx->result_cache) {
+        cbm_pipeline_propagate_java_http(files, file_count, ctx->result_cache);
+    }
 
     /* ObjectScript: build the method-return-type table from the definitions
      * already in the graph buffer so `Set x = obj.Method()` can resolve x's

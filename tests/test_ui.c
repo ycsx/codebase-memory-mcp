@@ -341,6 +341,81 @@ TEST(layout_respects_max_nodes) {
     PASS();
 }
 
+TEST(layout_required_nodes_replace_sample_without_exceeding_budget) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "test", "/tmp/test"), CBM_STORE_OK);
+
+    int64_t required_id = 0;
+    for (int i = 0; i < 20; i++) {
+        char name[32], qn[64];
+        snprintf(name, sizeof(name), "fn%02d", i);
+        snprintf(qn, sizeof(qn), "test::fn%02d", i);
+        cbm_node_t node = {.project = "test",
+                           .label = "Function",
+                           .name = name,
+                           .qualified_name = qn,
+                           .file_path = "src/sample.c"};
+        int64_t id = cbm_store_upsert_node(store, &node);
+        ASSERT_GT(id, 0);
+        if (i == 19)
+            required_id = id;
+    }
+
+    cbm_layout_result_t *layout = cbm_layout_compute_with_required_nodes(
+        store, "test", CBM_LAYOUT_OVERVIEW, NULL, 0, 5, &required_id, 1);
+    ASSERT_NOT_NULL(layout);
+    ASSERT_EQ(layout->node_count, 5);
+    ASSERT_EQ(layout->total_nodes, 20);
+    bool found_required = false;
+    for (int i = 0; i < layout->node_count; i++) {
+        if (layout->nodes[i].id == required_id)
+            found_required = true;
+    }
+    ASSERT_TRUE(found_required);
+
+    cbm_layout_free(layout);
+    cbm_store_close(store);
+    PASS();
+}
+
+TEST(layout_cross_target_prefers_identity_then_route_fallback) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, "java", "/tmp/java"), CBM_STORE_OK);
+
+    cbm_node_t handler = {.project = "java",
+                          .label = "Method",
+                          .name = "pageList",
+                          .qualified_name = "java.RecognitionController.pageList",
+                          .file_path = "src/RecognitionController.java"};
+    cbm_node_t route = {.project = "java",
+                        .label = "Route",
+                        .name = "POST /api/recognition/pageList",
+                        .qualified_name = "__route__POST/api/recognition/pageList"};
+    int64_t handler_id = cbm_store_upsert_node(store, &handler);
+    int64_t route_id = cbm_store_upsert_node(store, &route);
+    ASSERT_GT(handler_id, 0);
+    ASSERT_GT(route_id, 0);
+
+    int64_t resolved = cbm_layout_resolve_cross_target(
+        store, "java", NULL, "src/RecognitionController.java", "pageList",
+        "__route__POST/api/recognition/pageList");
+    ASSERT_EQ(resolved, handler_id);
+
+    resolved = cbm_layout_resolve_cross_target(
+        store, "java", "java.RecognitionController.pageList", "wrong/file.java", "wrong",
+        "__route__POST/api/recognition/pageList");
+    ASSERT_EQ(resolved, handler_id);
+
+    resolved = cbm_layout_resolve_cross_target(store, "java", NULL, "wrong/file.java", "wrong",
+                                                "__route__POST/api/recognition/pageList");
+    ASSERT_EQ(resolved, route_id);
+
+    cbm_store_close(store);
+    PASS();
+}
+
 TEST(layout_clamps_render_cap_from_env) {
     cbm_store_t *store = cbm_store_open_memory();
     ASSERT_NOT_NULL(store);
@@ -824,6 +899,8 @@ SUITE(ui) {
     RUN_TEST(layout_single_node);
     RUN_TEST(layout_two_connected);
     RUN_TEST(layout_respects_max_nodes);
+    RUN_TEST(layout_required_nodes_replace_sample_without_exceeding_budget);
+    RUN_TEST(layout_cross_target_prefers_identity_then_route_fallback);
     RUN_TEST(layout_clamps_render_cap_from_env);
     RUN_TEST(layout_honors_budget_above_default);
     RUN_TEST(layout_deterministic);

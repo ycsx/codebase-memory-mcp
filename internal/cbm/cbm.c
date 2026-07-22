@@ -1017,6 +1017,19 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     cbm_extract_definitions(&ctx);
     cbm_extract_imports(&ctx);
     cbm_extract_unified(&ctx);
+    if (ctx.string_constants.count > 0) {
+        size_t bytes = (size_t)ctx.string_constants.count * sizeof(CBMStringConstant);
+        result->string_constants = cbm_arena_alloc(a, bytes);
+        if (result->string_constants) {
+            result->string_constant_count = ctx.string_constants.count;
+            for (int i = 0; i < ctx.string_constants.count; i++) {
+                result->string_constants[i] =
+                    (CBMStringConstant){.name = ctx.string_constants.names[i],
+                                        .value = ctx.string_constants.values[i],
+                                        .owner = ctx.string_constants.owners[i]};
+            }
+        }
+    }
 
     // Channel detection (Socket.IO / EventEmitter) — JS/TS only.
     cbm_extract_channels(&ctx);

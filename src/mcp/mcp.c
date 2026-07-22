@@ -4957,8 +4957,14 @@ static char *get_project_root(cbm_mcp_server_t *srv, const char *project) {
 /* ── index_repository ─────────────────────────────────────────── */
 
 /* Handle mode="cross-repo-intelligence" — extract to reduce complexity. */
-static char *handle_cross_repo_mode(const char *repo_path, const char *args) {
-    char *project = heap_strdup(cbm_project_name_from_path(repo_path));
+static char *handle_cross_repo_mode(const char *repo_path, const char *name_override,
+                                    const char *args) {
+    const char *project_name =
+        (name_override && name_override[0]) ? name_override : cbm_project_name_from_path(repo_path);
+    if (!cbm_validate_project_name(project_name)) {
+        return cbm_mcp_text_result("invalid project name", true);
+    }
+    char *project = heap_strdup(project_name);
     if (!project) {
         return cbm_mcp_text_result("cannot derive project name", true);
     }
@@ -5752,8 +5758,8 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
 
     if (mode_str && strcmp(mode_str, "cross-repo-intelligence") == 0) {
         free(mode_str);
+        char *result = handle_cross_repo_mode(repo_path, name_override, args);
         free(name_override);
-        char *result = handle_cross_repo_mode(repo_path, args);
         free(repo_path);
         return result;
     }

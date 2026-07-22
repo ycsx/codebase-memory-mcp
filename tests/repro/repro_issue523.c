@@ -360,6 +360,45 @@ TEST(repro_issue523_template_fuzzy_match) {
 }
 
 /*
+ * TEST: a public gateway prefix must match the provider's internal route.
+ * The deployed AIKB gateway exposes /api/public/* while the Java controller
+ * registers the same suffix below /api/nwgpt/*. Direct route matching must be
+ * attempted first, then this explicit prefix alias is used as a fallback.
+ */
+TEST(repro_issue523_gateway_prefix_alias_match) {
+    RProj client, server;
+    bool ok = cr536_setup(&client,
+                          "import requests\n"
+                          "\n"
+                          "\n"
+                          "def fetch_chat():\n"
+                          "    return requests.post(\"/api/public/chat/completions\")\n",
+                          &server,
+                          "from flask import Flask, jsonify\n"
+                          "\n"
+                          "app = Flask(__name__)\n"
+                          "\n"
+                          "\n"
+                          "@app.post(\"/api/nwgpt/chat/completions\")\n"
+                          "def chat_completions():\n"
+                          "    return jsonify({\"status\": \"ok\"})\n");
+    if (!ok) {
+        rh_cleanup(&client, NULL);
+        rh_cleanup(&server, NULL);
+        FAIL("fixture precondition failed (client HTTP_CALLS / server Route missing)");
+    }
+
+    const char *tgt = server.project;
+    cbm_cross_repo_result_t r = cbm_cross_repo_match(client.project, &tgt, 1);
+    fprintf(stderr, "  [523] gateway prefix alias: http_edges=%d (expected>=1)\n", r.http_edges);
+
+    rh_cleanup(&client, NULL);
+    rh_cleanup(&server, NULL);
+    ASSERT_GTE(r.http_edges, 1);
+    PASS();
+}
+
+/*
  * TEST: matching initiated from the PROVIDER side must still find the link.
  * WHY RED on unfixed code: match_http_routes only scans the source project's
  * HTTP_CALLS — the server has none, so the provider-side run reports 0.
@@ -480,6 +519,7 @@ SUITE(repro_issue523) {
     RUN_TEST(repro_issue523_crossrepo_http_calls_edge);
     RUN_TEST(repro_issue523_scheme_stripped_url_match);
     RUN_TEST(repro_issue523_template_fuzzy_match);
+    RUN_TEST(repro_issue523_gateway_prefix_alias_match);
     RUN_TEST(repro_issue523_reverse_direction_match);
     RUN_TEST(repro_issue523_idempotent_cross_edges);
 }

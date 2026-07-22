@@ -12,6 +12,7 @@
 #define CBM_SERVICE_PATTERNS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Edge type returned by pattern match. */
 typedef enum {
@@ -43,6 +44,12 @@ cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn);
  * locally resolvable `function fetch(){}` / `const fetch = () => {}` is
  * classified via its real resolved QN instead and never reaches this check. */
 bool cbm_service_pattern_is_global_fetch(const char *callee_name);
+
+/* Normalize an outbound HTTP target into a route-matchable URL. In addition
+ * to absolute paths and full URLs, accepts explicit relative API forms such
+ * as "api/orders" and "v2/api/orders" and prefixes their leading slash.
+ * Query strings/fragments are omitted because they are not route identity. */
+bool cbm_service_pattern_normalize_http_url(const char *literal, char *out, size_t out_sz);
 
 /* Per-worker TLS cache for cbm_service_pattern_match results. The
  * pattern matcher runs once per resolved CALL edge in emit_service_

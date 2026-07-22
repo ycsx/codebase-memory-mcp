@@ -707,6 +707,69 @@ static bool is_string_node(const char *kind);
 
 // --- Module-level constant collection ---
 
+static void string_constant_put(CBMExtractCtx *ctx, const char *name, const char *value,
+                                const char *owner) {
+    if (!name || !name[0] || !value || !value[0]) {
+        return;
+    }
+    CBMStringConstantMap *map = &ctx->string_constants;
+    if (map->count >= CBM_MAX_STRING_CONSTANTS) {
+        return;
+    }
+    map->names[map->count] = name;
+    map->values[map->count] = value;
+    map->owners[map->count] = owner;
+    map->count++;
+}
+
+static const char *static_object_key(CBMExtractCtx *ctx, TSNode key_node) {
+    char *key = cbm_node_text(ctx->arena, key_node, ctx->source);
+    if (!key || !key[0]) {
+        return NULL;
+    }
+    size_t len = strlen(key);
+    if (len >= 2 && (key[0] == '\'' || key[0] == '"') && key[len - 1] == key[0]) {
+        return cbm_arena_strndup(ctx->arena, key + 1, len - 2);
+    }
+    return key;
+}
+
+/* Retain exported/module API object leaves as compound names. For example,
+ * `AnnotateSampleApi.saveSample` is later qualified with the module QN and
+ * resolved from an imported member expression in a Vue consumer. */
+static void collect_static_object_strings(CBMExtractCtx *ctx, TSNode object_node,
+                                          const char *prefix, int depth) {
+    if (!prefix || depth >= 8 || strcmp(ts_node_type(object_node), "object") != 0) {
+        return;
+    }
+    uint32_t count = ts_node_named_child_count(object_node);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode pair = ts_node_named_child(object_node, i);
+        if (strcmp(ts_node_type(pair), "pair") != 0) {
+            continue;
+        }
+        TSNode key_node = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        TSNode value_node = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+        if (ts_node_is_null(key_node) || ts_node_is_null(value_node)) {
+            continue;
+        }
+        const char *key = static_object_key(ctx, key_node);
+        if (!key || !key[0]) {
+            continue;
+        }
+        const char *compound = cbm_arena_sprintf(ctx->arena, "%s.%s", prefix, key);
+        if (!compound) {
+            continue;
+        }
+        if (strcmp(ts_node_type(value_node), "object") == 0) {
+            collect_static_object_strings(ctx, value_node, compound, depth + 1);
+            continue;
+        }
+        const char *value = cbm_evaluate_static_string(ctx, value_node, 0);
+        string_constant_put(ctx, compound, value, NULL);
+    }
+}
+
 static void handle_string_constants(CBMExtractCtx *ctx, TSNode node, const WalkState *state) {
     /* Only collect at module level (not inside functions/classes) */
     if (state->enclosing_func_qn != NULL && state->enclosing_func_qn != ctx->module_qn) {
@@ -746,33 +809,26 @@ static void handle_string_constants(CBMExtractCtx *ctx, TSNode node, const WalkS
         return;
     }
 
-    /* Value must be a string literal */
-    if (!is_string_node(ts_node_type(value_node))) {
-        return;
-    }
-
     char *name = cbm_node_text(ctx->arena, name_node, ctx->source);
-    char *value = cbm_node_text(ctx->arena, value_node, ctx->source);
-    if (!name || !name[0] || !value || !value[0]) {
+    if (!name || !name[0]) {
         return;
     }
 
-    /* Strip quotes from value */
-    int vlen = (int)strlen(value);
-    if (vlen >= CBM_QUOTE_PAIR && (value[0] == '"' || value[0] == '\'')) {
-        value = cbm_arena_strndup(ctx->arena, value + SKIP_ONE, (size_t)(vlen - PAIR_LEN));
-        if (!value) {
-            return;
+    if (strcmp(ts_node_type(value_node), "object") == 0) {
+        collect_static_object_strings(ctx, value_node, name, 0);
+        return;
+    }
+
+    const char *value = cbm_evaluate_static_string(ctx, value_node, 0);
+    if (!value && is_string_node(ts_node_type(value_node))) {
+        value = cbm_node_text(ctx->arena, value_node, ctx->source);
+        int vlen = value ? (int)strlen(value) : 0;
+        if (vlen >= CBM_QUOTE_PAIR && (value[0] == '"' || value[0] == '\'')) {
+            value = cbm_arena_strndup(ctx->arena, value + SKIP_ONE,
+                                     (size_t)(vlen - PAIR_LEN));
         }
     }
-
-    /* Add to constant map */
-    CBMStringConstantMap *map = &ctx->string_constants;
-    if (map->count < CBM_MAX_STRING_CONSTANTS) {
-        map->names[map->count] = name;
-        map->values[map->count] = value;
-        map->count++;
-    }
+    string_constant_put(ctx, name, value, state->enclosing_class_qn);
 }
 
 // --- String literal collection ---

@@ -407,48 +407,11 @@ static void match_infra_routes(cbm_gbuf_t *gb) {
 /* Phase 2a: Ensure all functions with route_path properties have Route+HANDLES edges.
  * During incremental indexing, only changed files get Route nodes from extraction.
  * This pass scans ALL Function/Method nodes and creates missing Route+HANDLES. */
-/* Extract a JSON string property value into buf. Returns true if found. */
-static bool extract_json_prop(const char *json, const char *key, char *buf, int bufsz) {
-    if (!json) {
-        return false;
-    }
-    char pattern[CBM_SZ_64];
-    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) {
-        return false;
-    }
-    p += strlen(pattern);
-    const char *end = strchr(p, '"');
-    if (!end || end <= p) {
-        return false;
-    }
-    int len = (int)(end - p);
-    if (len >= bufsz) {
-        return false;
-    }
-    memcpy(buf, p, (size_t)len);
-    buf[len] = '\0';
-    return true;
-}
-
-/* Process a single Function/Method node: create Route+HANDLES if it has route_path.
- * Returns 1 if a new HANDLES edge was created, 0 otherwise. */
-static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
-    if (!func->properties_json) {
-        return 0;
-    }
-
-    char path[CBM_SZ_256];
-    if (!extract_json_prop(func->properties_json, "route_path", path, sizeof(path))) {
-        return 0;
-    }
+static int ensure_decorator_route_path(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func,
+                                       const char *path, const char *method) {
     if (path[0] != '/') {
         return 0;
     }
-
-    char method[CBM_SZ_16] = "ANY";
-    extract_json_prop(func->properties_json, "route_method", method, sizeof(method));
 
     char route_qn[CBM_ROUTE_QN_SIZE];
     char cpath[CBM_SZ_256];
@@ -477,6 +440,43 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
              func->qualified_name ? func->qualified_name : "");
     cbm_gbuf_insert_edge(gb, func->id, route_id, "HANDLES", hprops);
     return SKIP_ONE;
+}
+
+/* Process a single Function/Method node. route_paths is emitted for annotation
+ * arrays; older indexes and single-path definitions retain route_path. */
+static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
+    if (!func->properties_json) {
+        return 0;
+    }
+    yyjson_doc *doc = yyjson_read(func->properties_json, strlen(func->properties_json), 0);
+    if (!doc) {
+        return 0;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *method_val = yyjson_obj_get(root, "route_method");
+    const char *method = yyjson_is_str(method_val) ? yyjson_get_str(method_val) : "ANY";
+    int created = 0;
+
+    yyjson_val *paths = yyjson_obj_get(root, "route_paths");
+    if (yyjson_is_arr(paths)) {
+        yyjson_val *path_val;
+        yyjson_arr_iter iter;
+        yyjson_arr_iter_init(paths, &iter);
+        while ((path_val = yyjson_arr_iter_next(&iter))) {
+            const char *path = yyjson_get_str(path_val);
+            if (path) {
+                created += ensure_decorator_route_path(gb, func, path, method);
+            }
+        }
+    } else {
+        yyjson_val *path_val = yyjson_obj_get(root, "route_path");
+        const char *path = yyjson_is_str(path_val) ? yyjson_get_str(path_val) : NULL;
+        if (path) {
+            created = ensure_decorator_route_path(gb, func, path, method);
+        }
+    }
+    yyjson_doc_free(doc);
+    return created;
 }
 
 /* Phase 2a: Ensure all functions with route_path properties have Route+HANDLES edges. */

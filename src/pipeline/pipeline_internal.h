@@ -503,6 +503,9 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                                   int file_count, CBMFileResult **result_cache);
 
+int cbm_pipeline_propagate_java_http(const cbm_file_info_t *files, int file_count,
+                                     CBMFileResult **result_cache);
+
 /* Phase 4: Parallel call/usage/semantic resolution.
  * Each worker resolves calls, usages, throws, rw, inherits, decorates,
  * and implements edges into per-worker edge bufs, then merges.

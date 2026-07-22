@@ -12,6 +12,7 @@
  */
 #include "service_patterns.h"
 
+#include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -550,6 +551,65 @@ static const lib_pattern_t *match_qn(const char *qn, const lib_pattern_t *patter
     return NULL;
 }
 
+static bool contains_case_insensitive(const char *text, const char *needle) {
+    if (!text || !needle || !needle[0]) {
+        return false;
+    }
+    size_t nlen = strlen(needle);
+    for (const char *p = text; *p; p++) {
+        size_t i = 0;
+        while (i < nlen && p[i] &&
+               tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) {
+            i++;
+        }
+        if (i == nlen) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Framework-neutral wrapper/client detection. Library-only matching misses
+ * injected clients (`session.request`, `self._client.post`) and local HTTP
+ * bridge helpers (`foo_service_call`). This remains conservative: the caller
+ * also requires a URL-shaped argument before emitting HTTP_CALLS. */
+static bool looks_like_http_helper(const char *qn) {
+    if (!qn || !qn[0]) {
+        return false;
+    }
+    const char *leaf = strrchr(qn, '.');
+    leaf = leaf ? leaf + 1 : qn;
+    /* Names such as httpRouter.post are server-side registrars, not injected
+     * clients. They reach the route-registration fallback below. */
+    if (contains_case_insensitive(qn, "router")) {
+        return false;
+    }
+    /* Preserve the existing Supertest-style route-registration fallback for
+     * request(app).get('/path'). Python/JS HTTP clients use a member receiver
+     * such as session.request or client.get and do not contain this shape. */
+    if (contains_case_insensitive(qn, "request(")) {
+        return false;
+    }
+    bool helper_leaf = contains_case_insensitive(leaf, "service_call") ||
+                       contains_case_insensitive(leaf, "api_call") ||
+                       contains_case_insensitive(leaf, "http_call");
+    if (helper_leaf) {
+        return true;
+    }
+    bool client_owner = contains_case_insensitive(qn, "client") ||
+                        contains_case_insensitive(qn, "session") ||
+                        contains_case_insensitive(qn, "http") ||
+                        contains_case_insensitive(qn, "request") ||
+                        contains_case_insensitive(qn, "calljava") ||
+                        contains_case_insensitive(qn, "call_java");
+    if (!client_owner) {
+        return false;
+    }
+    return cbm_service_pattern_http_method(qn) != NULL ||
+           contains_case_insensitive(leaf, "request") || strcmp(leaf, "call") == 0 ||
+           strcmp(leaf, "invoke") == 0 || strcmp(leaf, "execute") == 0;
+}
+
 static bool starts_with_segment(const char *path, const char *segment) {
     if (!path || path[0] != '/' || !segment) {
         return false;
@@ -735,6 +795,66 @@ bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *
     return true;
 }
 
+static bool is_relative_api_path(const char *path) {
+    if (strncmp(path, "api/", 4) == 0 || strncmp(path, "apis/", 5) == 0) {
+        return true;
+    }
+    if (path[0] != 'v' || !is_digit_char(path[1])) {
+        return false;
+    }
+    const char *p = path + 2;
+    while (is_digit_char(*p)) {
+        p++;
+    }
+    return strncmp(p, "/api/", 5) == 0 || strncmp(p, "/apis/", 6) == 0;
+}
+
+bool cbm_service_pattern_normalize_http_url(const char *literal, char *out, size_t out_sz) {
+    if (!literal || !out || out_sz < 2) {
+        return false;
+    }
+    const char *p = literal;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+        p++;
+    }
+    char quote = 0;
+    if (*p == '\'' || *p == '"' || *p == '`') {
+        quote = *p++;
+    }
+
+    bool full_url = strncmp(p, "http://", 7) == 0 || strncmp(p, "https://", 8) == 0;
+    bool add_slash = p[0] != '/' && !full_url && is_relative_api_path(p);
+    if (p[0] != '/' && !full_url && !add_slash) {
+        out[0] = '\0';
+        return false;
+    }
+
+    size_t oi = 0;
+    if (add_slash) {
+        out[oi++] = '/';
+    }
+    while (*p && *p != '?' && *p != '#' && (!quote || *p != quote) && oi + 1 < out_sz) {
+        if (*p == '$' && p[1] == '{') {
+            if (oi + 2 >= out_sz) {
+                break;
+            }
+            out[oi++] = '{';
+            out[oi++] = '}';
+            p += 2;
+            while (*p && *p != '}' && *p != '/') {
+                p++;
+            }
+            if (*p == '}') {
+                p++;
+            }
+            continue;
+        }
+        out[oi++] = *p++;
+    }
+    out[oi] = '\0';
+    return oi > 1 && (full_url || strchr(out + 1, '/') != NULL);
+}
+
 /* ── Public API ────────────────────────────────────────────────── */
 
 /* Per-worker TLS cache of cbm_service_pattern_match results.
@@ -807,6 +927,8 @@ cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn) {
         result = p->kind;
     else if ((p = match_qn(resolved_qn, http_libraries)))
         result = p->kind;
+    else if (looks_like_http_helper(resolved_qn))
+        result = CBM_SVC_HTTP;
     else if ((p = match_qn(resolved_qn, async_libraries)))
         result = p->kind;
     else if ((p = match_qn(resolved_qn, config_libraries)))

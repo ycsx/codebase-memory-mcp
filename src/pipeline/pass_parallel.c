@@ -501,6 +501,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     append_json_str_array(buf, bufsize, &pos, "param_names", def->param_names);
     append_json_str_array(buf, bufsize, &pos, "param_types", def->param_types);
     append_json_string(buf, bufsize, &pos, "route_path", def->route_path);
+    append_json_str_array(buf, bufsize, &pos, "route_paths", def->route_paths);
     append_json_string(buf, bufsize, &pos, "route_method", def->route_method);
 
     /* MinHash fingerprint — append if present and buffer has room.
@@ -730,16 +731,22 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info
                              def->qualified_name, def->file_path ? def->file_path : fi->rel_path,
                              (int)def->start_line, (int)def->end_line, props);
     ws->nodes_created++;
-    if (def->route_path && def->route_path[0] != '\0') {
+    const char *single_route[PAIR_LEN] = {def->route_path, NULL};
+    const char **route_paths = def->route_paths ? def->route_paths : single_route;
+    for (int path_i = 0; route_paths[path_i]; path_i++) {
+        const char *route_path = route_paths[path_i];
+        if (!route_path[0]) {
+            continue;
+        }
         const char *rm = def->route_method ? def->route_method : "ANY";
         char route_qn[CBM_ROUTE_QN_SIZE];
         char cpath[CBM_SZ_256];
         snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", rm,
-                 cbm_route_canon_path(def->route_path, cpath, sizeof(cpath)));
+                 cbm_route_canon_path(route_path, cpath, sizeof(cpath)));
         char rprops[CBM_SZ_256];
         snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", rm);
         int64_t route_id =
-            cbm_gbuf_upsert_node(ws->local_gbuf, "Route", def->route_path, route_qn,
+            cbm_gbuf_upsert_node(ws->local_gbuf, "Route", route_path, route_qn,
                                  def->file_path ? def->file_path : fi->rel_path, 0, 0, rprops);
         char hprops[CBM_SZ_512];
         char esc_h[CBM_SZ_512];
@@ -1649,9 +1656,20 @@ static int64_t build_service_route(cbm_gbuf_t *gbuf, const char *arg, const char
 static void emit_http_async_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                                          const CBMCall *call, const cbm_resolution_t *res,
                                          cbm_svc_kind_t svc, const char *arg) {
+    char normalized_url[CBM_SZ_1K];
+    if (svc == CBM_SVC_HTTP &&
+        !cbm_service_pattern_normalize_http_url(arg, normalized_url, sizeof(normalized_url))) {
+        return;
+    }
+    if (svc == CBM_SVC_HTTP) {
+        arg = normalized_url;
+    }
     const char *edge_type = (svc == CBM_SVC_HTTP) ? "HTTP_CALLS" : "ASYNC_CALLS";
-    const char *method =
-        (svc == CBM_SVC_HTTP) ? cbm_service_pattern_http_method(call->callee_name) : NULL;
+    const char *method = (svc == CBM_SVC_HTTP)
+                             ? (call->http_method
+                                    ? call->http_method
+                                    : cbm_service_pattern_http_method(call->callee_name))
+                             : NULL;
     const char *broker =
         (svc == CBM_SVC_ASYNC) ? cbm_service_pattern_broker(res->qualified_name) : NULL;
 
@@ -1769,33 +1787,7 @@ static bool is_junk_url(const char *s) {
 /* Normalize a template literal URL and reject junk patterns.
  * Returns true if norm contains a valid API path. */
 static bool normalize_url_arg(const char *url, char *norm, int norm_sz) {
-    int ni = 0;
-    const char *p = url;
-    if (*p == '`' || *p == '"' || *p == '\'') {
-        p++;
-    }
-    if (*p != '/') {
-        return false;
-    }
-    while (*p && ni < norm_sz - PAIR_LEN) {
-        if (*p == '$' && *(p + SKIP_ONE) == '{') {
-            norm[ni++] = ':';
-            p += PAIR_LEN;
-            while (*p && *p != '}' && ni < norm_sz - PAIR_LEN) {
-                norm[ni++] = *p++;
-            }
-            if (*p == '}') {
-                p++;
-            }
-        } else if (*p == '`' || *p == '"' || *p == '\'' || *p == '?') {
-            break;
-        } else {
-            norm[ni++] = *p++;
-        }
-    }
-    norm[ni] = '\0';
-    enum { MIN_URL_LEN = 4 };
-    if (ni < MIN_URL_LEN || !strchr(norm + SKIP_ONE, '/')) {
+    if (!cbm_service_pattern_normalize_http_url(url, norm, (size_t)norm_sz)) {
         return false;
     }
     return !is_junk_url(norm);
@@ -1807,7 +1799,7 @@ static void detect_url_in_args(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
     for (int ai = 0; ai < call->arg_count; ai++) {
         const CBMCallArg *ca = &call->args[ai];
         const char *url = ca->value ? ca->value : ca->expr;
-        if (!url || (url[0] != '/' && url[0] != '`')) {
+        if (!url) {
             continue;
         }
         char norm[CBM_SZ_256];
@@ -2008,10 +2000,7 @@ static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
 
 /* When suppress_plain_calls is true (a TS/JS/TSX weak short-name member-call
  * match, #592/#606), every service classification below still runs — only the
- * plain CALLS fall-through (emit_normal_calls_edge) is skipped. detect_url_in_args
- * and the HTTP/ASYNC/gRPC/GraphQL/tRPC/CONFIG/route branches are unaffected, so
- * a verb-suffix HTTP client (api.patch('/x')), broker, or route registration
- * keeps its edge; only the fabricated project CALLS edge is dropped. */
+ * plain CALLS fall-through (emit_normal_calls_edge) is skipped. */
 static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                               const cbm_gbuf_node_t *target, const CBMCall *call,
                               const cbm_resolution_t *res, const char *module_qn,
@@ -2019,11 +2008,17 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                               const char **imp_keys, const char **imp_vals, int imp_count,
                               bool suppress_plain_calls) {
     cbm_svc_kind_t svc = cbm_service_pattern_match(res->qualified_name);
+    if (svc == CBM_SVC_NONE) {
+        svc = cbm_service_pattern_match(call->callee_name);
+    }
     const char *arg = call->first_string_arg;
 
     /* Also detect route registration by callee name suffix alone (handles unresolved
      * local variables like app.include_router where QN resolution fails). */
-    if (svc == CBM_SVC_NONE && cbm_service_pattern_route_method(call->callee_name) != NULL) {
+    if (call->is_route_registration) {
+        svc = CBM_SVC_ROUTE_REG;
+    } else if (svc == CBM_SVC_NONE &&
+               cbm_service_pattern_route_method(call->callee_name) != NULL) {
         svc = CBM_SVC_ROUTE_REG;
     }
 
@@ -2050,11 +2045,18 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
         /* No path found — fall through to normal CALLS edge */
     }
 
-    bool has_url = (arg && arg[0] != '\0' && (arg[0] == '/' || strstr(arg, "://") != NULL));
+    char normalized_url[CBM_SZ_1K];
+    bool has_url = svc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                               arg, normalized_url, sizeof(normalized_url));
     bool has_topic = (arg && arg[0] != '\0' && svc == CBM_SVC_ASYNC && strlen(arg) > PP_ESC_SPACE);
 
     if ((svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) && (has_url || has_topic)) {
-        emit_http_async_service_edge(gbuf, source, call, res, svc, arg);
+        emit_http_async_service_edge(gbuf, source, call, res, svc,
+                                     svc == CBM_SVC_HTTP ? normalized_url : arg);
+        /* The classified edge already carries its concrete HTTP method. The
+         * generic argument scan would add a second ANY edge for the same call,
+         * inflating both HTTP_CALLS and CROSS_HTTP_CALLS counts. */
+        return;
     } else if (svc == CBM_SVC_GRPC) {
         emit_grpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_GRAPHQL) {
@@ -2211,6 +2213,16 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             continue;
         }
 
+        if (call->is_http_wrapper) {
+            cbm_resolution_t wrapper_res = {.qualified_name = call->callee_name,
+                                            .confidence = PP_HALF_CONF,
+                                            .strategy = "java_http_wrapper"};
+            emit_http_async_service_edge(ws->local_edge_buf, source_node, call, &wrapper_res,
+                                         CBM_SVC_HTTP, call->first_string_arg);
+            ws->calls_resolved++;
+            continue;
+        }
+
         /* LSP-resolved calls take precedence over registry textual matching.
          * Same helper + same CBM_LSP_CONFIDENCE_FLOOR as the sequential
          * pipeline (pass_calls.c) — both paths must admit the same set of
@@ -2308,9 +2320,11 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         cbm_svc_kind_t csvc = cbm_service_pattern_match(call->callee_name);
         if (csvc == CBM_SVC_HTTP || csvc == CBM_SVC_ASYNC) {
             const char *cu = call->first_string_arg;
-            bool chas_url = cu && cu[0] != '\0' &&
-                            (cu[0] == '/' || strstr(cu, "://") != NULL ||
-                             (csvc == CBM_SVC_ASYNC && strlen(cu) > PP_ESC_SPACE));
+            char normalized_url[CBM_SZ_1K];
+            bool chas_url =
+                (csvc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                             cu, normalized_url, sizeof(normalized_url))) ||
+                (csvc == CBM_SVC_ASYNC && cu && strlen(cu) > PP_ESC_SPACE);
             if (chas_url) {
                 cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
                                             .confidence = PP_HALF_CONF,
@@ -2337,12 +2351,14 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                  * from res->qualified_name via cbm_service_pattern_match, which
                  * "fetch" deliberately never matches (mirrors pass_calls.c). */
                 const char *u = call->first_string_arg;
-                if (u && u[0] != '\0' && (u[0] == '/' || strstr(u, "://") != NULL)) {
+                char normalized_url[CBM_SZ_1K];
+                if (cbm_service_pattern_normalize_http_url(u, normalized_url,
+                                                           sizeof(normalized_url))) {
                     cbm_resolution_t fake_res = {.qualified_name = call->callee_name,
                                                  .confidence = PP_HALF_CONF,
                                                  .strategy = "service_pattern"};
                     emit_http_async_service_edge(ws->local_edge_buf, source_node, call, &fake_res,
-                                                 CBM_SVC_HTTP, u);
+                                                 CBM_SVC_HTTP, normalized_url);
                 }
             }
             continue;
@@ -2369,9 +2385,11 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             cbm_svc_kind_t psvc = cbm_service_pattern_match(res.qualified_name);
             if ((psvc == CBM_SVC_HTTP || psvc == CBM_SVC_ASYNC) && !target_node) {
                 const char *u = call->first_string_arg;
-                bool url_or_topic = u && u[0] != '\0' &&
-                                    (u[0] == '/' || strstr(u, "://") != NULL ||
-                                     (psvc == CBM_SVC_ASYNC && strlen(u) > PP_ESC_SPACE));
+                char normalized_url[CBM_SZ_1K];
+                bool url_or_topic =
+                    (psvc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                                 u, normalized_url, sizeof(normalized_url))) ||
+                    (psvc == CBM_SVC_ASYNC && u && strlen(u) > PP_ESC_SPACE);
                 if (url_or_topic) {
                     emit_service_edge(ws->local_edge_buf, source_node, NULL, call, &res, module_qn,
                                       rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count,
@@ -2895,6 +2913,8 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     if (file_count == 0) {
         return 0;
     }
+
+    cbm_pipeline_propagate_java_http(files, file_count, result_cache);
 
     cbm_log_info("parallel.resolve.start", "files", itoa_log(file_count), "workers",
                  itoa_log(worker_count));

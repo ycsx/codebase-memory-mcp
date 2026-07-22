@@ -1642,6 +1642,151 @@ enum { LAYOUT_MAX_LINKED = 16 };
 #define LAYOUT_GALAXY_SPACING 600.0
 #define LAYOUT_GALAXY_PAD 400.0
 
+typedef struct {
+    int64_t source;
+    int64_t target;
+    char *type;
+} layout_cross_edge_t;
+
+typedef struct {
+    layout_cross_edge_t *edges;
+    int count;
+    int capacity;
+    int64_t *target_ids;
+    int target_count;
+    int target_capacity;
+} layout_cross_set_t;
+
+static bool layout_id_list_append_unique(int64_t **ids, int *count, int *capacity, int64_t id) {
+    if (id <= 0)
+        return false;
+    for (int i = 0; i < *count; i++) {
+        if ((*ids)[i] == id)
+            return true;
+    }
+    if (*count >= *capacity) {
+        int next = *capacity > 0 ? *capacity * 2 : 64;
+        int64_t *grown = realloc(*ids, (size_t)next * sizeof(*grown));
+        if (!grown)
+            return false;
+        *ids = grown;
+        *capacity = next;
+    }
+    (*ids)[(*count)++] = id;
+    return true;
+}
+
+static bool layout_cross_set_append(layout_cross_set_t *set, int64_t source, int64_t target,
+                                    const char *type) {
+    if (!set || source <= 0 || target <= 0 || !type)
+        return false;
+    if (set->count >= set->capacity) {
+        int next = set->capacity > 0 ? set->capacity * 2 : 64;
+        layout_cross_edge_t *grown = realloc(set->edges, (size_t)next * sizeof(*grown));
+        if (!grown)
+            return false;
+        set->edges = grown;
+        set->capacity = next;
+    }
+    char *type_copy = strdup(type);
+    if (!type_copy)
+        return false;
+    set->edges[set->count++] =
+        (layout_cross_edge_t){.source = source, .target = target, .type = type_copy};
+    (void)layout_id_list_append_unique(&set->target_ids, &set->target_count,
+                                       &set->target_capacity, target);
+    return true;
+}
+
+static void layout_cross_set_free(layout_cross_set_t *set) {
+    if (!set)
+        return;
+    for (int i = 0; i < set->count; i++)
+        free(set->edges[i].type);
+    free(set->edges);
+    free(set->target_ids);
+    memset(set, 0, sizeof(*set));
+}
+
+static bool layout_has_node(const cbm_layout_result_t *layout, int64_t id) {
+    if (!layout)
+        return false;
+    for (int i = 0; i < layout->node_count; i++) {
+        if (layout->nodes[i].id == id)
+            return true;
+    }
+    return false;
+}
+
+/* Pin caller nodes before the primary layout is sampled. The set is unique
+ * and ordered by node id, matching the bounded, deterministic pinning policy
+ * in layout3d.c. */
+static int64_t *find_cross_source_ids(cbm_store_t *store, const char *project, int *out_count) {
+    *out_count = 0;
+    struct sqlite3 *db = cbm_store_get_db(store);
+    if (!db)
+        return NULL;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT DISTINCT source_id FROM edges "
+                           "WHERE project = ?1 AND type LIKE 'CROSS_%' "
+                           "ORDER BY source_id",
+                           -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, project, -1, SQLITE_STATIC);
+    int64_t *ids = NULL;
+    int count = 0, capacity = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (!layout_id_list_append_unique(&ids, &count, &capacity,
+                                          sqlite3_column_int64(stmt, 0)))
+            break;
+    }
+    sqlite3_finalize(stmt);
+    *out_count = count;
+    return ids;
+}
+
+/* Resolve CROSS_* records against the linked store. Identity metadata wins;
+ * the local Route QN is only a compatibility fallback for old indexes. */
+static void find_resolved_cross_edges(cbm_store_t *source_store, const char *source_project,
+                                      cbm_store_t *target_store, const char *target_project,
+                                      layout_cross_set_t *out) {
+    struct sqlite3 *db = cbm_store_get_db(source_store);
+    if (!db || !target_store || !out)
+        return;
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "SELECT e.source_id, e.type, n.qualified_name, "
+        "json_extract(e.properties, '$.target_qualified_name'), "
+        "json_extract(e.properties, '$.target_file'), "
+        "json_extract(e.properties, '$.target_function') "
+        "FROM edges e LEFT JOIN nodes n "
+        "  ON n.id = e.target_id AND n.project = e.project "
+        "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
+        "  AND json_valid(e.properties) "
+        "  AND json_extract(e.properties, '$.target_project') = ?2 "
+        "ORDER BY e.source_id, e.id";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(stmt, 1, source_project, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, target_project, -1, SQLITE_STATIC);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t source = sqlite3_column_int64(stmt, 0);
+        const char *type = (const char *)sqlite3_column_text(stmt, 1);
+        const char *route_qn = (const char *)sqlite3_column_text(stmt, 2);
+        const char *target_qn = (const char *)sqlite3_column_text(stmt, 3);
+        const char *target_file = (const char *)sqlite3_column_text(stmt, 4);
+        const char *target_function = (const char *)sqlite3_column_text(stmt, 5);
+        int64_t target = cbm_layout_resolve_cross_target(target_store, target_project, target_qn,
+                                                         target_file, target_function, route_qn);
+        if (target > 0 && type)
+            (void)layout_cross_set_append(out, source, target, type);
+    }
+    sqlite3_finalize(stmt);
+}
+
 /* Bounding-radius of a layout result: max distance from origin across all
  * nodes. Used to size galaxy spacing so satellites don't overlap the primary
  * cluster. Layouts with a 1000-node cluster have radius ~1500; the previous
@@ -1767,16 +1912,20 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         return;
     }
 
-    cbm_layout_result_t *layout =
-        cbm_layout_compute(store, scoped_project, CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes);
-
-    /* Find linked projects from CROSS_* edges. Keep `store` open through the
-     * linked-projects loop below so we can resolve target Route QNs against
-     * the linked stores when populating cross_edges. */
+    /* Discover cross-project callers before sampling the primary graph so the
+     * finite render budget keeps link endpoints visible. */
     char *linked[LAYOUT_MAX_LINKED];
     int linked_count = find_cross_repo_targets(store, project, linked, LAYOUT_MAX_LINKED);
+    int required_source_count = 0;
+    int64_t *required_source_ids = find_cross_source_ids(store, project, &required_source_count);
+    cbm_layout_result_t *layout = cbm_layout_compute_with_required_nodes(
+        store, scoped_project, CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes, required_source_ids,
+        required_source_count);
+    free(required_source_ids);
 
     if (!layout) {
+        for (int i = 0; i < linked_count; i++)
+            free(linked[i]);
         cbm_store_close(store);
         cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"layout computation failed\"}");
         return;
@@ -1787,8 +1936,10 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
     /* Build JSON: primary layout + linked_projects */
     char *primary_json = cbm_layout_to_json(layout);
-    cbm_layout_free(layout);
     if (!primary_json) {
+        cbm_layout_free(layout);
+        for (int i = 0; i < linked_count; i++)
+            free(linked[i]);
         cbm_store_close(store);
         cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"JSON serialization failed\"}");
         return;
@@ -1797,6 +1948,7 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     /* Fast path: no satellites to attach. The missed skeleton only decorates
      * the CODE graph — a graph=missed request already IS the miss graph. */
     if (linked_count == 0 && missed_graph) {
+        cbm_layout_free(layout);
         cbm_store_close(store);
         cbm_http_replyf(c, 200, g_cors_json, "%s", primary_json);
         free(primary_json);
@@ -1807,6 +1959,9 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     yyjson_doc *pdoc = yyjson_read(primary_json, strlen(primary_json), 0);
     free(primary_json);
     if (!pdoc) {
+        cbm_layout_free(layout);
+        for (int i = 0; i < linked_count; i++)
+            free(linked[i]);
         cbm_store_close(store);
         cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"JSON parse failed\"}");
         return;
@@ -1836,11 +1991,14 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
             continue;
         }
 
-        /* Keep lp_store open through cross_edges resolution below. */
-        cbm_layout_result_t *lp_layout =
-            cbm_layout_compute(lp_store, linked[li], CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes);
+        layout_cross_set_t cross = {0};
+        find_resolved_cross_edges(store, project, lp_store, linked[li], &cross);
+        cbm_layout_result_t *lp_layout = cbm_layout_compute_with_required_nodes(
+            lp_store, linked[li], CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes, cross.target_ids,
+            cross.target_count);
 
         if (!lp_layout) {
+            layout_cross_set_free(&cross);
             cbm_store_close(lp_store);
             free(linked[li]);
             continue;
@@ -1848,8 +2006,9 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
         double sat_radius = layout_radius(lp_layout);
         char *lp_json = cbm_layout_to_json(lp_layout);
-        cbm_layout_free(lp_layout);
         if (!lp_json) {
+            cbm_layout_free(lp_layout);
+            layout_cross_set_free(&cross);
             cbm_store_close(lp_store);
             free(linked[li]);
             continue;
@@ -1859,6 +2018,8 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         yyjson_doc *lpdoc = yyjson_read(lp_json, strlen(lp_json), 0);
         free(lp_json);
         if (!lpdoc) {
+            cbm_layout_free(lp_layout);
+            layout_cross_set_free(&cross);
             cbm_store_close(lp_store);
             free(linked[li]);
             continue;
@@ -1897,67 +2058,31 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         yyjson_mut_obj_add_real(mdoc, offset, "z", 0.0);
         yyjson_mut_obj_add_val(mdoc, entry, "offset", offset);
 
-        /* Populate cross_edges connecting primary→this linked galaxy. Each
-         * entry: {source: <primary node id>, target: <linked node id>, type}.
-         *
-         * A CROSS_* edge in the source store points caller_id → local_route_id
-         * (a Route node in the source store). The Route's qualified_name is
-         * canonical and the same Route exists in the linked store too — that's
-         * the cross-repo matching contract. Join edges → nodes in source to
-         * pull the QN, then look it up in the linked store. */
+        /* Only emit cross edges whose pinned endpoints survived the configured
+         * node budget. This keeps every returned edge directly renderable. */
         yyjson_mut_val *cross_arr = yyjson_mut_arr(mdoc);
-        struct sqlite3 *src_db = cbm_store_get_db(store);
-        struct sqlite3 *lp_db = cbm_store_get_db(lp_store);
-        if (src_db && lp_db) {
-            sqlite3_stmt *eq = NULL;
-            if (sqlite3_prepare_v2(src_db,
-                                   "SELECT e.source_id, e.type, n.qualified_name "
-                                   "FROM edges e JOIN nodes n "
-                                   "  ON n.id = e.target_id AND n.project = e.project "
-                                   "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
-                                   "  AND json_extract(e.properties, '$.target_project') = ?2 "
-                                   "  AND n.qualified_name IS NOT NULL",
-                                   -1, &eq, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(eq, 1, project, -1, SQLITE_STATIC);
-                sqlite3_bind_text(eq, 2, linked[li], -1, SQLITE_STATIC);
-
-                sqlite3_stmt *lookup = NULL;
-                sqlite3_prepare_v2(lp_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1",
-                                   -1, &lookup, NULL);
-
-                while (sqlite3_step(eq) == SQLITE_ROW) {
-                    int64_t src_id = sqlite3_column_int64(eq, 0);
-                    const char *etype = (const char *)sqlite3_column_text(eq, 1);
-                    const char *qn = (const char *)sqlite3_column_text(eq, 2);
-                    if (!qn || !etype || !lookup) {
-                        continue;
-                    }
-                    sqlite3_reset(lookup);
-                    sqlite3_clear_bindings(lookup);
-                    sqlite3_bind_text(lookup, 1, qn, -1, SQLITE_STATIC);
-                    if (sqlite3_step(lookup) != SQLITE_ROW) {
-                        continue;
-                    }
-                    int64_t tgt_id = sqlite3_column_int64(lookup, 0);
-                    yyjson_mut_val *ce = yyjson_mut_obj(mdoc);
-                    yyjson_mut_obj_add_int(mdoc, ce, "source", src_id);
-                    yyjson_mut_obj_add_int(mdoc, ce, "target", tgt_id);
-                    yyjson_mut_obj_add_strcpy(mdoc, ce, "type", etype);
-                    yyjson_mut_arr_append(cross_arr, ce);
-                }
-                if (lookup)
-                    sqlite3_finalize(lookup);
-                sqlite3_finalize(eq);
-            }
+        for (int ci = 0; ci < cross.count; ci++) {
+            layout_cross_edge_t *edge = &cross.edges[ci];
+            if (!layout_has_node(layout, edge->source) ||
+                !layout_has_node(lp_layout, edge->target))
+                continue;
+            yyjson_mut_val *ce = yyjson_mut_obj(mdoc);
+            yyjson_mut_obj_add_int(mdoc, ce, "source", edge->source);
+            yyjson_mut_obj_add_int(mdoc, ce, "target", edge->target);
+            yyjson_mut_obj_add_strcpy(mdoc, ce, "type", edge->type);
+            yyjson_mut_arr_append(cross_arr, ce);
         }
         yyjson_mut_obj_add_val(mdoc, entry, "cross_edges", cross_arr);
 
+        cbm_layout_free(lp_layout);
+        layout_cross_set_free(&cross);
         cbm_store_close(lp_store);
         yyjson_mut_arr_append(lp_arr, entry);
         yyjson_mut_doc_free(lm);
         free(linked[li]);
     }
 
+    cbm_layout_free(layout);
     cbm_store_close(store);
     yyjson_mut_obj_add_val(mdoc, mroot, "linked_projects", lp_arr);
 

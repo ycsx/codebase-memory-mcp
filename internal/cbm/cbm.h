@@ -197,6 +197,7 @@ typedef struct {
     const char **param_types;  // NULL-terminated array (NULL if none)
     const char **return_types; // NULL-terminated array (NULL if none)
     const char *route_path;    // HTTP route path from decorator (e.g., "/api/users") or NULL
+    const char **route_paths;  // all mapped HTTP paths; route_path is the first entry
     const char *route_method;  // HTTP method from decorator (e.g., "POST") or NULL
     int complexity;            // cyclomatic complexity
     int cognitive;             // cognitive complexity (nesting-weighted)
@@ -234,12 +235,15 @@ typedef struct {
     const char *callee_name;            // raw callee text ("pkg.Func", "foo")
     const char *enclosing_func_qn;      // QN of enclosing function (or module QN)
     const char *first_string_arg;       // first string literal argument (URL, topic, key) or NULL
+    const char *http_method;            // explicit method= keyword value (GET/POST/...), if present
     const char *second_arg_name;        // second argument identifier (handler ref) or NULL
     CBMCallArg args[CBM_MAX_CALL_ARGS]; // first N arguments with expressions
     int arg_count;                      // number of captured arguments
     int loop_depth;                     // enclosing loop nesting at the call site
     int branch_depth;                   // enclosing branch nesting at the call site
     int start_line;                     // 1-based source line of the call (for def range-match)
+    bool is_route_registration;         // explicit framework route registration (not HTTP client)
+    bool is_http_wrapper;               // project propagation proved a local HTTP wrapper
     bool is_method;                     // method/member call with a non-self receiver. Perl:
                                         // arrow/method call ($obj->m). TS/JS/TSX: member call
                                         // x.foo() whose receiver is not this/super. Default false.
@@ -424,6 +428,21 @@ typedef struct {
     int cap;
 } CBMChannelArray;
 
+// Module/class-level strings retained for project-wide propagation.
+#define CBM_MAX_STRING_CONSTANTS 256
+typedef struct {
+    const char *names[CBM_MAX_STRING_CONSTANTS];
+    const char *values[CBM_MAX_STRING_CONSTANTS];
+    const char *owners[CBM_MAX_STRING_CONSTANTS];
+    int count;
+} CBMStringConstantMap;
+
+typedef struct {
+    const char *name;
+    const char *value;
+    const char *owner;
+} CBMStringConstant;
+
 // Full extraction result for one file.
 typedef struct {
     CBMArena arena; // owns all string memory
@@ -442,6 +461,8 @@ typedef struct {
     CBMStringRefArray string_refs;       // URL/config string literals from AST
     CBMInfraBindingArray infra_bindings; // topic→URL pairs from IaC configs
     CBMChannelArray channels;            // Socket.IO / EventEmitter pub/sub participation
+    CBMStringConstant *string_constants;
+    int string_constant_count;
 
     const char *module_qn;      // module qualified name
     const char *namespace_name; // declared namespace/package (Java/Kotlin/C#/PHP), NULL if none
@@ -495,14 +516,6 @@ typedef struct {
 
 // --- Extraction context passed to sub-extractors ---
 
-// Module-level string constant map (for constant propagation)
-#define CBM_MAX_STRING_CONSTANTS 256
-typedef struct {
-    const char *names[CBM_MAX_STRING_CONSTANTS];
-    const char *values[CBM_MAX_STRING_CONSTANTS];
-    int count;
-} CBMStringConstantMap;
-
 // Forward declaration: ObjectScript macro table (defined in macro_table.h).
 typedef struct CBMMacroTable CBMMacroTable;
 
@@ -537,6 +550,11 @@ typedef struct {
     const CBMMacroTable *macro_table;            // ObjectScript $$$macro table (NULL if none)
     const CBMReturnTypeTable *return_type_table; // ObjectScript method return types (NULL if none)
 } CBMExtractCtx;
+
+// Best-effort static string evaluation shared by call extraction and the
+// module-level constant collector. Returns the first candidate when an
+// expression has multiple possible values.
+const char *cbm_evaluate_static_string(CBMExtractCtx *ctx, TSNode node, int depth);
 
 // --- Public API ---
 

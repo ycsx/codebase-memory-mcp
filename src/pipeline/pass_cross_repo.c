@@ -152,6 +152,34 @@ static const char *cr_url_path(const char *url) {
     return path_start ? path_start : "/";
 }
 
+/* Rewrite known public gateway prefixes to the provider-side route prefix.
+ * Only apply these aliases after a direct match misses: callers keep their
+ * original URL in edge properties, while route lookup uses the internal path.
+ * The segment-boundary check prevents prefixes such as "/api/publication"
+ * from being rewritten accidentally. */
+static bool cr_gateway_alias_path(const char *path, char *buf, size_t bufsz) {
+    static const struct {
+        const char *public_prefix;
+        const char *provider_prefix;
+    } aliases[] = {
+        {"/api/public", "/api/nwgpt"},
+    };
+
+    if (!path || !buf || bufsz == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
+        size_t prefix_len = strlen(aliases[i].public_prefix);
+        if (strncmp(path, aliases[i].public_prefix, prefix_len) != 0 ||
+            (path[prefix_len] != '\0' && path[prefix_len] != '/')) {
+            continue;
+        }
+        int n = snprintf(buf, bufsz, "%s%s", aliases[i].provider_prefix, path + prefix_len);
+        return n >= 0 && (size_t)n < bufsz;
+    }
+    return false;
+}
+
 /* Look up a node's name and file_path by id. */
 static void lookup_node_info(struct sqlite3 *db, int64_t node_id, char *name_out, size_t name_sz,
                              char *file_out, size_t file_sz) {
@@ -340,6 +368,28 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
     return found;
 }
 
+/* Resolve a canonical client path to a target handler using exact, ANY-method,
+ * and concrete-vs-template matching in that order. */
+static int64_t find_route_handler_for_path(cbm_store_t *target_store, const char *path,
+                                           const char *method, char *route_qn,
+                                           size_t route_qn_sz, char *handler_name,
+                                           size_t name_sz, char *handler_file, size_t file_sz) {
+    snprintf(route_qn, route_qn_sz, "__route__%s__%s", method && method[0] ? method : "ANY",
+             path);
+    int64_t handler_id = find_route_handler(target_store, route_qn, handler_name, name_sz,
+                                            handler_file, file_sz);
+    if (handler_id == 0) {
+        snprintf(route_qn, route_qn_sz, "__route__ANY__%s", path);
+        handler_id = find_route_handler(target_store, route_qn, handler_name, name_sz,
+                                        handler_file, file_sz);
+    }
+    if (handler_id == 0) {
+        handler_id = find_route_handler_fuzzy(target_store, path, method, route_qn, route_qn_sz,
+                                              handler_name, name_sz, handler_file, file_sz);
+    }
+    return handler_id;
+}
+
 /* Emit CROSS_* edge for a route match: forward into source, reverse into target. */
 static void emit_cross_route_bidirectional(cbm_store_t *src_store, const char *src_project,
                                            struct sqlite3 *src_db, int64_t caller_id,
@@ -422,26 +472,22 @@ static int match_http_routes(cbm_store_t *src_store, const char *src_project,
         char route_qn[CR_QN_BUF];
         char cpath[CBM_SZ_256];
         const char *curl = cbm_route_canon_path(cr_url_path(url_path), cpath, sizeof(cpath));
-        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method[0] ? method : "ANY", curl);
-
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
-        int64_t handler_id =
-            find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
-                               handler_file, sizeof(handler_file));
+        int64_t handler_id = find_route_handler_for_path(
+            tgt_store, curl, method[0] ? method : NULL, route_qn, sizeof(route_qn), handler_name,
+            sizeof(handler_name), handler_file, sizeof(handler_file));
         if (handler_id == 0) {
-            /* Try without method (ANY) */
-            snprintf(route_qn, sizeof(route_qn), "__route__ANY__%s", curl);
-            handler_id = find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
-                                            handler_file, sizeof(handler_file));
-        }
-        if (handler_id == 0) {
-            /* Exact QN lookup missed. A concrete client path ("/v2/orders/123")
-             * never exact-matches a templated route ("/v2/orders/{}"), so fall
-             * back to segment-wise template matching. (#523) */
-            handler_id = find_route_handler_fuzzy(
-                tgt_store, curl, method[0] ? method : NULL, route_qn, sizeof(route_qn),
-                handler_name, sizeof(handler_name), handler_file, sizeof(handler_file));
+            /* Some gateway-facing paths intentionally differ from the internal
+             * controller prefix. Try the provider alias only after normal
+             * matching fails, so exact public routes always win. */
+            char alias_path[CBM_SZ_256];
+            if (cr_gateway_alias_path(curl, alias_path, sizeof(alias_path))) {
+                handler_id = find_route_handler_for_path(
+                    tgt_store, alias_path, method[0] ? method : NULL, route_qn,
+                    sizeof(route_qn), handler_name, sizeof(handler_name), handler_file,
+                    sizeof(handler_file));
+            }
         }
         if (handler_id == 0) {
             continue;

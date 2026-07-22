@@ -1,6 +1,8 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { CheckCircle2, GitBranch, RefreshCw } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { CheckCircle2, GitBranch, GitMerge, LoaderCircle, RefreshCw } from "lucide-react";
+import { callTool } from "../api/rpc";
 import { useProjects } from "../hooks/useProjects";
 import { colorForLabel } from "../lib/colors";
 import { useUiMessages } from "../lib/i18n";
@@ -688,6 +690,238 @@ export function IndexProgress({
   );
 }
 
+interface CrossRepoResult {
+  status: string;
+  project: string;
+  projects_scanned: number;
+  cross_http_calls: number;
+  cross_async_calls: number;
+  cross_channel: number;
+  cross_grpc_calls: number;
+  cross_graphql_calls: number;
+  cross_trpc_calls: number;
+  total_cross_edges: number;
+  elapsed_ms: number;
+}
+
+interface CrossRepoProject {
+  project: {
+    name: string;
+    root_path: string;
+  };
+}
+
+export function CrossRepositoryPanel({
+  projects,
+  onComplete,
+}: {
+  projects: CrossRepoProject[];
+  onComplete: () => void;
+}) {
+  const t = useUiMessages();
+  const [sourceName, setSourceName] = useState("");
+  const [targetNames, setTargetNames] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<CrossRepoResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projects.some((item) => item.project.name === sourceName)) {
+      setSourceName(projects[0]?.project.name ?? "");
+    }
+  }, [projects, sourceName]);
+
+  useEffect(() => {
+    const eligible = projects
+      .map((item) => item.project.name)
+      .filter((name) => name !== sourceName);
+    setTargetNames((current) => {
+      const kept = current.filter((name) => eligible.includes(name));
+      return kept.length > 0 ? kept : eligible;
+    });
+  }, [projects, sourceName]);
+
+  const source = projects.find((item) => item.project.name === sourceName)?.project;
+  const eligibleTargets = projects.filter((item) => item.project.name !== sourceName);
+  const canRun = Boolean(source && targetNames.length > 0 && !running);
+
+  const selectSource = (name: string) => {
+    setSourceName(name);
+    setTargetNames(projects.map((item) => item.project.name).filter((project) => project !== name));
+    setResult(null);
+    setError(null);
+  };
+
+  const toggleTarget = (name: string, checked: boolean) => {
+    setTargetNames((current) =>
+      checked ? Array.from(new Set([...current, name])) : current.filter((item) => item !== name),
+    );
+    setResult(null);
+    setError(null);
+  };
+
+  const run = async () => {
+    if (!source || targetNames.length === 0) return;
+    setRunning(true);
+    setResult(null);
+    setError(null);
+    try {
+      const next = await callTool<CrossRepoResult>("index_repository", {
+        repo_path: source.root_path,
+        name: source.name,
+        mode: "cross-repo-intelligence",
+        target_projects: targetNames,
+      });
+      if (next.status !== "success") {
+        throw new Error(t.crossRepo.failed);
+      }
+      setResult(next);
+      onComplete();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t.crossRepo.failed);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const metrics = result ? [
+    { label: t.crossRepo.http, value: result.cross_http_calls },
+    { label: t.crossRepo.async, value: result.cross_async_calls },
+    { label: t.crossRepo.channels, value: result.cross_channel },
+    { label: t.crossRepo.grpc, value: result.cross_grpc_calls },
+    { label: t.crossRepo.graphql, value: result.cross_graphql_calls },
+    { label: t.crossRepo.trpc, value: result.cross_trpc_calls },
+  ] : [];
+
+  return (
+    <section className="border-y border-border/25 py-5 mb-7" aria-labelledby="cross-repo-title">
+      <div className="flex items-center gap-2 mb-4">
+        <GitMerge className="w-4 h-4 text-primary" aria-hidden="true" />
+        <h2 id="cross-repo-title" className="text-[13px] font-semibold text-foreground/75">
+          {t.crossRepo.title}
+        </h2>
+      </div>
+
+      {projects.length < 2 ? (
+        <p className="text-[11px] text-foreground/30">{t.crossRepo.needTwoProjects}</p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)] gap-5">
+          <div className="min-w-0">
+            <label htmlFor="cross-repo-source" className="block text-[10px] uppercase text-foreground/30 mb-2">
+              {t.crossRepo.source}
+            </label>
+            <select
+              id="cross-repo-source"
+              value={sourceName}
+              onChange={(event) => selectSource(event.target.value)}
+              disabled={running}
+              className="w-full h-9 rounded-md border border-border/40 bg-[#0b1920] px-2.5 text-[11px] font-mono text-foreground/70 outline-none focus:border-primary/50 disabled:opacity-40"
+            >
+              {projects.map((item) => (
+                <option key={item.project.name} value={item.project.name}>{item.project.name}</option>
+              ))}
+            </select>
+            {source && <p className="mt-2 text-[10px] text-foreground/20 font-mono truncate">{source.root_path}</p>}
+          </div>
+
+          <div className="min-w-0">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-[10px] uppercase text-foreground/30">{t.crossRepo.targets}</span>
+              <div className="flex items-center gap-2 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setTargetNames(eligibleTargets.map((item) => item.project.name))}
+                  disabled={running}
+                  className="text-primary/70 hover:text-primary disabled:opacity-30"
+                >
+                  {t.crossRepo.selectAll}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetNames([])}
+                  disabled={running}
+                  className="text-foreground/30 hover:text-foreground/60 disabled:opacity-30"
+                >
+                  {t.crossRepo.clear}
+                </button>
+              </div>
+            </div>
+            <div className="max-h-28 overflow-y-auto rounded-md border border-border/25 divide-y divide-border/15">
+              {eligibleTargets.map((item) => {
+                const checked = targetNames.includes(item.project.name);
+                const id = `cross-target-${item.project.name}`;
+                return (
+                  <label key={item.project.name} htmlFor={id} className="flex items-center gap-2.5 px-3 h-9 text-[11px] font-mono text-foreground/55 hover:bg-white/[0.025] cursor-pointer">
+                    <Checkbox
+                      id={id}
+                      checked={checked}
+                      onCheckedChange={(value) => toggleTarget(item.project.name, value === true)}
+                      disabled={running}
+                      aria-label={item.project.name}
+                    />
+                    <span className="truncate">{item.project.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {projects.length >= 2 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 mt-4">
+          <div className="min-h-5 flex-1" aria-live="polite">
+            {running && (
+              <span className="inline-flex items-center gap-2 text-[11px] text-primary">
+                <LoaderCircle className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                {t.crossRepo.running}
+              </span>
+            )}
+            {error && <p className="text-[11px] text-destructive">{error}</p>}
+            {!running && !error && targetNames.length === 0 && (
+              <p className="text-[11px] text-foreground/25">{t.crossRepo.selectTarget}</p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={run}
+            disabled={!canRun}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md bg-primary/15 hover:bg-primary/25 text-primary text-[11px] font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            <GitMerge className="w-3.5 h-3.5" aria-hidden="true" />
+            {running ? t.crossRepo.running : t.crossRepo.run}
+          </button>
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-4 pt-4 border-t border-emerald-500/15" aria-live="polite">
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 mb-3">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-400">
+              <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
+              {t.crossRepo.complete}
+            </span>
+            <span className="text-[11px] text-foreground/35">
+              <strong className="text-foreground/70 tabular-nums">{result.total_cross_edges.toLocaleString()}</strong> {t.crossRepo.totalLinks}
+            </span>
+            <span className="text-[10px] text-foreground/20">
+              {t.crossRepo.projectsScanned}: {result.projects_scanned} · {t.crossRepo.elapsed}: {Math.round(result.elapsed_ms)} ms
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {metrics.map((metric) => (
+              <span key={metric.label} className="inline-flex items-center gap-1.5 rounded px-2 py-1 bg-white/[0.03] text-[10px] text-foreground/35">
+                {metric.label}
+                <strong className="text-foreground/65 tabular-nums">{metric.value.toLocaleString()}</strong>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /* ── Main Stats Tab ─────────────────────────────────────── */
 
 export function StatsTab({ onSelectProject }: StatsTabProps) {
@@ -739,6 +973,10 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
 
         {indexing && (
           <IndexProgress onComplete={refresh} onDismiss={() => setIndexing(false)} />
+        )}
+
+        {projects.length > 0 && (
+          <CrossRepositoryPanel projects={projects} onComplete={refresh} />
         )}
 
         <div className="flex items-center justify-between mb-6">
