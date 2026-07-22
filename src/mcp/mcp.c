@@ -3268,15 +3268,15 @@ static void coverage_add_ranges(yyjson_mut_doc *doc, yyjson_mut_val *row, const 
             break;
         }
         char *endptr = NULL;
-        long start = strtol(p, &endptr, 10);
+        long long start = strtoll(p, &endptr, 10);
         if (endptr == p || start <= 0 || start > INT32_MAX) {
             break;
         }
         p = endptr;
-        long end = start;
+        long long end = start;
         if (*p == '-') {
             p++;
-            long parsed = strtol(p, &endptr, 10);
+            long long parsed = strtoll(p, &endptr, 10);
             if (endptr == p || parsed < start || parsed > INT32_MAX) {
                 break;
             }

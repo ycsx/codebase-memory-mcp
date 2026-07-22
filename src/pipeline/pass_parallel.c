@@ -1665,11 +1665,11 @@ static void emit_http_async_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t
         arg = normalized_url;
     }
     const char *edge_type = (svc == CBM_SVC_HTTP) ? "HTTP_CALLS" : "ASYNC_CALLS";
-    const char *method = (svc == CBM_SVC_HTTP)
-                             ? (call->http_method
-                                    ? call->http_method
-                                    : cbm_service_pattern_http_method(call->callee_name))
-                             : NULL;
+    const char *method =
+        (svc == CBM_SVC_HTTP)
+            ? (call->http_method ? call->http_method
+                                 : cbm_service_pattern_http_method(call->callee_name))
+            : NULL;
     const char *broker =
         (svc == CBM_SVC_ASYNC) ? cbm_service_pattern_broker(res->qualified_name) : NULL;
 
@@ -1999,8 +1999,10 @@ static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
 }
 
 /* When suppress_plain_calls is true (a TS/JS/TSX weak short-name member-call
- * match, #592/#606), every service classification below still runs — only the
- * plain CALLS fall-through (emit_normal_calls_edge) is skipped. */
+ * match, #592/#606),
+ * every service classification below still runs — only the
+ * plain CALLS fall-through
+ * (emit_normal_calls_edge) is skipped. */
 static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                               const cbm_gbuf_node_t *target, const CBMCall *call,
                               const cbm_resolution_t *res, const char *module_qn,
@@ -2017,8 +2019,7 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
      * local variables like app.include_router where QN resolution fails). */
     if (call->is_route_registration) {
         svc = CBM_SVC_ROUTE_REG;
-    } else if (svc == CBM_SVC_NONE &&
-               cbm_service_pattern_route_method(call->callee_name) != NULL) {
+    } else if (svc == CBM_SVC_NONE && cbm_service_pattern_route_method(call->callee_name) != NULL) {
         svc = CBM_SVC_ROUTE_REG;
     }
 
@@ -2047,15 +2048,17 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
 
     char normalized_url[CBM_SZ_1K];
     bool has_url = svc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
-                                               arg, normalized_url, sizeof(normalized_url));
+                                              arg, normalized_url, sizeof(normalized_url));
     bool has_topic = (arg && arg[0] != '\0' && svc == CBM_SVC_ASYNC && strlen(arg) > PP_ESC_SPACE);
 
     if ((svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) && (has_url || has_topic)) {
         emit_http_async_service_edge(gbuf, source, call, res, svc,
                                      svc == CBM_SVC_HTTP ? normalized_url : arg);
         /* The classified edge already carries its concrete HTTP method. The
-         * generic argument scan would add a second ANY edge for the same call,
-         * inflating both HTTP_CALLS and CROSS_HTTP_CALLS counts. */
+         * generic
+         * argument scan would add a second ANY edge for the same call,
+         * inflating both
+         * HTTP_CALLS and CROSS_HTTP_CALLS counts. */
         return;
     } else if (svc == CBM_SVC_GRPC) {
         emit_grpc_edge(gbuf, source, call, res);

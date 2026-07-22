@@ -443,7 +443,8 @@ static int ensure_decorator_route_path(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fu
 }
 
 /* Process a single Function/Method node. route_paths is emitted for annotation
- * arrays; older indexes and single-path definitions retain route_path. */
+ * arrays; older
+ * indexes and single-path definitions retain route_path. */
 static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
     if (!func->properties_json) {
         return 0;

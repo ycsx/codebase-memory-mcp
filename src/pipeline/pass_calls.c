@@ -366,8 +366,7 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
     const char *url_or_topic = call->first_string_arg;
     char normalized_url[CBM_SZ_1K];
     bool is_url = svc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
-                                               url_or_topic, normalized_url,
-                                               sizeof(normalized_url));
+                                             url_or_topic, normalized_url, sizeof(normalized_url));
     if (is_url) {
         url_or_topic = normalized_url;
     }
@@ -392,11 +391,11 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         return;
     }
     const char *edge_type = (svc == CBM_SVC_HTTP) ? "HTTP_CALLS" : "ASYNC_CALLS";
-    const char *method = (svc == CBM_SVC_HTTP)
-                             ? (call->http_method
-                                    ? call->http_method
-                                    : cbm_service_pattern_http_method(call->callee_name))
-                             : NULL;
+    const char *method =
+        (svc == CBM_SVC_HTTP)
+            ? (call->http_method ? call->http_method
+                                 : cbm_service_pattern_http_method(call->callee_name))
+            : NULL;
     const char *broker =
         (svc == CBM_SVC_ASYNC) ? cbm_service_pattern_broker(res->qualified_name) : NULL;
     int64_t route_id = create_svc_route_node(ctx, url_or_topic, svc, method, broker);
@@ -440,13 +439,15 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         svc = cbm_service_pattern_match(call->callee_name);
     }
     /* A receiver method such as FastAPI's app.get/app.post can be weakly
-     * resolved by the language layer to an unrelated indexed method (for
-     * example dict.get).  Preserve the route-registration signal carried by
-     * the raw callee suffix, matching the parallel pipeline's fallback. */
+     * resolved by the
+     * language layer to an unrelated indexed method (for
+     * example dict.get).  Preserve the
+     * route-registration signal carried by
+     * the raw callee suffix, matching the parallel
+     * pipeline's fallback. */
     if (call->is_route_registration) {
         svc = CBM_SVC_ROUTE_REG;
-    } else if (svc == CBM_SVC_NONE &&
-               cbm_service_pattern_route_method(call->callee_name) != NULL) {
+    } else if (svc == CBM_SVC_NONE && cbm_service_pattern_route_method(call->callee_name) != NULL) {
         svc = CBM_SVC_ROUTE_REG;
     }
     if (svc == CBM_SVC_ROUTE_REG && call->first_string_arg && call->first_string_arg[0] == '/') {
@@ -555,10 +556,9 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     if (csvc == CBM_SVC_HTTP || csvc == CBM_SVC_ASYNC) {
         const char *cu = call->first_string_arg;
         char normalized_url[CBM_SZ_1K];
-        bool chas_url =
-            (csvc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
-                                         cu, normalized_url, sizeof(normalized_url))) ||
-            (csvc == CBM_SVC_ASYNC && cu && strlen(cu) > PAIR_LEN);
+        bool chas_url = (csvc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
+                                                     cu, normalized_url, sizeof(normalized_url))) ||
+                        (csvc == CBM_SVC_ASYNC && cu && strlen(cu) > PAIR_LEN);
         if (chas_url) {
             cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
                                         .confidence = PC_SVC_PATTERN_CONF,
@@ -661,8 +661,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         const char *u = call->first_string_arg;
         char normalized_url[CBM_SZ_1K];
         bool has_url_or_topic =
-            (svc == CBM_SVC_HTTP && cbm_service_pattern_normalize_http_url(
-                                        u, normalized_url, sizeof(normalized_url))) ||
+            (svc == CBM_SVC_HTTP &&
+             cbm_service_pattern_normalize_http_url(u, normalized_url, sizeof(normalized_url))) ||
             (svc == CBM_SVC_ASYNC && u && strlen(u) > PAIR_LEN);
         if (has_url_or_topic) {
             emit_http_async_edge(ctx, call, source_node, NULL, &res, svc, false);

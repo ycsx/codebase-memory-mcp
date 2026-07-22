@@ -735,8 +735,10 @@ static const char *static_object_key(CBMExtractCtx *ctx, TSNode key_node) {
 }
 
 /* Retain exported/module API object leaves as compound names. For example,
+ *
  * `AnnotateSampleApi.saveSample` is later qualified with the module QN and
- * resolved from an imported member expression in a Vue consumer. */
+ * resolved from an
+ * imported member expression in a Vue consumer. */
 static void collect_static_object_strings(CBMExtractCtx *ctx, TSNode object_node,
                                           const char *prefix, int depth) {
     if (!prefix || depth >= 8 || strcmp(ts_node_type(object_node), "object") != 0) {
@@ -824,8 +826,7 @@ static void handle_string_constants(CBMExtractCtx *ctx, TSNode node, const WalkS
         value = cbm_node_text(ctx->arena, value_node, ctx->source);
         int vlen = value ? (int)strlen(value) : 0;
         if (vlen >= CBM_QUOTE_PAIR && (value[0] == '"' || value[0] == '\'')) {
-            value = cbm_arena_strndup(ctx->arena, value + SKIP_ONE,
-                                     (size_t)(vlen - PAIR_LEN));
+            value = cbm_arena_strndup(ctx->arena, value + SKIP_ONE, (size_t)(vlen - PAIR_LEN));
         }
     }
     string_constant_put(ctx, name, value, state->enclosing_class_qn);

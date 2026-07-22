@@ -1409,11 +1409,12 @@ static bool is_spring_route_arg_name(const char *name) {
 }
 
 /* Resolve a Spring annotation argument to the subtree that may contain paths.
- * Named non-route attributes (produces, consumes, params, headers) must stay
- * out of the literal walk now that relative paths such as "orders/list" are
+ * Named non-route
+ * attributes (produces, consumes, params, headers) must stay
+ * out of the literal walk now that
+ * relative paths such as "orders/list" are
  * accepted. */
-static bool spring_route_arg_value(CBMArena *a, TSNode arg, const char *source,
-                                   TSNode *out_value) {
+static bool spring_route_arg_value(CBMArena *a, TSNode arg, const char *source, TSNode *out_value) {
     const char *kind = ts_node_type(arg);
     if (strcmp(kind, "element_value_pair") == 0) {
         TSNode key = ts_node_child_by_field_name(arg, TS_FIELD("key"));
@@ -1469,8 +1470,8 @@ static int collect_spring_route_literals(CBMArena *a, TSNode node, const char *s
     }
     uint32_t nc = ts_node_named_child_count(node);
     for (uint32_t i = 0; i < nc && i < DECORATOR_SCAN_LIMIT && count < max_paths; i++) {
-        count = collect_spring_route_literals(a, ts_node_named_child(node, i), source, paths,
-                                              count, max_paths, max_depth - 1);
+        count = collect_spring_route_literals(a, ts_node_named_child(node, i), source, paths, count,
+                                              max_paths, max_depth - 1);
     }
     return count;
 }
@@ -1705,8 +1706,7 @@ static bool try_routes_from_annotation(CBMArena *a, TSNode annotation, const cha
     int count = 0;
     TSNode args = annotation_args_node(annotation);
     if (!ts_node_is_null(args)) {
-        count = extract_spring_route_paths_from_args(a, args, source, found,
-                                                     SPRING_ROUTE_PATH_MAX);
+        count = extract_spring_route_paths_from_args(a, args, source, found, SPRING_ROUTE_PATH_MAX);
     }
     if (count == 0) {
         found[count++] = "/";
@@ -1854,8 +1854,7 @@ static const char *join_route_paths(CBMArena *a, const char *prefix, const char 
     bool prefix_slash = prefix[plen - 1] == '/';
     bool path_slash = path[0] == '/';
     if (prefix_slash && path_slash) {
-        return route_with_leading_slash(a,
-                                        cbm_arena_sprintf(a, "%s%s", prefix, path + SKIP_CHAR));
+        return route_with_leading_slash(a, cbm_arena_sprintf(a, "%s%s", prefix, path + SKIP_CHAR));
     }
     if (!prefix_slash && !path_slash) {
         return route_with_leading_slash(a, cbm_arena_sprintf(a, "%s/%s", prefix, path));
@@ -1863,8 +1862,8 @@ static const char *join_route_paths(CBMArena *a, const char *prefix, const char 
     return route_with_leading_slash(a, cbm_arena_sprintf(a, "%s%s", prefix, path));
 }
 
-static const char **spring_class_route_prefixes(CBMArena *a, TSNode class_node,
-                                                const char *source, const CBMLangSpec *spec) {
+static const char **spring_class_route_prefixes(CBMArena *a, TSNode class_node, const char *source,
+                                                const CBMLangSpec *spec) {
     const char **prefixes = NULL;
     const char *method = NULL;
     if (extract_routes_from_annotations(a, class_node, source, spec, &prefixes, &method)) {

@@ -34,7 +34,8 @@ static const char *lookup_string_constant(const CBMExtractCtx *ctx, const char *
     }
     const CBMStringConstantMap *map = &ctx->string_constants;
     /* Later assignments shadow earlier ones. The map is populated in source
-     * order by the unified walk, so scan backwards. */
+     * order by the
+     * unified walk, so scan backwards. */
     for (int i = map->count - 1; i >= 0; i--) {
         if (strcmp(map->names[i], name) == 0) {
             return map->values[i];
@@ -76,10 +77,11 @@ static TSNode python_enclosing_scope(TSNode node) {
 }
 
 /* Find the most recent assignment to a Python local before the argument use.
- * This deliberately stays intra-function: a same-named local in another
- * function must never leak into URL propagation. */
-static TSNode python_prior_assignment_value(CBMExtractCtx *ctx, TSNode use_node,
-                                            const char *name) {
+ * This deliberately
+ * stays intra-function: a same-named local in another
+ * function must never leak into URL
+ * propagation. */
+static TSNode python_prior_assignment_value(CBMExtractCtx *ctx, TSNode use_node, const char *name) {
     if (ctx->language != CBM_LANG_PYTHON || !name || !name[0]) {
         return (TSNode){0};
     }
@@ -108,7 +110,8 @@ static TSNode python_prior_assignment_value(CBMExtractCtx *ctx, TSNode use_node,
         }
         if (start >= use_start) {
             /* No descendant can precede the use once this subtree starts at
-             * or after it. Skip descending but keep scanning siblings. */
+             * or after
+             * it. Skip descending but keep scanning siblings. */
         } else if (ts_tree_cursor_goto_first_child(&cursor)) {
             continue;
         }
@@ -136,9 +139,9 @@ static bool is_js_language(CBMLanguage language) {
 }
 
 static bool is_js_scope_kind(const char *kind) {
-    return strcmp(kind, "function_declaration") == 0 ||
-           strcmp(kind, "function_expression") == 0 || strcmp(kind, "arrow_function") == 0 ||
-           strcmp(kind, "method_definition") == 0 || strcmp(kind, "program") == 0;
+    return strcmp(kind, "function_declaration") == 0 || strcmp(kind, "function_expression") == 0 ||
+           strcmp(kind, "arrow_function") == 0 || strcmp(kind, "method_definition") == 0 ||
+           strcmp(kind, "program") == 0;
 }
 
 static TSNode js_enclosing_scope(TSNode node) {
@@ -154,10 +157,11 @@ static TSNode js_enclosing_scope(TSNode node) {
 }
 
 /* Resolve both `const url = ...` and later `this.pageSet = ...` writes. Full
- * LHS text is compared so member chains can be followed without pretending to
- * understand arbitrary JavaScript aliasing. */
-static TSNode js_prior_assignment_value(CBMExtractCtx *ctx, TSNode use_node,
-                                        const char *name) {
+ * LHS text is
+ * compared so member chains can be followed without pretending to
+ * understand arbitrary
+ * JavaScript aliasing. */
+static TSNode js_prior_assignment_value(CBMExtractCtx *ctx, TSNode use_node, const char *name) {
     if (!is_js_language(ctx->language) || !name || !name[0]) {
         return (TSNode){0};
     }
@@ -226,17 +230,18 @@ static bool append_string_piece(char *buf, size_t cap, size_t *len, const char *
 }
 
 /* Decode a Python string/f-string sufficiently for route identity. Unknown
- * interpolation expressions become ':' placeholders, matching route
- * canonicalization rather than discarding an otherwise static API path. */
-static const char *evaluate_python_string_text(CBMExtractCtx *ctx, TSNode node,
-                                               const char *raw, int depth) {
+ * interpolation
+ * expressions become ':' placeholders, matching route
+ * canonicalization rather than discarding an
+ * otherwise static API path. */
+static const char *evaluate_python_string_text(CBMExtractCtx *ctx, TSNode node, const char *raw,
+                                               int depth) {
     const char *q = raw;
     bool formatted = false;
     while (*q && *q != '\'' && *q != '"') {
         if (*q == 'f' || *q == 'F') {
             formatted = true;
-        } else if (*q != 'r' && *q != 'R' && *q != 'u' && *q != 'U' && *q != 'b' &&
-                   *q != 'B') {
+        } else if (*q != 'r' && *q != 'R' && *q != 'u' && *q != 'U' && *q != 'b' && *q != 'B') {
             return NULL;
         }
         q++;
@@ -285,18 +290,22 @@ static const char *evaluate_python_string_text(CBMExtractCtx *ctx, TSNode node,
                 }
             }
             /* A leading unknown followed by '/' is normally a configurable
-             * authority (for example f"{JAVA_URL}/api/..."); omit it and keep
-             * the route path. Unknowns inside the path are canonical route
-             * parameters and must use "{}", which cbm_route_canon_path
-             * recognizes even when the source parameter name is unavailable. */
+             * authority
+             * (for example f"{JAVA_URL}/api/..."); omit it and keep
+             * the route path.
+             * Unknowns inside the path are canonical route
+             * parameters and must use
+             * "{}", which cbm_route_canon_path
+             * recognizes even when the source
+             * parameter name is unavailable. */
             bool leading_authority = !value && oi == 0 && close + 1 < end && close[1] == '/';
             const char *piece = value ? value : (leading_authority ? "" : "{}");
             if (!append_string_piece(out, sizeof(out), &oi, piece)) {
                 return NULL;
             }
             p = close + 1;
-        } else if (formatted && p + 1 < end && ((*p == '{' && p[1] == '{') ||
-                                                 (*p == '}' && p[1] == '}'))) {
+        } else if (formatted && p + 1 < end &&
+                   ((*p == '{' && p[1] == '{') || (*p == '}' && p[1] == '}'))) {
             out[oi++] = *p;
             p += 2;
         } else {
@@ -307,8 +316,35 @@ static const char *evaluate_python_string_text(CBMExtractCtx *ctx, TSNode node,
     return oi ? cbm_arena_strndup(ctx->arena, out, oi) : NULL;
 }
 
-static const char *evaluate_js_template_text(CBMExtractCtx *ctx, TSNode node,
-                                             const char *raw, int depth) {
+static const char *resolve_js_template_expression(CBMExtractCtx *ctx, TSNode node,
+                                                  const char *expr_start, const char *expr_end,
+                                                  int depth) {
+    while (expr_start < expr_end && isspace((unsigned char)*expr_start)) {
+        expr_start++;
+    }
+    size_t expr_len = (size_t)(expr_end - expr_start);
+    while (expr_len != 0 && isspace((unsigned char)expr_start[expr_len - 1])) {
+        expr_len--;
+    }
+    if (expr_len == 0 || expr_len >= CBM_SZ_256) {
+        return NULL;
+    }
+
+    char expr[CBM_SZ_256];
+    memcpy(expr, expr_start, expr_len);
+    expr[expr_len] = '\0';
+    const char *value = lookup_string_constant(ctx, expr);
+    if (!value && depth < 8) {
+        TSNode assigned = js_prior_assignment_value(ctx, node, expr);
+        if (!ts_node_is_null(assigned)) {
+            value = cbm_evaluate_static_string(ctx, assigned, depth + 1);
+        }
+    }
+    return value;
+}
+
+static const char *evaluate_js_template_text(CBMExtractCtx *ctx, TSNode node, const char *raw,
+                                             int depth) {
     size_t raw_len = raw ? strlen(raw) : 0;
     if (raw_len < 2 || raw[0] != '`' || raw[raw_len - 1] != '`') {
         return NULL;
@@ -333,28 +369,7 @@ static const char *evaluate_js_template_text(CBMExtractCtx *ctx, TSNode node,
             if (close >= end || braces != 0) {
                 return NULL;
             }
-            const char *expr_start = p + 2;
-            while (expr_start < close && isspace((unsigned char)*expr_start)) {
-                expr_start++;
-            }
-            const char *expr_end = close;
-            while (expr_end > expr_start && isspace((unsigned char)expr_end[-1])) {
-                expr_end--;
-            }
-            const char *value = NULL;
-            size_t expr_len = (size_t)(expr_end - expr_start);
-            if (expr_len > 0 && expr_len < CBM_SZ_256) {
-                char expr[CBM_SZ_256];
-                memcpy(expr, expr_start, expr_len);
-                expr[expr_len] = '\0';
-                value = lookup_string_constant(ctx, expr);
-                if (!value && depth < 8) {
-                    TSNode assigned = js_prior_assignment_value(ctx, node, expr);
-                    if (!ts_node_is_null(assigned)) {
-                        value = cbm_evaluate_static_string(ctx, assigned, depth + 1);
-                    }
-                }
-            }
+            const char *value = resolve_js_template_expression(ctx, node, p + 2, close, depth);
             bool leading_authority = !value && oi == 0 && close + 1 < end && close[1] == '/';
             const char *piece = value ? value : (leading_authority ? "" : "{}");
             if (!append_string_piece(out, sizeof(out), &oi, piece)) {
@@ -378,9 +393,8 @@ const char *cbm_evaluate_static_string(CBMExtractCtx *ctx, TSNode node, int dept
         char *name = cbm_node_text(ctx->arena, node, ctx->source);
         if (is_js_language(ctx->language)) {
             TSNode assigned = js_prior_assignment_value(ctx, node, name);
-            return ts_node_is_null(assigned)
-                       ? NULL
-                       : cbm_evaluate_static_string(ctx, assigned, depth + 1);
+            return ts_node_is_null(assigned) ? NULL
+                                             : cbm_evaluate_static_string(ctx, assigned, depth + 1);
         }
         const char *known = lookup_string_constant(ctx, name);
         if (known) {
@@ -407,7 +421,8 @@ const char *cbm_evaluate_static_string(CBMExtractCtx *ctx, TSNode node, int dept
             }
         }
         /* Config-driven hosts are often not statically knowable, but the
-         * right-hand API path is. Keep that suffix for route matching. */
+         * right-hand API
+         * path is. Keep that suffix for route matching. */
         if (!lv && rv && rv[0] == '/') {
             return rv;
         }
@@ -481,9 +496,8 @@ static TSNode js_follow_assignment(CBMExtractCtx *ctx, TSNode use_node, TSNode n
     return ts_node_is_null(assigned) ? node : assigned;
 }
 
-static void collect_js_object_property(CBMExtractCtx *ctx, TSNode object_node,
-                                       const char *property, TSNode use_node, int depth,
-                                       StaticStringCandidates *out);
+static void collect_js_object_property(CBMExtractCtx *ctx, TSNode object_node, const char *property,
+                                       TSNode use_node, int depth, StaticStringCandidates *out);
 
 static const char *js_static_index_key(CBMExtractCtx *ctx, TSNode index, TSNode use_node,
                                        int depth) {
@@ -493,9 +507,12 @@ static const char *js_static_index_key(CBMExtractCtx *ctx, TSNode index, TSNode 
 }
 
 /* Select one or every property from an object map. A dynamic index such as
- * `urlData[type]` intentionally yields every statically listed URL. When
- * leaf_property is non-NULL, selection continues into that nested property,
- * covering `pageData[type].url` and its aliased `this.pageSet.url` form. */
+ * `urlData[type]`
+ * intentionally yields every statically listed URL. When
+ * leaf_property is non-NULL, selection
+ * continues into that nested property,
+ * covering `pageData[type].url` and its aliased
+ * `this.pageSet.url` form. */
 static void collect_js_selected_values(CBMExtractCtx *ctx, TSNode base, TSNode index,
                                        const char *leaf_property, TSNode use_node, int depth,
                                        StaticStringCandidates *out) {
@@ -504,20 +521,17 @@ static void collect_js_selected_values(CBMExtractCtx *ctx, TSNode base, TSNode i
     }
     TSNode resolved = js_follow_assignment(ctx, use_node, base);
     const char *kind = ts_node_type(resolved);
-    if (strcmp(kind, "parenthesized_expression") == 0 &&
-        ts_node_named_child_count(resolved) == 1) {
+    if (strcmp(kind, "parenthesized_expression") == 0 && ts_node_named_child_count(resolved) == 1) {
         collect_js_selected_values(ctx, ts_node_named_child(resolved, 0), index, leaf_property,
                                    use_node, depth + 1, out);
         return;
     }
     if (strcmp(kind, "ternary_expression") == 0) {
         collect_js_selected_values(ctx,
-                                   ts_node_child_by_field_name(resolved,
-                                                               TS_FIELD("consequence")),
+                                   ts_node_child_by_field_name(resolved, TS_FIELD("consequence")),
                                    index, leaf_property, use_node, depth + 1, out);
         collect_js_selected_values(ctx,
-                                   ts_node_child_by_field_name(resolved,
-                                                               TS_FIELD("alternative")),
+                                   ts_node_child_by_field_name(resolved, TS_FIELD("alternative")),
                                    index, leaf_property, use_node, depth + 1, out);
         return;
     }
@@ -547,9 +561,8 @@ static void collect_js_selected_values(CBMExtractCtx *ctx, TSNode base, TSNode i
     }
 }
 
-static void collect_js_object_property(CBMExtractCtx *ctx, TSNode object_node,
-                                       const char *property, TSNode use_node, int depth,
-                                       StaticStringCandidates *out) {
+static void collect_js_object_property(CBMExtractCtx *ctx, TSNode object_node, const char *property,
+                                       TSNode use_node, int depth, StaticStringCandidates *out) {
     if (ts_node_is_null(object_node) || !property || depth >= 8 ||
         out->count >= MAX_STATIC_STRING_CANDIDATES) {
         return;
@@ -569,20 +582,17 @@ static void collect_js_object_property(CBMExtractCtx *ctx, TSNode object_node,
         return;
     }
     const char *kind = ts_node_type(resolved);
-    if (strcmp(kind, "parenthesized_expression") == 0 &&
-        ts_node_named_child_count(resolved) == 1) {
+    if (strcmp(kind, "parenthesized_expression") == 0 && ts_node_named_child_count(resolved) == 1) {
         collect_js_object_property(ctx, ts_node_named_child(resolved, 0), property, use_node,
                                    depth + 1, out);
         return;
     }
     if (strcmp(kind, "ternary_expression") == 0) {
         collect_js_object_property(ctx,
-                                   ts_node_child_by_field_name(resolved,
-                                                               TS_FIELD("consequence")),
+                                   ts_node_child_by_field_name(resolved, TS_FIELD("consequence")),
                                    property, use_node, depth + 1, out);
         collect_js_object_property(ctx,
-                                   ts_node_child_by_field_name(resolved,
-                                                               TS_FIELD("alternative")),
+                                   ts_node_child_by_field_name(resolved, TS_FIELD("alternative")),
                                    property, use_node, depth + 1, out);
         return;
     }
@@ -617,12 +627,12 @@ static void collect_static_string_candidates(CBMExtractCtx *ctx, TSNode node, TS
     }
     const char *kind = ts_node_type(node);
     if (strcmp(kind, "ternary_expression") == 0) {
-        collect_static_string_candidates(
-            ctx, ts_node_child_by_field_name(node, TS_FIELD("consequence")), use_node, depth + 1,
-            out);
-        collect_static_string_candidates(
-            ctx, ts_node_child_by_field_name(node, TS_FIELD("alternative")), use_node, depth + 1,
-            out);
+        collect_static_string_candidates(ctx,
+                                         ts_node_child_by_field_name(node, TS_FIELD("consequence")),
+                                         use_node, depth + 1, out);
+        collect_static_string_candidates(ctx,
+                                         ts_node_child_by_field_name(node, TS_FIELD("alternative")),
+                                         use_node, depth + 1, out);
         return;
     }
     if (strcmp(kind, "identifier") == 0 && is_js_language(ctx->language)) {
@@ -661,17 +671,14 @@ static void collect_static_string_candidates(CBMExtractCtx *ctx, TSNode node, TS
         is_js_language(ctx->language)) {
         StaticStringCandidates left = {0};
         StaticStringCandidates right = {0};
-        collect_static_string_candidates(ctx,
-                                         ts_node_child_by_field_name(node, TS_FIELD("left")),
+        collect_static_string_candidates(ctx, ts_node_child_by_field_name(node, TS_FIELD("left")),
                                          use_node, depth + 1, &left);
-        collect_static_string_candidates(ctx,
-                                         ts_node_child_by_field_name(node, TS_FIELD("right")),
+        collect_static_string_candidates(ctx, ts_node_child_by_field_name(node, TS_FIELD("right")),
                                          use_node, depth + 1, &right);
         for (int li = 0; li < left.count; li++) {
             for (int ri = 0; ri < right.count; ri++) {
                 if (strlen(left.values[li]) + strlen(right.values[ri]) < MAX_STRING_ARG_LEN) {
-                    static_candidate_add(out, cbm_arena_sprintf(ctx->arena, "%s%s",
-                                                                left.values[li],
+                    static_candidate_add(out, cbm_arena_sprintf(ctx->arena, "%s%s", left.values[li],
                                                                 right.values[ri]));
                 }
             }
@@ -2168,7 +2175,7 @@ static const char *normalize_http_method(CBMExtractCtx *ctx, const char *value) 
     if (!value || !value[0]) {
         return NULL;
     }
-    static const char *methods[] = {"GET", "POST", "PUT", "DELETE",
+    static const char *methods[] = {"GET",   "POST", "PUT",     "DELETE",
                                     "PATCH", "HEAD", "OPTIONS", NULL};
     char upper[CBM_SZ_32];
     size_t n = strlen(value);
@@ -2384,8 +2391,7 @@ static const char *extract_positional_url(CBMExtractCtx *ctx, TSNode arg, const 
 // Extract URL/topic candidates from keyword or positional args. JavaScript
 // conditionals and dynamic object-map lookups may conservatively yield more
 // than one statically valid endpoint.
-static int extract_url_or_topic_args(CBMExtractCtx *ctx, TSNode args,
-                                     StaticStringCandidates *out) {
+static int extract_url_or_topic_args(CBMExtractCtx *ctx, TSNode args, StaticStringCandidates *out) {
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = 0; ai < nc; ai++) {
         TSNode arg = ts_node_named_child(args, ai);
@@ -2402,9 +2408,8 @@ static int extract_url_or_topic_args(CBMExtractCtx *ctx, TSNode args,
             if (ts_node_is_null(key_node)) {
                 key_node = ts_node_child_by_field_name(arg, TS_FIELD("key"));
             }
-            char *key = ts_node_is_null(key_node)
-                            ? NULL
-                            : cbm_node_text(ctx->arena, key_node, ctx->source);
+            char *key =
+                ts_node_is_null(key_node) ? NULL : cbm_node_text(ctx->arena, key_node, ctx->source);
             if (key && is_url_or_topic_keyword(key) && !ts_node_is_null(value_node)) {
                 collect_static_string_candidates(ctx, value_node, value_node, 0, out);
                 if (out->count > 0) {
@@ -2504,14 +2509,18 @@ static const char *extract_handler_arg(CBMExtractCtx *ctx, TSNode args) {
 
 /* FastAPI supports registering an existing callable without decorator syntax:
  *
- *     app.post("/items")(create_item)
  *
- * Tree-sitter represents this as an outer call whose function is the inner
+ * app.post("/items")(create_item)
+ *
+ * Tree-sitter represents this as an outer call whose function
+ * is the inner
  * app.post("/items") call.  The regular walk records the inner route call but
+ *
  * cannot see the handler supplied to the outer call, leaving the Route without
- * a HANDLES edge.  Fold the two calls into one additional registration record. */
+ * a HANDLES edge.
+ * Fold the two calls into one additional registration record. */
 static void extract_python_chained_route_registration(CBMExtractCtx *ctx, TSNode node,
-                                                       WalkState *state) {
+                                                      WalkState *state) {
     if (ctx->language != CBM_LANG_PYTHON || strcmp(ts_node_type(node), "call") != 0) {
         return;
     }
@@ -3059,9 +3068,12 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             cbm_calls_push(&ctx->result->calls, ctx->arena, call);
 
             /* Preserve every statically possible JavaScript endpoint as a
-             * separate call record. Resolution then emits one method-specific
-             * HTTP_CALLS edge per candidate without changing CBMCall's common
-             * single-target representation for other languages. */
+             * separate
+             * call record. Resolution then emits one method-specific
+             * HTTP_CALLS edge
+             * per candidate without changing CBMCall's common
+             * single-target
+             * representation for other languages. */
             cbm_svc_kind_t candidate_svc = cbm_service_pattern_match(call.callee_name);
             bool enumerable_http = candidate_svc == CBM_SVC_HTTP ||
                                    cbm_service_pattern_is_global_fetch(call.callee_name);
@@ -3073,11 +3085,13 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             }
 
             /* Python callable wrappers do not contain a nested call node:
+             *
              * `asyncio.to_thread(requests.post, url=...)` passes `requests.post`
-             * as a function reference. Materialize the equivalent service call
-             * so HTTP classification sees the callable and the forwarded URL. */
-            if (ctx->language == CBM_LANG_PYTHON && call.first_string_arg &&
-                call.callee_name &&
+             * as
+             * a function reference. Materialize the equivalent service call
+             * so HTTP
+             * classification sees the callable and the forwarded URL. */
+            if (ctx->language == CBM_LANG_PYTHON && call.first_string_arg && call.callee_name &&
                 (strcmp(call.callee_name, "asyncio.to_thread") == 0 ||
                  strcmp(call.callee_name, "to_thread") == 0) &&
                 !ts_node_is_null(args) && ts_node_named_child_count(args) > 0) {

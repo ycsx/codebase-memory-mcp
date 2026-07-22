@@ -34,7 +34,7 @@ static int env_positive_int(const char *name, int fallback) {
     if (raw && raw[0]) {
         errno = 0;
         char *end = NULL;
-        long v = strtol(raw, &end, 10);
+        long long v = strtoll(raw, &end, 10);
         if (errno == 0 && end != raw && *end == '\0' && v > 0 && v <= INT_MAX) {
             return (int)v;
         }

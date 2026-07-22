@@ -570,9 +570,12 @@ static bool contains_case_insensitive(const char *text, const char *needle) {
 }
 
 /* Framework-neutral wrapper/client detection. Library-only matching misses
- * injected clients (`session.request`, `self._client.post`) and local HTTP
- * bridge helpers (`foo_service_call`). This remains conservative: the caller
- * also requires a URL-shaped argument before emitting HTTP_CALLS. */
+ * injected clients
+ * (`session.request`, `self._client.post`) and local HTTP
+ * bridge helpers (`foo_service_call`).
+ * This remains conservative: the caller
+ * also requires a URL-shaped argument before emitting
+ * HTTP_CALLS. */
 static bool looks_like_http_helper(const char *qn) {
     if (!qn || !qn[0]) {
         return false;
@@ -580,13 +583,16 @@ static bool looks_like_http_helper(const char *qn) {
     const char *leaf = strrchr(qn, '.');
     leaf = leaf ? leaf + 1 : qn;
     /* Names such as httpRouter.post are server-side registrars, not injected
-     * clients. They reach the route-registration fallback below. */
+     * clients. They
+     * reach the route-registration fallback below. */
     if (contains_case_insensitive(qn, "router")) {
         return false;
     }
     /* Preserve the existing Supertest-style route-registration fallback for
+     *
      * request(app).get('/path'). Python/JS HTTP clients use a member receiver
-     * such as session.request or client.get and do not contain this shape. */
+     * such as
+     * session.request or client.get and do not contain this shape. */
     if (contains_case_insensitive(qn, "request(")) {
         return false;
     }
@@ -596,12 +602,10 @@ static bool looks_like_http_helper(const char *qn) {
     if (helper_leaf) {
         return true;
     }
-    bool client_owner = contains_case_insensitive(qn, "client") ||
-                        contains_case_insensitive(qn, "session") ||
-                        contains_case_insensitive(qn, "http") ||
-                        contains_case_insensitive(qn, "request") ||
-                        contains_case_insensitive(qn, "calljava") ||
-                        contains_case_insensitive(qn, "call_java");
+    bool client_owner =
+        contains_case_insensitive(qn, "client") || contains_case_insensitive(qn, "session") ||
+        contains_case_insensitive(qn, "http") || contains_case_insensitive(qn, "request") ||
+        contains_case_insensitive(qn, "calljava") || contains_case_insensitive(qn, "call_java");
     if (!client_owner) {
         return false;
     }

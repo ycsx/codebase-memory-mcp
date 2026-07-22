@@ -66,19 +66,24 @@ cbm_layout_result_t *cbm_layout_compute(cbm_store_t *store, const char *project,
                                         int radius, int max_nodes);
 
 /* Compute a layout while reserving slots in max_nodes for the supplied node
- * IDs. This is used by cross-project layouts so sampled views retain both
- * endpoints of links. Invalid IDs and IDs from another project are ignored. */
+ * IDs. This is used by
+ * cross-project layouts so sampled views retain both
+ * endpoints of links. Invalid IDs and IDs
+ * from another project are ignored. */
 cbm_layout_result_t *cbm_layout_compute_with_required_nodes(
     cbm_store_t *store, const char *project, cbm_layout_level_t level, const char *center_node,
     int radius, int max_nodes, const int64_t *required_node_ids, int required_node_count);
 
 /* Resolve a cross-project target using the strongest identity available.
- * New indexes can provide target_qualified_name; current indexes provide the
- * target_file + target_function pair. route_qualified_name is retained as a
- * compatibility fallback for older indexes. Returns 0 when unresolved. */
+ * New indexes can provide
+ * target_qualified_name; current indexes provide the
+ * target_file + target_function pair.
+ * route_qualified_name is retained as a
+ * compatibility fallback for older indexes. Returns 0 when
+ * unresolved. */
 int64_t cbm_layout_resolve_cross_target(cbm_store_t *store, const char *project,
-                                        const char *target_qualified_name,
-                                        const char *target_file, const char *target_function,
+                                        const char *target_qualified_name, const char *target_file,
+                                        const char *target_function,
                                         const char *route_qualified_name);
 
 /* Free a layout result. */

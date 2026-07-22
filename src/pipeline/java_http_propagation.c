@@ -9,12 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum {
-    JHP_MAX_WRAPPERS = 4096,
-    JHP_MAX_PASSES = 8,
-    JHP_MAX_TAINT_NAMES = 64,
-    JHP_MAX_IDENT = 128
-};
+enum { JHP_MAX_WRAPPERS = 4096, JHP_MAX_PASSES = 8, JHP_MAX_TAINT_NAMES = 64, JHP_MAX_IDENT = 128 };
 
 typedef struct {
     const CBMDefinition *def;
@@ -43,8 +38,7 @@ static bool contains_ci(const char *text, const char *needle) {
     size_t n = strlen(needle);
     for (const char *p = text; *p; p++) {
         size_t i = 0;
-        while (i < n && p[i] && tolower((unsigned char)p[i]) ==
-                                      tolower((unsigned char)needle[i])) {
+        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) {
             i++;
         }
         if (i == n) {
@@ -55,8 +49,7 @@ static bool contains_ci(const char *text, const char *needle) {
 }
 
 static bool name_looks_like_url(const char *name) {
-    return contains_ci(name, "url") || contains_ci(name, "uri") ||
-           contains_ci(name, "endpoint");
+    return contains_ci(name, "url") || contains_ci(name, "uri") || contains_ci(name, "endpoint");
 }
 
 static bool name_looks_like_method(const char *name) {
@@ -68,7 +61,7 @@ static const char *http_method_literal(const char *value) {
         return NULL;
     }
     const char *leaf = leaf_name(value);
-    static const char *const methods[] = {"GET", "POST", "PUT", "DELETE",
+    static const char *const methods[] = {"GET",   "POST", "PUT",     "DELETE",
                                           "PATCH", "HEAD", "OPTIONS", NULL};
     for (int i = 0; methods[i]; i++) {
         if (strcasecmp(leaf, methods[i]) == 0) {
@@ -88,8 +81,7 @@ static bool ends_with_ci(const char *text, const char *suffix) {
     }
     size_t text_len = strlen(text);
     size_t suffix_len = strlen(suffix);
-    return text_len >= suffix_len &&
-           strcasecmp(text + text_len - suffix_len, suffix) == 0;
+    return text_len >= suffix_len && strcasecmp(text + text_len - suffix_len, suffix) == 0;
 }
 
 static bool call_receiver_matches_http_import(const CBMFileResult *result, const CBMCall *call) {
@@ -132,9 +124,8 @@ static bool body_has_http_client(const char *body_tokens) {
         return true;
     }
     static const char *const java_clients[] = {
-        "resttemplate", "httpurlconnection", "urlconnection", "httpclient",
-        "webclient",    "okhttp",            "unirest",       "retrofit",
-        "asynchttpclient", NULL};
+        "resttemplate", "httpurlconnection", "urlconnection", "httpclient",      "webclient",
+        "okhttp",       "unirest",           "retrofit",      "asynchttpclient", NULL};
     for (int i = 0; java_clients[i]; i++) {
         if (contains_ci(body_tokens, java_clients[i])) {
             return true;
@@ -263,9 +254,8 @@ static TSNode find_def_ast_node(const CBMFileResult *result, const CBMDefinition
         TSNode node = ts_tree_cursor_current_node(&cursor);
         const char *kind = ts_node_type(node);
         uint32_t line = ts_node_start_point(node).row + 1;
-        if (line == def->start_line &&
-            (strcmp(kind, "method_declaration") == 0 ||
-             strcmp(kind, "constructor_declaration") == 0)) {
+        if (line == def->start_line && (strcmp(kind, "method_declaration") == 0 ||
+                                        strcmp(kind, "constructor_declaration") == 0)) {
             ts_tree_cursor_delete(&cursor);
             return node;
         }
@@ -444,8 +434,8 @@ static bool wrapper_already_present(const java_http_wrapper_t *wrappers, int cou
     return false;
 }
 
-static int discover_wrappers(const cbm_file_info_t *files, int file_count,
-                             CBMFileResult **results, java_http_wrapper_t *wrappers, int count) {
+static int discover_wrappers(const cbm_file_info_t *files, int file_count, CBMFileResult **results,
+                             java_http_wrapper_t *wrappers, int count) {
     for (int fi = 0; fi < file_count && count < JHP_MAX_WRAPPERS; fi++) {
         CBMFileResult *result = results[fi];
         if (!result || files[fi].language != CBM_LANG_JAVA) {
@@ -504,9 +494,9 @@ static int discover_wrappers(const cbm_file_info_t *files, int file_count,
                 fixed_method = fixed_method_in_def(result, def);
             }
             wrappers[count++] = (java_http_wrapper_t){.def = def,
-                                                       .url_param = url_param,
-                                                       .method_param = method_param,
-                                                       .fixed_method = fixed_method};
+                                                      .url_param = url_param,
+                                                      .method_param = method_param,
+                                                      .fixed_method = fixed_method};
         }
         free(owned_source);
     }
@@ -525,9 +515,8 @@ static bool owner_matches(const char *owner, const char *owner_expr) {
             owner_expr[expr_len - simple_len - 1] == '.');
 }
 
-static const char *resolve_constant_expr(const CBMFileResult *local,
-                                         CBMFileResult *const *results, int file_count,
-                                         const char *expr) {
+static const char *resolve_constant_expr(const CBMFileResult *local, CBMFileResult *const *results,
+                                         int file_count, const char *expr) {
     if (!expr || !expr[0]) {
         return NULL;
     }
@@ -606,8 +595,7 @@ static bool wrapper_owner_matches_receiver(const java_http_wrapper_t *wrapper,
 }
 
 static const java_http_wrapper_t *match_wrapper(const java_http_wrapper_t *wrappers, int count,
-                                                const CBMFileResult *result,
-                                                const CBMCall *call) {
+                                                const CBMFileResult *result, const CBMCall *call) {
     const char *resolved = resolved_qn_for_call(result, call);
     if (resolved) {
         for (int i = 0; i < count; i++) {
@@ -645,7 +633,8 @@ static bool propagate_calls(const cbm_file_info_t *files, int file_count, CBMFil
         }
         for (int ci = 0; ci < result->calls.count; ci++) {
             CBMCall *call = &result->calls.items[ci];
-            const java_http_wrapper_t *wrapper = match_wrapper(wrappers, wrapper_count, result, call);
+            const java_http_wrapper_t *wrapper =
+                match_wrapper(wrappers, wrapper_count, result, call);
             if (!wrapper) {
                 continue;
             }
@@ -658,8 +647,8 @@ static bool propagate_calls(const cbm_file_info_t *files, int file_count, CBMFil
                 url = resolve_constant_expr(result, results, file_count, url_arg->expr);
             }
             char normalized[1024];
-            if (!url || !cbm_service_pattern_normalize_http_url(url, normalized,
-                                                                 sizeof(normalized))) {
+            if (!url ||
+                !cbm_service_pattern_normalize_http_url(url, normalized, sizeof(normalized))) {
                 continue;
             }
             if (!call->is_http_wrapper || call->first_string_arg != url || url_arg->value != url) {
@@ -673,10 +662,10 @@ static bool propagate_calls(const cbm_file_info_t *files, int file_count, CBMFil
             }
             if (!call->http_method && wrapper->method_param >= 0) {
                 const CBMCallArg *method_arg = call_arg_at(call, wrapper->method_param);
-                const char *method = method_arg ? http_method_literal(method_arg->value
-                                                                          ? method_arg->value
-                                                                          : method_arg->expr)
-                                                : NULL;
+                const char *method = method_arg
+                                         ? http_method_literal(method_arg->value ? method_arg->value
+                                                                                 : method_arg->expr)
+                                         : NULL;
                 if (method) {
                     call->http_method = method;
                     changed = true;

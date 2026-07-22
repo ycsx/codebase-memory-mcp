@@ -46,9 +46,12 @@ cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn);
 bool cbm_service_pattern_is_global_fetch(const char *callee_name);
 
 /* Normalize an outbound HTTP target into a route-matchable URL. In addition
- * to absolute paths and full URLs, accepts explicit relative API forms such
- * as "api/orders" and "v2/api/orders" and prefixes their leading slash.
- * Query strings/fragments are omitted because they are not route identity. */
+ * to absolute paths
+ * and full URLs, accepts explicit relative API forms such
+ * as "api/orders" and "v2/api/orders"
+ * and prefixes their leading slash.
+ * Query strings/fragments are omitted because they are not
+ * route identity. */
 bool cbm_service_pattern_normalize_http_url(const char *literal, char *out, size_t out_sz);
 
 /* Per-worker TLS cache for cbm_service_pattern_match results. The
