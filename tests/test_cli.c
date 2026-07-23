@@ -13,6 +13,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
+#include <foundation/compat_fs.h>
 #include <foundation/yaml.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
@@ -41,7 +42,7 @@ static int write_test_file(const char *path, const char *content) {
 /* Helper: read a file into static buffer */
 static const char *read_test_file(const char *path) {
     static char buf[8192];
-    FILE *f = fopen(path, "r");
+    FILE *f = cbm_fopen(path, "r");
     if (!f)
         return NULL;
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
@@ -1696,6 +1697,35 @@ TEST(cli_copy_file) {
     const char *data = read_test_file(dst);
     ASSERT_STR_EQ(data, "test content for copy");
 
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_copy_file_unicode_path) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-copy-unicode-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char unicode_dir[512];
+    snprintf(unicode_dir, sizeof(unicode_dir), "%s/用户目录", tmpdir);
+    ASSERT(cbm_mkdir_p(unicode_dir, 0755));
+
+    char src[768], dst[768];
+    snprintf(src, sizeof(src), "%s/source", unicode_dir);
+    snprintf(dst, sizeof(dst), "%s/dest", unicode_dir);
+    ASSERT_EQ(write_test_file(src, "unicode path copy"), 0);
+
+    ASSERT_EQ(cbm_copy_file(src, dst), 0);
+    ASSERT_STR_EQ(read_test_file(dst), "unicode path copy");
+
+    /* The UTF-8-safe copy must retain the same-file truncation guard. */
+    ASSERT_EQ(cbm_copy_binary_to_target(dst, dst), 0);
+    ASSERT_STR_EQ(read_test_file(dst), "unicode path copy");
+
+    ASSERT_EQ(cbm_unlink(src), 0);
+    ASSERT_EQ(cbm_unlink(dst), 0);
+    ASSERT_EQ(cbm_rmdir(unicode_dir), 0);
     test_rmdir_r(tmpdir);
     PASS();
 }
@@ -9781,8 +9811,9 @@ SUITE(cli) {
     RUN_TEST(cli_ensure_path_dry_run);
     RUN_TEST(cli_ensure_path_fish_syntax_issue319);
 
-    /* File copy (2 tests — update_test.go) */
+    /* File copy (3 tests — update_test.go plus Windows Unicode regression) */
     RUN_TEST(cli_copy_file);
+    RUN_TEST(cli_copy_file_unicode_path);
     RUN_TEST(cli_copy_file_source_not_found);
 
     /* Tar.gz extraction (3 tests — update_test.go) */

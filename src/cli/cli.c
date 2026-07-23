@@ -355,12 +355,12 @@ static bool cbm_agent_cli_exists(const char *name, const char *home_dir) {
 /* ── File utilities ───────────────────────────────────────────── */
 
 int cbm_copy_file(const char *src, const char *dst) {
-    FILE *in = fopen(src, "rb");
+    FILE *in = cbm_fopen(src, "rb");
     if (!in) {
         return CLI_ERR;
     }
 
-    FILE *out = fopen(dst, "wb");
+    FILE *out = cbm_fopen(dst, "wb");
     if (!out) {
         (void)fclose(in);
         return CLI_ERR;
@@ -394,21 +394,22 @@ int cbm_copy_file(const char *src, const char *dst) {
  * copying the running binary onto itself during install (cbm_copy_file would
  * truncate it, since it opens the destination "wb" before reading the source). */
 static bool cbm_same_file(const char *a, const char *b) {
+#ifdef _WIN32
+    /* The narrow CRT stat() cannot resolve UTF-8 paths on Windows. */
+    char na[CLI_BUF_4K];
+    char nb[CLI_BUF_4K];
+    if (!cbm_canonical_path(a, na, sizeof(na)) || !cbm_canonical_path(b, nb, sizeof(nb))) {
+        return false;
+    }
+    cbm_normalize_path_sep(na);
+    cbm_normalize_path_sep(nb);
+    return strcmp(na, nb) == 0;
+#else
     struct stat sa;
     struct stat sb;
     if (stat(a, &sa) != 0 || stat(b, &sb) != 0) {
         return false;
     }
-#ifdef _WIN32
-    /* st_ino is unreliable on Windows; compare normalized path strings. */
-    char na[CLI_BUF_1K];
-    char nb[CLI_BUF_1K];
-    snprintf(na, sizeof(na), "%s", a);
-    snprintf(nb, sizeof(nb), "%s", b);
-    cbm_normalize_path_sep(na);
-    cbm_normalize_path_sep(nb);
-    return strcmp(na, nb) == 0;
-#else
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 #endif
 }
@@ -7629,8 +7630,7 @@ int cbm_cmd_install(int argc, char **argv) {
 #endif
 
     if (!cbm_same_file(self_path, bin_target)) {
-        struct stat tgt_st;
-        bool target_exists = (stat(bin_target, &tgt_st) == 0);
+        bool target_exists = cbm_file_exists(bin_target);
         bool do_copy = !target_exists || force;
         if (target_exists && !force) {
             printf("A different binary already exists at:\n  %s\n", bin_target);
