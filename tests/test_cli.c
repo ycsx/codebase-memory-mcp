@@ -2577,9 +2577,11 @@ TEST(cli_new_agent_install_plans_use_documented_paths) {
     char *saved_crush = save_test_env("CRUSH_GLOBAL_CONFIG");
     char *saved_vibe = save_test_env("VIBE_HOME");
     char *saved_appdata = save_test_env("APPDATA");
+    char *saved_hermes = save_test_env("HERMES_HOME");
     cbm_unsetenv("COPILOT_HOME");
     cbm_unsetenv("CRUSH_GLOBAL_CONFIG");
     cbm_unsetenv("VIBE_HOME");
+    cbm_unsetenv("HERMES_HOME");
 #ifdef _WIN32
     char appdata[512];
     snprintf(appdata, sizeof(appdata), "%s/AppData/Roaming", tmpdir);
@@ -2658,6 +2660,7 @@ TEST(cli_new_agent_install_plans_use_documented_paths) {
     restore_test_env("CRUSH_GLOBAL_CONFIG", saved_crush);
     restore_test_env("VIBE_HOME", saved_vibe);
     restore_test_env("APPDATA", saved_appdata);
+    restore_test_env("HERMES_HOME", saved_hermes);
     test_rmdir_r(tmpdir);
 
     if (!has_json || missing)
@@ -2673,7 +2676,8 @@ TEST(cli_new_agent_configs_use_documented_schemas) {
 
     const char *const env_names[] = {
         "PATH",       "COPILOT_HOME",      "CRUSH_GLOBAL_CONFIG", "VIBE_HOME",
-        "CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG",     "APPDATA"};
+        "CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG",     "APPDATA",
+        "HERMES_HOME"};
     char *saved_env[sizeof(env_names) / sizeof(env_names[0])];
     for (size_t i = 0; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
         saved_env[i] = save_test_env(env_names[i]);

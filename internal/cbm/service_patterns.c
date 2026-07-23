@@ -856,7 +856,13 @@ bool cbm_service_pattern_normalize_http_url(const char *literal, char *out, size
         out[oi++] = *p++;
     }
     out[oi] = '\0';
-    return oi > 1 && (full_url || strchr(out + 1, '/') != NULL);
+    if (oi <= 1) {
+        return false;
+    }
+    if (full_url || add_slash) {
+        return true;
+    }
+    return cbm_service_pattern_is_http_route_literal(out, NULL);
 }
 
 /* ── Public API ────────────────────────────────────────────────── */

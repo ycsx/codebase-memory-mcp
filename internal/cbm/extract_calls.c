@@ -432,20 +432,25 @@ const char *cbm_evaluate_static_string(CBMExtractCtx *ctx, TSNode node, int dept
         TSNode consequence = ts_node_child_by_field_name(node, TS_FIELD("consequence"));
         return cbm_evaluate_static_string(ctx, consequence, depth + 1);
     }
+
+    bool js_template = strcmp(kind, "template_string") == 0 && is_js_language(ctx->language);
+    bool python_string = is_string_like(kind) || strcmp(kind, "concatenated_string") == 0;
+    bool js_member = strcmp(kind, "member_expression") == 0 && is_js_language(ctx->language);
+    if (!js_template && !python_string && !js_member) {
+        return NULL;
+    }
+
     char *raw = cbm_node_text(ctx->arena, node, ctx->source);
     if (!raw || !raw[0]) {
         return NULL;
     }
-    if (strcmp(kind, "template_string") == 0 && is_js_language(ctx->language)) {
+    if (js_template) {
         return evaluate_js_template_text(ctx, node, raw, depth);
     }
-    if (is_string_like(kind) || strcmp(kind, "concatenated_string") == 0) {
+    if (python_string) {
         return evaluate_python_string_text(ctx, node, raw, depth);
     }
-    if (strcmp(kind, "member_expression") == 0 && is_js_language(ctx->language)) {
-        return lookup_string_constant(ctx, raw);
-    }
-    return NULL;
+    return lookup_string_constant(ctx, raw);
 }
 
 enum { MAX_STATIC_STRING_CANDIDATES = 16 };

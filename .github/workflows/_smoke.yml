@@ -335,7 +335,9 @@ jobs:
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           ARCHIVE=codebase-memory-mcp-linux-amd64-portable.tar.gz
           SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-          TEST_FORMULA="$RUNNER_TEMP/codebase-memory-mcp.rb"
+          TEST_TAP=cbm-ci/release-smoke
+          brew tap-new "$TEST_TAP"
+          TEST_FORMULA="$(brew --repository "$TEST_TAP")/Formula/codebase-memory-mcp.rb"
           cp pkg/homebrew/Formula/codebase-memory-mcp.rb "$TEST_FORMULA"
           python3 - "$TEST_FORMULA" "$ARCHIVE" "$SHA256" <<'PY'
           import pathlib
@@ -364,5 +366,5 @@ jobs:
           python3 -m http.server 18082 --bind 127.0.0.1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          brew install --formula "$TEST_FORMULA"
+          brew install --formula "$TEST_TAP/codebase-memory-mcp"
           codebase-memory-mcp --version
