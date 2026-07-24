@@ -727,6 +727,15 @@ typedef struct {
     cbm_gitignore_t *local_gi;       /* nested .gitignore for this subtree */
     char local_gi_prefix[CBM_SZ_4K]; /* rel_prefix when local_gi was loaded */
 } walk_frame_t;
+
+typedef struct {
+    walk_frame_t *frames;
+    int top;
+    int capacity;
+} walk_stack_t;
+
+/* Initial capacity only. Wide directories can have more pending sibling
+ * frames than any practical fixed cap, so the stack grows on demand. */
 #define WALK_STACK_CAP 512
 /* Build abs/rel paths and process one directory entry. */
 /* Try to load a nested .gitignore from this directory. Returns owned pointer or NULL. */
@@ -744,23 +753,31 @@ static cbm_gitignore_t *try_load_nested_gitignore(const walk_frame_t *frame) {
 }
 
 /* Push a subdirectory onto the walk stack, inheriting local gitignore context. */
-static void walk_push_subdir(walk_frame_t *stack, int *top, const char *abs_path,
-                             const char *rel_path, const walk_frame_t *parent) {
-    if (*top >= WALK_STACK_CAP) {
-        return;
+static void walk_push_subdir(walk_stack_t *stack, const char *abs_path, const char *rel_path,
+                             const walk_frame_t *parent) {
+    if (stack->top >= stack->capacity) {
+        int new_capacity = stack->capacity * 2;
+        walk_frame_t *grown =
+            realloc(stack->frames, (size_t)new_capacity * sizeof(*stack->frames));
+        if (!grown) {
+            return;
+        }
+        stack->frames = grown;
+        stack->capacity = new_capacity;
     }
-    snprintf(stack[*top].dir, CBM_SZ_4K, "%s", abs_path);
-    snprintf(stack[*top].prefix, CBM_SZ_4K, "%s", rel_path);
-    stack[*top].local_gi = parent->local_gi;
-    snprintf(stack[*top].local_gi_prefix, CBM_SZ_4K, "%s", parent->local_gi_prefix);
-    (*top)++;
+    walk_frame_t *slot = &stack->frames[stack->top];
+    snprintf(slot->dir, CBM_SZ_4K, "%s", abs_path);
+    snprintf(slot->prefix, CBM_SZ_4K, "%s", rel_path);
+    slot->local_gi = parent->local_gi;
+    snprintf(slot->local_gi_prefix, CBM_SZ_4K, "%s", parent->local_gi_prefix);
+    stack->top++;
 }
 
 static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *frame,
                                    const cbm_discover_opts_t *opts,
                                    const cbm_gitignore_t *gitignore,
                                    const cbm_gitignore_t *global_gi,
-                                   const cbm_gitignore_t *cbmignore, walk_frame_t *stack, int *top,
+                                   const cbm_gitignore_t *cbmignore, walk_stack_t *stack,
                                    file_list_t *out) {
     char abs_path[CBM_SZ_4K];
     char rel_path[CBM_SZ_4K];
@@ -779,7 +796,7 @@ static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *fram
     if (S_ISDIR(st.st_mode)) {
         if (!should_skip_directory(entry->name, rel_path, opts, gitignore, global_gi, cbmignore,
                                    frame->local_gi, frame->local_gi_prefix)) {
-            walk_push_subdir(stack, top, abs_path, rel_path, frame);
+            walk_push_subdir(stack, abs_path, rel_path, frame);
         } else {
             /* Record the excluded subtree root so callers can report it (#411). */
             file_list_add_excluded(out, rel_path);
@@ -795,8 +812,10 @@ enum { GI_OWNED_CAP = 64 };
 static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_discover_opts_t *opts,
                      const cbm_gitignore_t *gitignore, const cbm_gitignore_t *global_gi,
                      const cbm_gitignore_t *cbmignore, file_list_t *out) {
-    walk_frame_t *stack = calloc(WALK_STACK_CAP, sizeof(walk_frame_t));
-    if (!stack) {
+    walk_stack_t stack = {.frames = calloc(WALK_STACK_CAP, sizeof(walk_frame_t)),
+                          .top = 0,
+                          .capacity = WALK_STACK_CAP};
+    if (!stack.frames) {
         return;
     }
     /* Collect all owned gitignores — freed at the end because child frames
@@ -804,13 +823,12 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
     cbm_gitignore_t *owned_gis[GI_OWNED_CAP];
     int owned_count = 0;
 
-    int top = 0;
-    snprintf(stack[top].dir, CBM_SZ_4K, "%s", dir_path);
-    snprintf(stack[top].prefix, CBM_SZ_4K, "%s", rel_prefix);
-    top++;
+    snprintf(stack.frames[0].dir, CBM_SZ_4K, "%s", dir_path);
+    snprintf(stack.frames[0].prefix, CBM_SZ_4K, "%s", rel_prefix);
+    stack.top++;
 
-    while (top > 0) {
-        walk_frame_t frame = stack[--top];
+    while (stack.top > 0) {
+        walk_frame_t frame = stack.frames[--stack.top];
 
         cbm_gitignore_t *loaded = try_load_nested_gitignore(&frame);
         if (loaded) {
@@ -828,15 +846,15 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
 
         cbm_dirent_t *entry;
         while ((entry = cbm_readdir(d)) != NULL) {
-            walk_dir_process_entry(entry, &frame, opts, gitignore, global_gi, cbmignore, stack,
-                                   &top, out);
+            walk_dir_process_entry(entry, &frame, opts, gitignore, global_gi, cbmignore, &stack,
+                                   out);
         }
         cbm_closedir(d);
     }
     for (int i = 0; i < owned_count; i++) {
         cbm_gitignore_free(owned_gis[i]);
     }
-    free(stack);
+    free(stack.frames);
 }
 
 /* ── Public API ───────────────────────────────── */
