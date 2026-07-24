@@ -735,7 +735,8 @@ typedef struct {
 } walk_stack_t;
 
 /* Initial capacity only. Wide directories can have more pending sibling
- * frames than any practical fixed cap, so the stack grows on demand. */
+ * frames than any
+ * practical fixed cap, so the stack grows on demand. */
 #define WALK_STACK_CAP 512
 /* Build abs/rel paths and process one directory entry. */
 /* Try to load a nested .gitignore from this directory. Returns owned pointer or NULL. */
@@ -757,8 +758,7 @@ static void walk_push_subdir(walk_stack_t *stack, const char *abs_path, const ch
                              const walk_frame_t *parent) {
     if (stack->top >= stack->capacity) {
         int new_capacity = stack->capacity * 2;
-        walk_frame_t *grown =
-            realloc(stack->frames, (size_t)new_capacity * sizeof(*stack->frames));
+        walk_frame_t *grown = realloc(stack->frames, (size_t)new_capacity * sizeof(*stack->frames));
         if (!grown) {
             return;
         }
