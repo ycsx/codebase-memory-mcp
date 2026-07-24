@@ -29,10 +29,10 @@ import type { GraphNode, GraphData, RepoInfo } from "../lib/types";
 import { colorForStatus } from "../lib/colors";
 
 /* Persist panel widths */
-function loadWidth(key: string, fallback: number): number {
+function loadWidth(key: string, fallback: number, min: number, max: number): number {
   try {
     const v = localStorage.getItem(key);
-    if (v) return Math.max(150, Math.min(600, parseInt(v, 10)));
+    if (v) return Math.max(min, Math.min(max, parseInt(v, 10)));
   } catch { /* ignore */ }
   return fallback;
 }
@@ -79,8 +79,13 @@ export function GraphTab({ project }: GraphTabProps) {
     setDisplay(next);
     saveDisplaySettings(next);
   }, []);
-  const [leftWidth, setLeftWidth] = useState(() => loadWidth("cbm-left-w", 260));
-  const [rightWidth, setRightWidth] = useState(() => loadWidth("cbm-right-w", 280));
+  const [leftWidth, setLeftWidth] = useState(() =>
+    loadWidth("cbm-left-w", 260, 150, 500),
+  );
+  const [rightWidth, setRightWidth] = useState(() =>
+    loadWidth("cbm-right-w", 320, 240, 760),
+  );
+  const [detailExpanded, setDetailExpanded] = useState(false);
   const limitNotice = formatGraphLimitNotice(data);
 
   /* Node budget — keyed to its project so switching projects re-reads the
@@ -179,6 +184,22 @@ export function GraphTab({ project }: GraphTabProps) {
     hideTests,
   ]);
 
+  /* Detail inspection is independent of visual filters. A filtered-out
+   * neighbor should still be available in the selected node's relationship
+   * list, including linked-project and cross-project edges. */
+  const detailGraph = useMemo(() => {
+    if (!data) {
+      return { nodes: [] as GraphNode[], edges: [] as GraphData["edges"] };
+    }
+    const nodes = [...data.nodes];
+    const edges = [...data.edges];
+    for (const linked of data.linked_projects ?? []) {
+      nodes.push(...linked.nodes);
+      edges.push(...linked.edges, ...linked.cross_edges);
+    }
+    return { nodes, edges };
+  }, [data]);
+
   /* Re-read the persisted budget when the project changes… */
   useEffect(() => {
     if (project) {
@@ -194,6 +215,8 @@ export function GraphTab({ project }: GraphTabProps) {
       fetchOverview(project, budget.value);
       setHighlightedIds(null);
       setSelectedPath(null);
+      setSelectedNode(null);
+      setDetailExpanded(false);
     }
   }, [project, budget, fetchOverview]);
 
@@ -309,6 +332,13 @@ export function GraphTab({ project }: GraphTabProps) {
     },
     [handleNodeClick],
   );
+
+  const closeDetailPanel = useCallback(() => {
+    setSelectedNode(null);
+    setHighlightedIds(null);
+    setSelectedPath(null);
+    setDetailExpanded(false);
+  }, []);
 
   const toggleLabel = useCallback((label: string) => {
     setEnabledLabels((prev) => {
@@ -546,16 +576,23 @@ export function GraphTab({ project }: GraphTabProps) {
           <ResizeHandle
             side="right"
             onResize={(d) => {
+              setDetailExpanded(false);
               setRightWidth((w) => {
-                const nw = Math.max(200, Math.min(500, w + d));
+                const nw = Math.max(240, Math.min(760, w + d));
                 saveWidth("cbm-right-w", nw);
                 return nw;
               });
             }}
           />
           <div
-            className="border-l border-border shrink-0 h-full overflow-hidden"
-            style={{ width: rightWidth, maxHeight: "100%" }}
+            className={`border-l border-border shrink-0 h-full overflow-hidden ${
+              detailExpanded ? "transition-[width] duration-200" : ""
+            }`}
+            style={{
+              width: detailExpanded ? "min(860px, 70vw)" : rightWidth,
+              maxWidth: "calc(100vw - 220px)",
+              maxHeight: "100%",
+            }}
           >
             {missedSkeleton?.ids.has(selectedNode.id) ? (
               /* Skeleton node: the standard panel (code snippet, callers) is
@@ -564,24 +601,18 @@ export function GraphTab({ project }: GraphTabProps) {
               <MissedCallout
                 node={selectedNode}
                 project={project}
-                onClose={() => {
-                  setSelectedNode(null);
-                  setHighlightedIds(null);
-                  setSelectedPath(null);
-                }}
+                onClose={closeDetailPanel}
               />
             ) : (
               <NodeDetailPanel
                 node={selectedNode}
-                allNodes={filteredData.nodes}
-                allEdges={filteredData.edges}
+                allNodes={detailGraph.nodes}
+                allEdges={detailGraph.edges}
                 project={project}
                 repoInfo={repoInfo}
-                onClose={() => {
-                  setSelectedNode(null);
-                  setHighlightedIds(null);
-                  setSelectedPath(null);
-                }}
+                expanded={detailExpanded}
+                onToggleExpanded={() => setDetailExpanded((value) => !value)}
+                onClose={closeDetailPanel}
                 onNavigate={handleNavigateToNode}
               />
             )}

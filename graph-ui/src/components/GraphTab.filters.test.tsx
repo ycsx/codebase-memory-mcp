@@ -3,11 +3,15 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GraphTab } from "./GraphTab";
-import type { GraphData } from "../lib/types";
+import type { GraphData, GraphNode } from "../lib/types";
 
 /* GraphScene renders a WebGL <Canvas> which jsdom can't run — stub it out. */
 vi.mock("./GraphScene", () => ({
-  GraphScene: () => null,
+  GraphScene: ({ onNodeClick }: { onNodeClick: (node: GraphNode) => void }) => (
+    <button type="button" onClick={() => onNodeClick(SAMPLE.nodes[0])}>
+      Select foo
+    </button>
+  ),
   computeCameraTarget: () => null,
 }));
 
@@ -59,5 +63,20 @@ describe("GraphTab filters", () => {
     expect(screen.getByText("Filters")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "None" })).toBeInTheDocument();
+  });
+
+  it("keeps filtered-out neighbors available in the detail panel", async () => {
+    mockLayoutFetch(SAMPLE);
+
+    render(<GraphTab project="demo" />);
+
+    expect(await screen.findByText("Filters")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Class 1" }));
+    expect(screen.getByText(/filtered from 2/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select foo" }));
+
+    expect(screen.getByRole("heading", { name: "foo" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Bar/ })).toBeInTheDocument();
   });
 });

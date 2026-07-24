@@ -1,8 +1,22 @@
-import { useMemo, useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowDownLeft,
+  ArrowUpRight,
+  ChevronDown,
+  Code2,
+  ExternalLink,
+  Maximize2,
+  Minimize2,
+  Search,
+  X,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { colorForLabel } from "../lib/colors";
 import { callTool } from "../api/rpc";
-import type { GraphNode, GraphEdge, RepoInfo } from "../lib/types";
+import type { GraphEdge, GraphNode, RepoInfo } from "../lib/types";
+
+const CONNECTION_PREVIEW_LIMIT = 25;
 
 interface Connection {
   node: GraphNode;
@@ -16,6 +30,8 @@ interface NodeDetailPanelProps {
   allEdges: GraphEdge[];
   project: string | null;
   repoInfo: RepoInfo | null;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   onClose: () => void;
   onNavigate: (node: GraphNode) => void;
 }
@@ -32,17 +48,38 @@ function lineSuffix(node: GraphNode): string {
   return `#L${node.start_line}${end}`;
 }
 
-/* Encode each path segment so an unusual file_path can't break (or escape) the
- * URL. The scheme is already https-forced by the backend (/api/repo-info);
- * this is defense-in-depth on the path. */
-function encodePath(p: string): string {
-  return p.split("/").map(encodeURIComponent).join("/");
+function encodePath(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }
 
-/* GitHub (or GitLab) deep-link, or null when we lack remote/path/line info. */
 function githubUrl(node: GraphNode, repoInfo: RepoInfo | null): string | null {
   if (!repoInfo?.blob_base || !node.file_path) return null;
   return `${repoInfo.blob_base}/${encodePath(node.file_path)}${lineSuffix(node)}`;
+}
+
+function groupByType(connections: Connection[]): [string, Connection[]][] {
+  const groups = new Map<string, Connection[]>();
+  for (const connection of connections) {
+    groups.set(connection.edgeType, [
+      ...(groups.get(connection.edgeType) ?? []),
+      connection,
+    ]);
+  }
+  return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+}
+
+function searchableConnectionText(connection: Connection): string {
+  const { node, edgeType } = connection;
+  return [node.name, node.label, node.qualified_name, node.file_path, edgeType]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function connectionDescriptor(node: GraphNode): string | null {
+  if (node.qualified_name && node.qualified_name !== node.name) return node.qualified_name;
+  if (!node.file_path) return null;
+  return node.start_line ? `${node.file_path}:${node.start_line}` : node.file_path;
 }
 
 export function NodeDetailPanel({
@@ -51,18 +88,23 @@ export function NodeDetailPanel({
   allEdges,
   project,
   repoInfo,
+  expanded = false,
+  onToggleExpanded,
   onClose,
   onNavigate,
 }: NodeDetailPanelProps) {
   const [code, setCode] = useState<string | null>(null);
   const [codeLoading, setCodeLoading] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [connectionQuery, setConnectionQuery] = useState("");
+  const [showAllConnections, setShowAllConnections] = useState(false);
 
-  /* Reset the fetched code whenever the selected node changes. */
   useEffect(() => {
     setCode(null);
     setCodeError(null);
     setCodeLoading(false);
+    setConnectionQuery("");
+    setShowAllConnections(false);
   }, [node.id]);
 
   const canFetchCode = Boolean(project && node.qualified_name);
@@ -73,13 +115,13 @@ export function NodeDetailPanel({
     setCodeLoading(true);
     setCodeError(null);
     try {
-      const res = await callTool<SnippetResult>("get_code_snippet", {
+      const result = await callTool<SnippetResult>("get_code_snippet", {
         qualified_name: node.qualified_name,
         project,
       });
-      setCode(res.source ?? "(source not available)");
-    } catch (e) {
-      setCodeError(e instanceof Error ? e.message : "Failed to load code");
+      setCode(result.source ?? "(source not available)");
+    } catch (error) {
+      setCodeError(error instanceof Error ? error.message : "Failed to load code");
     } finally {
       setCodeLoading(false);
     }
@@ -87,118 +129,244 @@ export function NodeDetailPanel({
 
   const connections = useMemo(() => {
     const nodeMap = new Map<number, GraphNode>();
-    for (const n of allNodes) nodeMap.set(n.id, n);
-    const conns: Connection[] = [];
+    for (const graphNode of allNodes) nodeMap.set(graphNode.id, graphNode);
+
+    const result: Connection[] = [];
     for (const edge of allEdges) {
       if (edge.source === node.id) {
-        const t = nodeMap.get(edge.target);
-        if (t) conns.push({ node: t, edgeType: edge.type, direction: "outbound" });
+        const target = nodeMap.get(edge.target);
+        if (target) {
+          result.push({ node: target, edgeType: edge.type, direction: "outbound" });
+        }
       }
       if (edge.target === node.id) {
-        const s = nodeMap.get(edge.source);
-        if (s) conns.push({ node: s, edgeType: edge.type, direction: "inbound" });
+        const source = nodeMap.get(edge.source);
+        if (source) {
+          result.push({ node: source, edgeType: edge.type, direction: "inbound" });
+        }
       }
     }
-    return conns;
-  }, [node, allNodes, allEdges]);
+    return result;
+  }, [node.id, allNodes, allEdges]);
 
-  const outbound = connections.filter((c) => c.direction === "outbound");
-  const inbound = connections.filter((c) => c.direction === "inbound");
+  const normalizedQuery = connectionQuery.trim().toLowerCase();
+  const filteredConnections = useMemo(
+    () =>
+      normalizedQuery
+        ? connections.filter((connection) =>
+            searchableConnectionText(connection).includes(normalizedQuery),
+          )
+        : connections,
+    [connections, normalizedQuery],
+  );
 
-  const groupByType = (conns: Connection[]) => {
-    const g = new Map<string, Connection[]>();
-    for (const c of conns) g.set(c.edgeType, [...(g.get(c.edgeType) ?? []), c]);
-    return [...g.entries()].sort((a, b) => b[1].length - a[1].length);
-  };
+  const outbound = connections.filter((connection) => connection.direction === "outbound");
+  const inbound = connections.filter((connection) => connection.direction === "inbound");
+  const filteredOutbound = filteredConnections.filter(
+    (connection) => connection.direction === "outbound",
+  );
+  const filteredInbound = filteredConnections.filter(
+    (connection) => connection.direction === "inbound",
+  );
+  const outboundGroups = groupByType(filteredOutbound);
+  const inboundGroups = groupByType(filteredInbound);
+  const previewCount = [...outboundGroups, ...inboundGroups].reduce(
+    (count, [, groupedConnections]) =>
+      count + Math.min(groupedConnections.length, CONNECTION_PREVIEW_LIMIT),
+    0,
+  );
+  const queryShowsAll = normalizedQuery.length > 0;
+  const revealAll = showAllConnections || queryShowsAll;
+  const canRevealMore = filteredConnections.length > previewCount;
 
   return (
-    <div className="w-full bg-[#0b1920]/95 backdrop-blur-xl flex flex-col h-full min-h-0 overflow-hidden">
-      {/* Header */}
-      <div className="px-4 pt-4 pb-3 border-b border-border/30">
-        <div className="flex items-start justify-between gap-2 mb-2">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#0b1920]/95 backdrop-blur-xl">
+      <div className="border-b border-border/30 px-4 pb-3 pt-4">
+        <div className="mb-2 flex items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: colorForLabel(node.label) }} />
-              <h3 className="text-[13px] font-semibold text-foreground truncate">{node.name}</h3>
+            <div className="mb-1.5 flex items-start gap-2">
+              <span
+                className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
+                style={{ backgroundColor: colorForLabel(node.label) }}
+              />
+              <h3 className="min-w-0 break-words text-[13px] font-semibold leading-5 text-foreground">
+                {node.name}
+              </h3>
             </div>
-            <span
-              className="inline-block px-2 py-0.5 rounded-md text-[10px] font-medium"
-              style={{ backgroundColor: colorForLabel(node.label) + "18", color: colorForLabel(node.label) }}
-            >
-              {node.label}
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className="inline-block rounded-md px-2 py-0.5 text-[10px] font-medium"
+                style={{
+                  backgroundColor: colorForLabel(node.label) + "18",
+                  color: colorForLabel(node.label),
+                }}
+              >
+                {node.label}
+              </span>
+              {node.qualified_name && (
+                <span className="min-w-0 break-all font-mono text-[10px] text-foreground/25">
+                  {node.qualified_name}
+                </span>
+              )}
+            </div>
           </div>
-          <button onClick={onClose} className="text-foreground/20 hover:text-foreground/50 transition-colors text-[16px] leading-none p-1">×</button>
+          <div className="flex shrink-0 items-center gap-1">
+            {onToggleExpanded && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                onClick={onToggleExpanded}
+                aria-label={expanded ? "Restore detail panel" : "Expand detail panel"}
+                aria-pressed={expanded}
+                title={expanded ? "Restore detail panel" : "Expand detail panel"}
+                className="text-foreground/35 hover:text-foreground/80"
+              >
+                {expanded ? <Minimize2 /> : <Maximize2 />}
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onClick={onClose}
+              aria-label="Close detail panel"
+              title="Close detail panel"
+              className="text-foreground/35 hover:text-foreground/80"
+            >
+              <X />
+            </Button>
+          </div>
         </div>
 
         {node.file_path && (
-          <p className="text-[11px] text-foreground/30 font-mono mt-2 break-all leading-relaxed">
+          <p className="mt-2 break-all font-mono text-[11px] leading-relaxed text-foreground/30">
             {node.file_path}
             {node.start_line ? (
               <span className="text-foreground/45">
-                {" "}:{node.start_line}
+                :{node.start_line}
                 {node.end_line && node.end_line !== node.start_line ? `-${node.end_line}` : ""}
               </span>
             ) : null}
           </p>
         )}
 
-        {/* Code actions */}
-        <div className="flex flex-wrap items-center gap-2 mt-2.5">
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
           {canFetchCode && (
-            <button
+            <Button
+              type="button"
+              variant="secondary"
+              size="xs"
               onClick={code ? () => setCode(null) : loadCode}
               disabled={codeLoading}
-              className="px-2.5 py-1 rounded-md bg-primary/15 text-primary text-[11px] font-medium hover:bg-primary/25 transition-colors disabled:opacity-50"
             >
-              {codeLoading ? "Loading…" : code ? "Hide code" : "Show code"}
-            </button>
+              <Code2 />
+              {codeLoading ? "Loading..." : code ? "Hide code" : "Show code"}
+            </Button>
           )}
           {ghUrl && (
-            <a
-              href={ghUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1 rounded-md bg-white/[0.05] text-foreground/60 text-[11px] font-medium hover:bg-white/[0.09] hover:text-foreground/90 transition-colors"
-            >
-              Open on GitHub ↗
-            </a>
+            <Button asChild variant="secondary" size="xs">
+              <a href={ghUrl} target="_blank" rel="noopener noreferrer">
+                <ExternalLink />
+                Open on GitHub
+              </a>
+            </Button>
           )}
         </div>
 
-        {codeError && <p className="text-[11px] text-red-400/80 mt-2">{codeError}</p>}
+        {codeError && <p className="mt-2 text-[11px] text-red-400/80">{codeError}</p>}
         {code && (
-          <pre className="mt-2 max-h-[300px] overflow-auto rounded-md bg-black/40 border border-white/[0.06] p-2.5 text-[10.5px] leading-relaxed font-mono text-foreground/75 whitespace-pre">
+          <pre className="mt-2 max-h-[260px] overflow-auto rounded-md border border-white/[0.06] bg-black/40 p-2.5 font-mono text-[10.5px] leading-relaxed text-foreground/75 whitespace-pre">
             {code}
           </pre>
         )}
 
-        {/* Stats */}
-        <div className="flex gap-5 mt-3">
+        <div className="mt-3 grid grid-cols-3 divide-x divide-border/30 border-t border-border/20 pt-3">
           {[
             { label: "Out", value: outbound.length, color: "text-primary" },
             { label: "In", value: inbound.length, color: "text-accent" },
             { label: "Total", value: connections.length, color: "text-foreground" },
-          ].map((s) => (
-            <div key={s.label}>
-              <p className="text-[9px] text-foreground/25 uppercase tracking-widest">{s.label}</p>
-              <p className={`text-[18px] font-semibold tabular-nums ${s.color}`}>{s.value}</p>
+          ].map((stat) => (
+            <div key={stat.label} className="px-3 first:pl-0">
+              <p className="text-[9px] uppercase tracking-widest text-foreground/25">
+                {stat.label}
+              </p>
+              <p className={`text-[18px] font-semibold tabular-nums ${stat.color}`}>
+                {stat.value}
+              </p>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Connections */}
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="px-4 py-3 space-y-4">
-          {outbound.length > 0 && (
-            <ConnectionSection title="References" count={outbound.length} icon="→" groups={groupByType(outbound)} onNavigate={onNavigate} />
+      {connections.length > 0 && (
+        <div className="border-b border-border/20 px-4 py-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <p className="text-[11px] font-medium text-foreground/50">
+              Connections
+              {normalizedQuery && (
+                <span className="ml-1.5 text-foreground/20">
+                  {filteredConnections.length}/{connections.length}
+                </span>
+              )}
+            </p>
+            {(canRevealMore || showAllConnections) && !queryShowsAll && (
+              <button
+                type="button"
+                onClick={() => setShowAllConnections((value) => !value)}
+                className="text-[10px] font-medium text-primary/70 transition-colors hover:text-primary"
+              >
+                {showAllConnections ? "Show less" : `Show all ${connections.length}`}
+              </button>
+            )}
+          </div>
+          <label className="relative block">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-foreground/20" />
+            <input
+              type="search"
+              value={connectionQuery}
+              onChange={(event) => setConnectionQuery(event.target.value)}
+              placeholder="Filter connections"
+              aria-label="Filter connections"
+              className="h-8 w-full rounded-md border border-border/35 bg-black/15 pl-8 pr-3 text-[11px] text-foreground/75 outline-none placeholder:text-foreground/20 focus:border-primary/40 focus:ring-2 focus:ring-primary/10"
+            />
+          </label>
+        </div>
+      )}
+
+      <ScrollArea className="min-h-0 flex-1">
+        <div className={`space-y-5 py-3 ${expanded ? "px-5" : "px-4"}`}>
+          {filteredOutbound.length > 0 && (
+            <ConnectionSection
+              title="References"
+              count={filteredOutbound.length}
+              direction="outbound"
+              groups={outboundGroups}
+              expanded={expanded}
+              showAll={revealAll}
+              onShowAll={() => setShowAllConnections(true)}
+              onNavigate={onNavigate}
+            />
           )}
-          {inbound.length > 0 && (
-            <ConnectionSection title="Referenced by" count={inbound.length} icon="←" groups={groupByType(inbound)} onNavigate={onNavigate} />
+          {filteredInbound.length > 0 && (
+            <ConnectionSection
+              title="Referenced by"
+              count={filteredInbound.length}
+              direction="inbound"
+              groups={inboundGroups}
+              expanded={expanded}
+              showAll={revealAll}
+              onShowAll={() => setShowAllConnections(true)}
+              onNavigate={onNavigate}
+            />
           )}
           {connections.length === 0 && (
-            <p className="text-[12px] text-foreground/20 text-center py-8">No connections</p>
+            <p className="py-8 text-center text-[12px] text-foreground/20">No connections</p>
+          )}
+          {connections.length > 0 && filteredConnections.length === 0 && (
+            <p className="py-8 text-center text-[12px] text-foreground/25">
+              No matching connections
+            </p>
           )}
         </div>
       </ScrollArea>
@@ -206,40 +374,105 @@ export function NodeDetailPanel({
   );
 }
 
-function ConnectionSection({ title, count, icon, groups, onNavigate }: {
-  title: string; count: number; icon: string;
+interface ConnectionSectionProps {
+  title: string;
+  count: number;
+  direction: "inbound" | "outbound";
   groups: [string, Connection[]][];
-  onNavigate: (n: GraphNode) => void;
-}) {
+  expanded: boolean;
+  showAll: boolean;
+  onShowAll: () => void;
+  onNavigate: (node: GraphNode) => void;
+}
+
+function ConnectionSection({
+  title,
+  count,
+  direction,
+  groups,
+  expanded,
+  showAll,
+  onShowAll,
+  onNavigate,
+}: ConnectionSectionProps) {
+  const DirectionIcon = direction === "outbound" ? ArrowUpRight : ArrowDownLeft;
+
   return (
-    <div>
-      <p className="text-[11px] font-medium text-foreground/40 mb-2">
-        {title} <span className="text-foreground/15">({count})</span>
-      </p>
-      {groups.map(([type, conns]) => (
-        <div key={type} className="mb-2">
-          <p className="text-[9px] text-foreground/20 uppercase tracking-wider mb-1 font-medium">
-            {type.replace(/_/g, " ").toLowerCase()}
-          </p>
-          <div className="space-y-px">
-            {conns.slice(0, 25).map((c, i) => (
-              <button
-                key={`${c.node.id}-${i}`}
-                onClick={() => onNavigate(c.node)}
-                className="flex items-center gap-1.5 w-full text-left px-2 py-[4px] rounded-md hover:bg-white/[0.04] text-[11px] transition-colors group"
-              >
-                <span className="text-foreground/15 text-[10px] group-hover:text-foreground/30">{icon}</span>
-                <span className="w-[5px] h-[5px] rounded-full shrink-0" style={{ backgroundColor: colorForLabel(c.node.label) }} />
-                <span className="text-foreground/55 group-hover:text-foreground/80 truncate">{c.node.name}</span>
-                <span className="text-foreground/10 ml-auto text-[10px] shrink-0">{c.node.label}</span>
-              </button>
-            ))}
-            {conns.length > 25 && (
-              <p className="text-[10px] text-foreground/15 px-2 py-1">+{conns.length - 25} more</p>
-            )}
+    <section>
+      <div className="mb-2 flex items-center gap-1.5">
+        <DirectionIcon className="size-3.5 text-foreground/25" />
+        <p className="text-[11px] font-medium text-foreground/45">
+          {title} <span className="text-foreground/20">({count})</span>
+        </p>
+      </div>
+      {groups.map(([type, groupedConnections]) => {
+        const visibleConnections = showAll
+          ? groupedConnections
+          : groupedConnections.slice(0, CONNECTION_PREVIEW_LIMIT);
+        const hiddenCount = groupedConnections.length - visibleConnections.length;
+
+        return (
+          <div key={type} className="mb-3 last:mb-0">
+            <div className="mb-1 flex items-center justify-between gap-2 px-2">
+              <p className="text-[9px] font-medium uppercase tracking-wider text-foreground/25">
+                {type.replace(/_/g, " ").toLowerCase()}
+              </p>
+              <span className="font-mono text-[9px] tabular-nums text-foreground/15">
+                {groupedConnections.length}
+              </span>
+            </div>
+            <div className="space-y-0.5">
+              {visibleConnections.map((connection, index) => {
+                const descriptor = connectionDescriptor(connection.node);
+                return (
+                  <button
+                    key={`${connection.node.id}-${connection.edgeType}-${index}`}
+                    type="button"
+                    onClick={() => onNavigate(connection.node)}
+                    title={descriptor ?? connection.node.name}
+                    className={`group grid w-full grid-cols-[auto_auto_minmax(0,1fr)_auto] items-start gap-x-2 rounded-md px-2 text-left text-[11px] transition-colors hover:bg-white/[0.05] ${
+                      expanded ? "py-2" : "py-1.5"
+                    }`}
+                  >
+                    <DirectionIcon className="mt-0.5 size-3 text-foreground/15 group-hover:text-foreground/35" />
+                    <span
+                      className="mt-1 h-[6px] w-[6px] shrink-0 rounded-full"
+                      style={{ backgroundColor: colorForLabel(connection.node.label) }}
+                    />
+                    <span className="min-w-0">
+                      <span
+                        className={`block text-foreground/60 group-hover:text-foreground/90 ${
+                          expanded ? "break-words leading-4" : "truncate"
+                        }`}
+                      >
+                        {connection.node.name}
+                      </span>
+                      {expanded && descriptor && (
+                        <span className="mt-0.5 block break-all font-mono text-[9px] leading-3.5 text-foreground/20 group-hover:text-foreground/35">
+                          {descriptor}
+                        </span>
+                      )}
+                    </span>
+                    <span className="mt-0.5 shrink-0 text-[9px] text-foreground/15">
+                      {connection.node.label}
+                    </span>
+                  </button>
+                );
+              })}
+              {hiddenCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onShowAll}
+                  className="flex w-full items-center justify-center gap-1 rounded-md py-1.5 text-[10px] font-medium text-primary/60 transition-colors hover:bg-primary/[0.06] hover:text-primary"
+                >
+                  <ChevronDown className="size-3" />
+                  Show {hiddenCount} more
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
-    </div>
+        );
+      })}
+    </section>
   );
 }

@@ -93,4 +93,66 @@ describe("NodeDetailPanel code preview + deep-link", () => {
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
     expect(link.getAttribute("target")).toBe("_blank");
   });
+
+  it("reveals every loaded connection and filters the full relationship list", () => {
+    const related = Array.from({ length: 30 }, (_, index): GraphNode => ({
+      id: 100 + index,
+      x: index,
+      y: 0,
+      z: 0,
+      label: "Method",
+      name: `related-${String(index).padStart(2, "0")}`,
+      qualified_name: `app::related_${index}`,
+      size: 1,
+      color: "#fff",
+    }));
+
+    render(
+      <NodeDetailPanel
+        node={NODE}
+        allNodes={[NODE, ...related]}
+        allEdges={related.map((relatedNode) => ({
+          source: NODE.id,
+          target: relatedNode.id,
+          type: "CALLS",
+        }))}
+        project="demo"
+        repoInfo={REPO}
+        onClose={() => {}}
+        onNavigate={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("related-24")).toBeInTheDocument();
+    expect(screen.queryByText("related-29")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all 30" }));
+    expect(screen.getByText("related-29")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Filter connections" }), {
+      target: { value: "related-29" },
+    });
+    expect(screen.getByText("related-29")).toBeInTheDocument();
+    expect(screen.queryByText("related-00")).not.toBeInTheDocument();
+    expect(screen.getByText("1/30")).toBeInTheDocument();
+  });
+
+  it("exposes a keyboard-accessible detail expansion control", () => {
+    const onToggleExpanded = vi.fn();
+    render(
+      <NodeDetailPanel
+        node={NODE}
+        allNodes={[NODE]}
+        allEdges={[]}
+        project="demo"
+        repoInfo={REPO}
+        onToggleExpanded={onToggleExpanded}
+        onClose={() => {}}
+        onNavigate={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand detail panel" }));
+    expect(onToggleExpanded).toHaveBeenCalledOnce();
+  });
 });
