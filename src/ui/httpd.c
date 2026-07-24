@@ -53,7 +53,9 @@ struct cbm_http_conn {
     cbm_sock_t fd;
     int recv_deadline_ms;
     int response_status;
+    size_t request_bytes;
     size_t response_bytes;
+    char peer_ip[INET_ADDRSTRLEN];
 };
 
 /* ── Small platform helpers ───────────────────────────────────── */
@@ -111,7 +113,7 @@ static int send_all(cbm_sock_t fd, const void *data, size_t len) {
 
 /* ── Listener ─────────────────────────────────────────────────── */
 
-cbm_httpd_t *cbm_httpd_listen(int port) {
+cbm_httpd_t *cbm_httpd_listen_addr(const char *bind_addr, int port) {
 #ifdef _WIN32
     static atomic_int wsa_started = 0;
     int expected = 0;
@@ -135,12 +137,19 @@ cbm_httpd_t *cbm_httpd_listen(int port) {
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 #endif
 
-    /* Loopback only — never any other interface. */
+    if (!bind_addr || port < 0 || port > 65535) {
+        cbm_sock_close(fd);
+        return NULL;
+    }
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons((unsigned short)port);
-    addr.sin_addr.s_addr = htonl(0x7F000001); /* 127.0.0.1 */
+    if (inet_pton(AF_INET, bind_addr, &addr.sin_addr) != 1) {
+        cbm_sock_close(fd);
+        return NULL;
+    }
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 16) != 0) {
         cbm_sock_close(fd);
@@ -164,6 +173,10 @@ cbm_httpd_t *cbm_httpd_listen(int port) {
     d->port = (int)ntohs(bound.sin_port);
     d->recv_deadline_ms = CBM_HTTP_RECV_DEADLINE_MS;
     return d;
+}
+
+cbm_httpd_t *cbm_httpd_listen(int port) {
+    return cbm_httpd_listen_addr("127.0.0.1", port);
 }
 
 int cbm_httpd_port(const cbm_httpd_t *d) {
@@ -190,7 +203,10 @@ cbm_http_conn_t *cbm_httpd_accept(cbm_httpd_t *d, int timeout_ms) {
     if (wait_readable(d->fd, timeout_ms) != 1)
         return NULL;
 
-    cbm_sock_t cfd = accept(d->fd, NULL, NULL);
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof(peer));
+    socklen_t peer_len = sizeof(peer);
+    cbm_sock_t cfd = accept(d->fd, (struct sockaddr *)&peer, &peer_len);
     if (cfd == CBM_SOCK_BAD)
         return NULL;
 
@@ -207,6 +223,9 @@ cbm_http_conn_t *cbm_httpd_accept(cbm_httpd_t *d, int timeout_ms) {
     }
     c->fd = cfd;
     c->recv_deadline_ms = d->recv_deadline_ms;
+    if (!inet_ntop(AF_INET, &peer.sin_addr, c->peer_ip, sizeof(c->peer_ip))) {
+        snprintf(c->peer_ip, sizeof(c->peer_ip), "%s", "unknown");
+    }
     return c;
 }
 
@@ -223,6 +242,20 @@ int cbm_http_conn_status(const cbm_http_conn_t *c) {
 
 size_t cbm_http_conn_response_bytes(const cbm_http_conn_t *c) {
     return c ? c->response_bytes : 0;
+}
+
+size_t cbm_http_conn_request_bytes(const cbm_http_conn_t *c) {
+    return c ? c->request_bytes : 0;
+}
+
+bool cbm_http_conn_peer_ip(const cbm_http_conn_t *c, char *out, size_t outsz) {
+    if (!c || !out || outsz == 0 || c->peer_ip[0] == '\0')
+        return false;
+    size_t len = strlen(c->peer_ip);
+    if (len >= outsz)
+        return false;
+    memcpy(out, c->peer_ip, len + 1);
+    return true;
 }
 
 /* ── Head parsing ─────────────────────────────────────────────── */
@@ -346,6 +379,21 @@ int cbm_http_parse_head(const char *data, size_t len, cbm_http_req_t *req, size_
             copy_header_value(colon + 1, eol, req->host, sizeof(req->host));
         } else if (header_name_is(p, nlen, "accept-language")) {
             copy_header_value(colon + 1, eol, req->accept_language, sizeof(req->accept_language));
+        } else if (header_name_is(p, nlen, "authorization")) {
+            copy_header_value(colon + 1, eol, req->authorization, sizeof(req->authorization));
+        } else if (header_name_is(p, nlen, "content-type")) {
+            copy_header_value(colon + 1, eol, req->content_type, sizeof(req->content_type));
+        } else if (header_name_is(p, nlen, "accept")) {
+            copy_header_value(colon + 1, eol, req->accept, sizeof(req->accept));
+        } else if (header_name_is(p, nlen, "mcp-session-id")) {
+            copy_header_value(colon + 1, eol, req->mcp_session_id, sizeof(req->mcp_session_id));
+        } else if (header_name_is(p, nlen, "mcp-protocol-version")) {
+            copy_header_value(colon + 1, eol, req->mcp_protocol_version,
+                              sizeof(req->mcp_protocol_version));
+        } else if (header_name_is(p, nlen, "x-forwarded-for")) {
+            copy_header_value(colon + 1, eol, req->x_forwarded_for, sizeof(req->x_forwarded_for));
+        } else if (header_name_is(p, nlen, "user-agent")) {
+            copy_header_value(colon + 1, eol, req->user_agent, sizeof(req->user_agent));
         } else if (header_name_is(p, nlen, "transfer-encoding")) {
             /* Chunked (or any transfer coding) is not supported. */
             return 411;
@@ -471,6 +519,7 @@ int cbm_httpd_read_request(cbm_http_conn_t *c, cbm_http_req_t *req) {
         req->body_len = clen;
     }
 
+    c->request_bytes = body_off + clen;
     free(head);
     return 0;
 }
@@ -495,22 +544,30 @@ static const char *status_reason(int status) {
         return "No Content";
     case 400:
         return "Bad Request";
+    case 401:
+        return "Unauthorized";
     case 403:
         return "Forbidden";
     case 404:
         return "Not Found";
+    case 405:
+        return "Method Not Allowed";
     case 408:
         return "Request Timeout";
     case 411:
         return "Length Required";
     case 413:
         return "Content Too Large";
+    case 415:
+        return "Unsupported Media Type";
     case 429:
         return "Too Many Requests";
     case 431:
         return "Request Header Fields Too Large";
     case 500:
         return "Internal Server Error";
+    case 503:
+        return "Service Unavailable";
     default:
         return "";
     }

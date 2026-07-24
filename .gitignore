@@ -37,6 +37,15 @@ Thumbs.db
 # MCP Registry auth tokens
 .mcpregistry_*
 
+# Local deployment secrets. Commit only the documented template.
+.env
+.env.*
+!.env.example
+deploy/*.env
+
+# Local audit output (production should write under /var/log).
+audit.jsonl
+
 # Local project memory (Claude Code auto-memory)
 memory/
 reference/

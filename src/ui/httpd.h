@@ -1,10 +1,12 @@
 /*
- * httpd.h — First-party HTTP/1.1 server transport for the graph UI.
+ * httpd.h — First-party HTTP/1.1 server transport.
  *
  * Original implementation written for this project from RFC 9112 and the
- * needs of the graph-UI endpoints. Localhost-only by construction.
- *
- * Design constraints (deliberate — do not "improve" without reading this):
+ * needs of the graph-UI and remote MCP endpoints. The legacy listener remains
+ * localhost-only;
+ * non-loopback binding requires the explicit address API.
+ * Design constraints (deliberate — do
+ * not "improve" without reading this):
  *   - SINGLE-THREADED, sequential request handling. The routing layer
  *     (http_server.c) keeps per-request state in static buffers; a thread
  *     pool would break it. One stalled client can hold the loop for at most
@@ -51,6 +53,13 @@ typedef struct {
     char origin[256];
     char host[256];
     char accept_language[256];
+    char authorization[1024];
+    char content_type[128];
+    char accept[256];
+    char mcp_session_id[128];
+    char mcp_protocol_version[64];
+    char x_forwarded_for[1024];
+    char user_agent[256];
     char *body;
     size_t body_len;
 } cbm_http_req_t;
@@ -60,6 +69,11 @@ typedef struct {
 /* Listen on 127.0.0.1:<port>. port 0 binds an ephemeral port (tests).
  * Returns NULL if the port is unavailable. */
 cbm_httpd_t *cbm_httpd_listen(int port);
+
+/* Listen on an explicit IPv4 address. This is the only API that may expose a
+ * listener beyond
+ * loopback; callers are responsible for authentication. */
+cbm_httpd_t *cbm_httpd_listen_addr(const char *bind_addr, int port);
 
 /* The actually-bound port (differs from the requested one for port 0). */
 int cbm_httpd_port(const cbm_httpd_t *d);
@@ -99,6 +113,8 @@ void cbm_http_reply_buf(cbm_http_conn_t *c, int status, const char *extra_header
 
 int cbm_http_conn_status(const cbm_http_conn_t *c);
 size_t cbm_http_conn_response_bytes(const cbm_http_conn_t *c);
+size_t cbm_http_conn_request_bytes(const cbm_http_conn_t *c);
+bool cbm_http_conn_peer_ip(const cbm_http_conn_t *c, char *out, size_t outsz);
 void cbm_httpd_conn_close(cbm_http_conn_t *c);
 
 /* ── Pure helpers (unit-tested without sockets) ───────────────── */

@@ -37,7 +37,7 @@ void cbm_ui_config_load(cbm_ui_config_t *cfg) {
     char path[CBM_SZ_1K];
     cbm_ui_config_path(path, (int)sizeof(path));
 
-    FILE *f = fopen(path, "rb");
+    FILE *f = cbm_fopen(path, "rb");
     if (!f) {
         /* No config file — auto-enable UI if binary has embedded assets */
         if (CBM_EMBEDDED_FILE_COUNT > 0) {
@@ -122,7 +122,7 @@ void cbm_ui_config_save(const cbm_ui_config_t *cfg) {
         return;
     }
 
-    FILE *f = fopen(path, "wb");
+    FILE *f = cbm_fopen(path, "wb");
     if (!f) {
         cbm_log_error("ui.config.write_fail", "path", path);
         free(json);

@@ -5,6 +5,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
+#include "../src/foundation/platform.h"
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "ui/config.h"
@@ -82,6 +83,53 @@ TEST(config_save_and_reload) {
         free(old_home);
     }
 
+    PASS();
+}
+
+TEST(config_unicode_cache_path_on_windows) {
+#ifdef _WIN32
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_test_ui_unicode_XXXXXX");
+    char *td = cbm_mkdtemp(tmpdir);
+    ASSERT_NOT_NULL(td);
+
+    char cache_dir[512];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/用户缓存", td);
+    ASSERT_TRUE(cbm_mkdir_p(cache_dir, 0755));
+
+    wchar_t old_cache[4096];
+    DWORD old_len = GetEnvironmentVariableW(L"CBM_CACHE_DIR", old_cache,
+                                            (DWORD)(sizeof(old_cache) / sizeof(old_cache[0])));
+    ASSERT_TRUE(old_len < (sizeof(old_cache) / sizeof(old_cache[0])));
+    bool had_old_cache = old_len > 0;
+
+    wchar_t *wide_cache = cbm_utf8_to_wide(cache_dir);
+    ASSERT_NOT_NULL(wide_cache);
+    BOOL env_set = SetEnvironmentVariableW(L"CBM_CACHE_DIR", wide_cache);
+    free(wide_cache);
+    ASSERT_TRUE(env_set);
+
+    cbm_ui_config_t saved = {.ui_enabled = true, .ui_port = 8123};
+    cbm_ui_config_save(&saved);
+
+    cbm_ui_config_t loaded;
+    cbm_ui_config_load(&loaded);
+    char config_path[1024];
+    cbm_ui_config_path(config_path, (int)sizeof(config_path));
+    bool config_exists = cbm_file_exists(config_path);
+    bool config_matches = loaded.ui_enabled && loaded.ui_port == 8123;
+
+    BOOL env_restored = SetEnvironmentVariableW(L"CBM_CACHE_DIR", had_old_cache ? old_cache : NULL);
+    int unlink_rc = cbm_unlink(config_path);
+    int rmdir_rc = cbm_rmdir(cache_dir);
+    th_rmtree(tmpdir);
+
+    ASSERT_TRUE(env_restored);
+    ASSERT_TRUE(config_exists);
+    ASSERT_TRUE(config_matches);
+    ASSERT_EQ(unlink_rc, 0);
+    ASSERT_EQ(rmdir_rc, 0);
+#endif
     PASS();
 }
 
@@ -885,6 +933,7 @@ SUITE(ui) {
     /* Config */
     RUN_TEST(config_load_defaults);
     RUN_TEST(config_save_and_reload);
+    RUN_TEST(config_unicode_cache_path_on_windows);
     RUN_TEST(config_overwrite);
     RUN_TEST(config_corrupt_file);
     RUN_TEST(config_missing_fields);

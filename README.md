@@ -390,6 +390,20 @@ Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` 
 
 </details>
 
+### Remote MCP for Codex
+
+The standard binary can also serve authenticated MCP Streamable HTTP without
+the embedded UI:
+
+```bash
+codebase-memory-mcp serve --bind=0.0.0.0 --port=9766
+```
+
+`CBM_MCP_AUTH_TOKEN` and `CBM_MCP_AUDIT_LOG` are required. Remote mode defaults
+to the restricted `analysis` tool profile and records each request by effective
+client IP. See [Remote MCP deployment](docs/REMOTE_MCP.md) for `.env`, TLS,
+trusted-proxy, systemd, Nginx, and Codex configuration.
+
 ## Multi-Agent Support
 
 `install` configures 43 client surfaces: 37 detected automatically and 6

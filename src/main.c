@@ -4,6 +4,8 @@
  * Modes:
  *   (default)       Run as MCP server on stdin/stdout (JSON-RPC 2.0)
  *   cli <tool> <json>  Run a single tool call and print result
+ *   serve           Run
+ * authenticated MCP Streamable HTTP server
  *   --version       Print version and exit
  *   --help          Print usage and exit
  *   --ui=true/false Enable/disable HTTP UI server (persisted)
@@ -16,6 +18,7 @@
  */
 #include "cbm.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
 #include "mcp/mcp.h"
+#include "mcp/http_transport.h"
 #include "mcp/index_supervisor.h"
 #include "watcher/watcher.h"
 #include "pipeline/pipeline.h"
@@ -68,6 +71,7 @@ enum {
 static cbm_watcher_t *g_watcher = NULL;
 static cbm_mcp_server_t *g_server = NULL;
 static cbm_http_server_t *g_http_server = NULL;
+static cbm_mcp_http_server_t *g_mcp_http_server = NULL;
 static atomic_int g_shutdown = 0;
 
 /* Idempotent shutdown: cancels the active pipeline, stops background servers,
@@ -96,6 +100,9 @@ static void request_shutdown(void) {
     if (g_http_server) {
         cbm_http_server_stop(g_http_server);
     }
+    if (g_mcp_http_server) {
+        cbm_mcp_http_server_stop(g_mcp_http_server);
+    }
     /* Close stdin to unblock getline in the MCP server loop */
     (void)fclose(stdin);
 }
@@ -104,6 +111,8 @@ static void signal_handler(int sig) {
     (void)sig;
     request_shutdown();
 }
+
+static void setup_signal_handlers(void);
 
 /* ── Parent-process watchdog ────────────────────────────────────── */
 /* parent-death watchdog — distilled from #407 (fixes #406, thanks @nvt-pankajsharma).
@@ -510,6 +519,7 @@ static void print_help(void) {
     printf("Usage:\n");
     printf("  codebase-memory-mcp              Run MCP server on stdio\n");
     printf("  codebase-memory-mcp cli <tool> [json]  Run a single tool\n");
+    printf("  codebase-memory-mcp serve [options]    Run remote MCP on HTTP\n");
     printf("  codebase-memory-mcp install [-y|-n] [--force] [--dry-run]\n");
     printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run]\n");
     printf("  codebase-memory-mcp update [-y|-n]\n");
@@ -521,6 +531,9 @@ static void print_help(void) {
     printf("  --ui=false   Disable HTTP graph visualization (persisted)\n");
     printf("  --port=N     Set UI port (default 9749, persisted)\n");
     printf("  --tool-profile=analysis|scout  Expose a restricted inspection surface\n");
+    printf("\nRemote MCP options:\n");
+    printf("  serve --bind=ADDR --port=N [--tool-profile=analysis|scout]\n");
+    printf("  Requires CBM_MCP_AUTH_TOKEN and CBM_MCP_AUDIT_LOG in the environment\n");
     printf("\nSupported automatic/conditional client surfaces (43):\n");
     printf("  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,\n");
     printf("  Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf,\n");
@@ -540,6 +553,111 @@ static void print_help(void) {
     printf("  get_code_snippet, get_graph_schema, get_architecture, search_code,\n");
     printf("  list_projects, delete_project, index_status, detect_changes,\n");
     printf("  manage_adr, ingest_traces\n");
+}
+
+static int positive_env_int(const char *name, int fallback, int maximum) {
+    char value_buf[64];
+    const char *value = cbm_safe_getenv(name, value_buf, sizeof(value_buf), NULL);
+    if (!value || value[0] == '\0')
+        return fallback;
+    char *end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (!end || *end != '\0' || parsed <= 0 || parsed > maximum)
+        return fallback;
+    return (int)parsed;
+}
+
+static int run_remote_mcp(int argc, char **argv) {
+    char bind_buf[64];
+    const char *bind_addr = cbm_safe_getenv("CBM_MCP_BIND", bind_buf, sizeof(bind_buf), "0.0.0.0");
+    int port = positive_env_int("CBM_MCP_PORT", CBM_MCP_HTTP_DEFAULT_PORT, 65535);
+    cbm_mcp_tool_profile_t profile = CBM_MCP_TOOL_PROFILE_ANALYSIS;
+
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: codebase-memory-mcp serve [--bind=ADDR] [--port=N] "
+                   "[--tool-profile=analysis|scout]\n");
+            return 0;
+        }
+        if (strncmp(argv[i], "--bind=", SLEN("--bind=")) == 0) {
+            bind_addr = argv[i] + SLEN("--bind=");
+            if (bind_addr[0] == '\0') {
+                fprintf(stderr, "codebase-memory-mcp: --bind requires an IPv4 address\n");
+                return 2;
+            }
+            continue;
+        }
+        if (strncmp(argv[i], "--port=", SLEN("--port=")) == 0) {
+            char *end = NULL;
+            long parsed = strtol(argv[i] + SLEN("--port="), &end, 10);
+            if (!end || *end != '\0' || parsed <= 0 || parsed >= MAIN_MAX_PORT) {
+                fprintf(stderr, "codebase-memory-mcp: invalid remote MCP port\n");
+                return 2;
+            }
+            port = (int)parsed;
+            continue;
+        }
+        if (strcmp(argv[i], "--tool-profile=analysis") == 0) {
+            profile = CBM_MCP_TOOL_PROFILE_ANALYSIS;
+            continue;
+        }
+        if (strcmp(argv[i], "--tool-profile=scout") == 0) {
+            profile = CBM_MCP_TOOL_PROFILE_SCOUT;
+            continue;
+        }
+        fprintf(stderr, "codebase-memory-mcp: unknown serve option: %s\n", argv[i]);
+        return 2;
+    }
+
+    char token_buf[1024];
+    char audit_log_buf[CBM_SZ_2K];
+    char trusted_proxies_buf[CBM_SZ_1K];
+    const char *token = cbm_safe_getenv("CBM_MCP_AUTH_TOKEN", token_buf, sizeof(token_buf), NULL);
+    const char *audit_log =
+        cbm_safe_getenv("CBM_MCP_AUDIT_LOG", audit_log_buf, sizeof(audit_log_buf), NULL);
+    const char *trusted_proxies = cbm_safe_getenv("CBM_MCP_TRUSTED_PROXIES", trusted_proxies_buf,
+                                                  sizeof(trusted_proxies_buf), "");
+    if (!token || strlen(token) < 32U) {
+        fprintf(stderr, "codebase-memory-mcp: CBM_MCP_AUTH_TOKEN must contain at least 32 bytes\n");
+        return 2;
+    }
+    if (!audit_log || audit_log[0] == '\0') {
+        fprintf(stderr, "codebase-memory-mcp: CBM_MCP_AUDIT_LOG is required\n");
+        return 2;
+    }
+
+    cbm_mcp_http_config_t config = {
+        .bind_addr = bind_addr,
+        .port = port,
+        .auth_token = token,
+        .audit_log_path = audit_log,
+        .trusted_proxies = trusted_proxies,
+        .session_ttl_sec = positive_env_int("CBM_MCP_SESSION_TTL_SEC",
+                                            CBM_MCP_HTTP_DEFAULT_SESSION_TTL_SEC, 86400),
+        .max_sessions =
+            positive_env_int("CBM_MCP_MAX_SESSIONS", CBM_MCP_HTTP_DEFAULT_MAX_SESSIONS, 1024),
+        .max_workers =
+            positive_env_int("CBM_MCP_MAX_WORKERS", CBM_MCP_HTTP_DEFAULT_MAX_WORKERS, 256),
+        .tool_profile = profile,
+    };
+    cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
+    setup_signal_handlers();
+    g_mcp_http_server = cbm_mcp_http_server_new(&config);
+    if (!g_mcp_http_server) {
+        fprintf(stderr,
+                "codebase-memory-mcp: failed to start remote MCP server; check bind address, "
+                "port, audit path, and token\n");
+        return 1;
+    }
+    fprintf(stderr, "codebase-memory-mcp: remote MCP listening on %s:%d/mcp\n", bind_addr,
+            cbm_mcp_http_server_port(g_mcp_http_server));
+    char port_buf[16];
+    snprintf(port_buf, sizeof(port_buf), "%d", cbm_mcp_http_server_port(g_mcp_http_server));
+    cbm_log_info("mcp_http.start", "bind", bind_addr, "port", port_buf);
+    int rc = cbm_mcp_http_server_run(g_mcp_http_server);
+    cbm_mcp_http_server_free(g_mcp_http_server);
+    g_mcp_http_server = NULL;
+    return rc;
 }
 
 /* ── Main ───────────────────────────────────────────────────────── */
@@ -565,6 +683,9 @@ static int handle_subcommand(int argc, char **argv) {
         if (strcmp(argv[i], "cli") == 0) {
             cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
             return run_cli(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
+        }
+        if (strcmp(argv[i], "serve") == 0) {
+            return run_remote_mcp(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
         }
         if (strcmp(argv[i], "hook-augment") == 0) {
             cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));

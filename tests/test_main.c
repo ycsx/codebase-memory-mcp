@@ -177,6 +177,7 @@ extern void suite_store_edges(void);
 extern void suite_store_search(void);
 extern void suite_cypher(void);
 extern void suite_mcp(void);
+extern void suite_mcp_http(void);
 extern void suite_language(void);
 extern void suite_userconfig(void);
 extern void suite_gitignore(void);
@@ -332,6 +333,7 @@ int main(int argc, char **argv) {
 
     /* MCP Server (M9) */
     RUN_SELECTED_SUITE(mcp);
+    RUN_SELECTED_SUITE(mcp_http);
 
     /* Discover (M2) */
     RUN_SELECTED_SUITE(language);
