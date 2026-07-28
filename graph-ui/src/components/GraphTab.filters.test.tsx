@@ -3,14 +3,41 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GraphTab } from "./GraphTab";
+import type { GraphEdgeSelection } from "./GraphScene";
 import type { GraphData, GraphNode } from "../lib/types";
 
 /* GraphScene renders a WebGL <Canvas> which jsdom can't run — stub it out. */
 vi.mock("./GraphScene", () => ({
-  GraphScene: ({ onNodeClick }: { onNodeClick: (node: GraphNode) => void }) => (
-    <button type="button" onClick={() => onNodeClick(SAMPLE.nodes[0])}>
-      Select foo
-    </button>
+  GraphScene: ({
+    selectedEdge,
+    onNodeClick,
+    onEdgeClick,
+  }: {
+    selectedEdge: GraphEdgeSelection | null;
+    onNodeClick: (node: GraphNode) => void;
+    onEdgeClick: (selection: GraphEdgeSelection) => void;
+  }) => (
+    <>
+      <button type="button" onClick={() => onNodeClick(SAMPLE.nodes[0])}>
+        Select foo
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onEdgeClick({
+            scope: "primary",
+            edge: SAMPLE.edges[0],
+            sourceNode: SAMPLE.nodes[0],
+            targetNode: SAMPLE.nodes[1],
+          })
+        }
+      >
+        Select edge
+      </button>
+      <span>
+        {selectedEdge ? `Selected edge ${selectedEdge.edge.type}` : "No edge selected"}
+      </span>
+    </>
   ),
   computeCameraTarget: () => null,
 }));
@@ -78,5 +105,21 @@ describe("GraphTab filters", () => {
 
     expect(screen.getByRole("heading", { name: "foo" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Bar/ })).toBeInTheDocument();
+  });
+
+  it("stores an edge selection and highlights both endpoints", async () => {
+    mockLayoutFetch(SAMPLE);
+
+    render(<GraphTab project="demo" />);
+
+    expect(await screen.findByText("Filters")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Select edge" }));
+
+    expect(screen.getByText("Selected edge CALLS")).toBeInTheDocument();
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
+    expect(screen.getByText("No edge selected")).toBeInTheDocument();
+    expect(screen.queryByText("2 selected")).not.toBeInTheDocument();
   });
 });

@@ -8,7 +8,7 @@ import { NodeCloud } from "./NodeCloud";
 import { EdgeLines } from "./EdgeLines";
 import { NodeLabels } from "./NodeLabels";
 import { NodeTooltip } from "./NodeTooltip";
-import type { GraphData, GraphNode, LinkedProject } from "../lib/types";
+import type { GraphData, GraphEdge, GraphNode, LinkedProject } from "../lib/types";
 import {
   DEFAULT_DISPLAY_SETTINGS,
   bloomIntensityScale,
@@ -23,6 +23,13 @@ const BASE_BLOOM_INTENSITY = 1.45;
 interface CameraTarget {
   position: THREE.Vector3;
   lookAt: THREE.Vector3;
+}
+
+export interface GraphEdgeSelection {
+  scope: string;
+  edge: GraphEdge;
+  sourceNode: GraphNode;
+  targetNode: GraphNode;
 }
 
 function CameraAnimator({
@@ -120,7 +127,9 @@ interface GraphSceneProps {
   cameraTarget: CameraTarget | null;
   showLabels: boolean;
   display?: DisplaySettings;
+  selectedEdge?: GraphEdgeSelection | null;
   onNodeClick: (node: GraphNode) => void;
+  onEdgeClick?: (selection: GraphEdgeSelection) => void;
   /* Fired when a click hits empty space (no node). Used to fly back to the
    * overview after focusing the missed skeleton. */
   onBackgroundClick?: () => void;
@@ -135,7 +144,9 @@ export function GraphScene({
   cameraTarget,
   showLabels,
   display = DEFAULT_DISPLAY_SETTINGS,
+  selectedEdge = null,
   onNodeClick,
+  onEdgeClick,
   onBackgroundClick,
 }: GraphSceneProps) {
   const [hovered, setHovered] = useState<GraphNode | null>(null);
@@ -149,6 +160,23 @@ export function GraphScene({
   const nodeBoost = nodeBoostScale(data.nodes.length) * display.nodeGlow;
   const bloomIntensity =
     BASE_BLOOM_INTENSITY * bloomIntensityScale(data.nodes.length) * display.bloom;
+  const selectionActive = selectedEdge !== null;
+
+  const emitEdgeSelection = useCallback(
+    (
+      scope: string,
+      edge: GraphEdge,
+      sourceNodes: GraphNode[],
+      targetNodes: GraphNode[] = sourceNodes,
+    ) => {
+      if (!onEdgeClick) return;
+      const sourceNode = sourceNodes.find((node) => node.id === edge.source);
+      const targetNode = targetNodes.find((node) => node.id === edge.target);
+      if (!sourceNode || !targetNode) return;
+      onEdgeClick({ scope, edge, sourceNode, targetNode });
+    },
+    [onEdgeClick],
+  );
 
   return (
     <Canvas
@@ -159,6 +187,15 @@ export function GraphScene({
         antialias: false,
         alpha: false,
         powerPreference: "high-performance",
+      }}
+      raycaster={{
+        params: {
+          Mesh: {},
+          Line: { threshold: 3 },
+          LOD: {},
+          Points: { threshold: 1 },
+          Sprite: {},
+        },
       }}
       onPointerMissed={onBackgroundClick}
     >
@@ -176,6 +213,11 @@ export function GraphScene({
         edges={data.edges}
         highlightedIds={highlightedIds}
         brightness={display.edgeBrightness}
+        selectedEdge={
+          selectedEdge?.scope === "primary" ? selectedEdge.edge : null
+        }
+        selectionActive={selectionActive}
+        onEdgeClick={(edge) => emitEdgeSelection("primary", edge, data.nodes)}
       />
       <NodeCloud
         nodes={data.nodes}
@@ -194,13 +236,22 @@ export function GraphScene({
           <EdgeLines
             nodes={missed.nodes}
             edges={missed.edges}
-            highlightedIds={null}
+            highlightedIds={
+              selectedEdge?.scope === "missed" ? highlightedIds : null
+            }
             opacity={0.28}
             brightness={display.edgeBrightness}
+            selectedEdge={
+              selectedEdge?.scope === "missed" ? selectedEdge.edge : null
+            }
+            selectionActive={selectionActive}
+            onEdgeClick={(edge) => emitEdgeSelection("missed", edge, missed.nodes)}
           />
           <NodeCloud
             nodes={missed.nodes}
-            highlightedIds={null}
+            highlightedIds={
+              selectedEdge?.scope === "missed" ? highlightedIds : null
+            }
             onHover={setHovered}
             onClick={onNodeClick}
             opacity={0.6}
@@ -212,6 +263,10 @@ export function GraphScene({
 
       {/* Satellite galaxies for cross-repo linked projects */}
       {data.linked_projects?.map((lp: LinkedProject) => {
+        const linkedScope = `linked:${lp.project}`;
+        const crossScope = `cross:${lp.project}`;
+        const highlightsLinkedProject =
+          selectedEdge?.scope === linkedScope || selectedEdge?.scope === crossScope;
         const offsetNodes = lp.nodes.map((n) => ({
           ...n,
           x: n.x + lp.offset.x,
@@ -223,13 +278,20 @@ export function GraphScene({
             <EdgeLines
               nodes={offsetNodes}
               edges={lp.edges}
-              highlightedIds={null}
+              highlightedIds={highlightsLinkedProject ? highlightedIds : null}
               opacity={0.3}
               brightness={display.edgeBrightness}
+              selectedEdge={
+                selectedEdge?.scope === linkedScope ? selectedEdge.edge : null
+              }
+              selectionActive={selectionActive}
+              onEdgeClick={(edge) =>
+                emitEdgeSelection(linkedScope, edge, offsetNodes)
+              }
             />
             <NodeCloud
               nodes={offsetNodes}
-              highlightedIds={null}
+              highlightedIds={highlightsLinkedProject ? highlightedIds : null}
               onHover={setHovered}
               onClick={onNodeClick}
               opacity={0.5}
@@ -245,6 +307,13 @@ export function GraphScene({
                 highlightedIds={highlightedIds}
                 opacity={0.85}
                 brightness={display.edgeBrightness}
+                selectedEdge={
+                  selectedEdge?.scope === crossScope ? selectedEdge.edge : null
+                }
+                selectionActive={selectionActive}
+                onEdgeClick={(edge) =>
+                  emitEdgeSelection(crossScope, edge, data.nodes, offsetNodes)
+                }
               />
             )}
           </group>

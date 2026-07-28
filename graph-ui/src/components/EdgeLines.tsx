@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import type { GraphNode, GraphEdge } from "../lib/types";
 import { edgeIntensityScale } from "../lib/density";
@@ -15,6 +15,11 @@ interface EdgeLinesProps {
    * Used for cross-galaxy edges where source lives in the primary graph
    * and target lives in a linked project's offset-adjusted nodes. */
   targetNodes?: GraphNode[];
+  /* Exact edge selection is scoped by GraphScene. Non-selected layers receive
+   * selectionActive=true with selectedEdge=null, which hides their edges. */
+  selectedEdge?: GraphEdge | null;
+  selectionActive?: boolean;
+  onEdgeClick?: (edge: GraphEdge) => void;
 }
 
 function getClusterKey(fp?: string): string {
@@ -50,6 +55,20 @@ const EDGE_TYPE_COLORS: Record<string, string> = {
 };
 
 const DEFAULT_EDGE_COLOR = "#1C8585";
+const CROSS_HTTP_INTENSITY_BOOST = 1.8;
+
+export function edgeIntensityBoost(type: string): number {
+  return type === "CROSS_HTTP_CALLS" ? CROSS_HTTP_INTENSITY_BOOST : 1;
+}
+
+/* THREE.LineSegments reports the start vertex of the hit segment: 0, 2, 4… */
+export function edgeFromIntersection(
+  renderedEdges: GraphEdge[],
+  vertexIndex: number | undefined,
+): GraphEdge | null {
+  if (vertexIndex === undefined || vertexIndex < 0) return null;
+  return renderedEdges[Math.floor(vertexIndex / 2)] ?? null;
+}
 
 export function EdgeLines({
   nodes,
@@ -58,8 +77,11 @@ export function EdgeLines({
   opacity = 1.0,
   brightness = 1.0,
   targetNodes,
+  selectedEdge = null,
+  selectionActive = false,
+  onEdgeClick,
 }: EdgeLinesProps) {
-  const geometry = useMemo(() => {
+  const { geometry, renderedEdges } = useMemo(() => {
     /* Shrink per-edge glow as the edge count grows so the additively-blended
      * center doesn't saturate to white; the user multiplier rides on top. */
     const densityScale = edgeIntensityScale(edges.length) * brightness;
@@ -78,6 +100,7 @@ export function EdgeLines({
     const hasHighlight = highlightedIds && highlightedIds.size > 0;
     const positions = new Float32Array(edges.length * 6);
     const colors = new Float32Array(edges.length * 6);
+    const visibleEdges: GraphEdge[] = [];
     let validCount = 0;
 
     for (const edge of edges) {
@@ -87,6 +110,8 @@ export function EdgeLines({
 
       const s = nodes[si];
       const t = tgtArr[ti];
+      const isSelectedEdge = selectionActive && edge === selectedEdge;
+      if (selectionActive && !isSelectedEdge) continue;
 
       const sHL = !hasHighlight || highlightedIds.has(s.id);
       const tHL = !hasHighlight || highlightedIds.has(t.id);
@@ -98,13 +123,16 @@ export function EdgeLines({
       /* Intensity based on cluster membership and highlight.
        * With additive blending + dark background, these glow nicely. */
       let intensity = sameCluster ? 0.25 : 0.06;
-      if (hasHighlight) {
+      if (isSelectedEdge) {
+        intensity = Math.min(2, 1.2 * edgeIntensityBoost(edge.type));
+      } else if (hasHighlight) {
         /* A selection stays at full strength (never density-scaled) so it
          * pops against the dimmed rest; only the un-selected bulk is scaled. */
         intensity = sHL && tHL ? 0.5 : 0.04 * densityScale;
       } else {
         intensity *= densityScale;
       }
+      if (!isSelectedEdge) intensity *= edgeIntensityBoost(edge.type);
 
       const off = validCount * 6;
       positions[off] = s.x;
@@ -124,6 +152,7 @@ export function EdgeLines({
       colors[off + 3] = edgeColor.r * intensity;
       colors[off + 4] = edgeColor.g * intensity;
       colors[off + 5] = edgeColor.b * intensity;
+      visibleEdges.push(edge);
       validCount++;
     }
 
@@ -136,11 +165,33 @@ export function EdgeLines({
       "color",
       new THREE.BufferAttribute(colors.slice(0, validCount * 6), 3),
     );
-    return geo;
-  }, [nodes, edges, highlightedIds, targetNodes, brightness]);
+    return { geometry: geo, renderedEdges: visibleEdges };
+  }, [
+    nodes,
+    edges,
+    highlightedIds,
+    targetNodes,
+    brightness,
+    selectedEdge,
+    selectionActive,
+  ]);
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
 
   return (
-    <lineSegments geometry={geometry}>
+    <lineSegments
+      geometry={geometry}
+      onClick={
+        onEdgeClick
+          ? (event) => {
+              const edge = edgeFromIntersection(renderedEdges, event.index);
+              if (!edge) return;
+              event.stopPropagation();
+              onEdgeClick(edge);
+            }
+          : undefined
+      }
+    >
       <lineBasicMaterial
         vertexColors
         transparent

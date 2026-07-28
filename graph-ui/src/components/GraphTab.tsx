@@ -18,6 +18,7 @@ import {
   GraphScene,
   computeCameraTarget,
   type CameraTarget,
+  type GraphEdgeSelection,
 } from "./GraphScene";
 import { Sidebar } from "./Sidebar";
 import { FilterPanel } from "./FilterPanel";
@@ -69,6 +70,7 @@ export function GraphTab({ project }: GraphTabProps) {
   const [highlightedIds, setHighlightedIds] = useState<Set<number> | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<GraphEdgeSelection | null>(null);
   const [cameraTarget, setCameraTarget] = useState<CameraTarget | null>(null);
   const [repoInfo, setRepoInfo] = useState<RepoInfo | null>(null);
   const [showLabels, setShowLabels] = useState(true);
@@ -216,6 +218,7 @@ export function GraphTab({ project }: GraphTabProps) {
       setHighlightedIds(null);
       setSelectedPath(null);
       setSelectedNode(null);
+      setSelectedEdge(null);
       setDetailExpanded(false);
     }
   }, [project, budget, fetchOverview]);
@@ -254,13 +257,20 @@ export function GraphTab({ project }: GraphTabProps) {
    * overview (the galaxy may be entirely off-screen at that point, so there
    * is no code node to click). No-op during normal galaxy exploration. */
   const handleBackgroundClick = useCallback(() => {
+    if (selectedEdge) {
+      setSelectedEdge(null);
+      setHighlightedIds(null);
+      setSelectedPath(null);
+      setCameraTarget(null);
+      return;
+    }
     if (selectedNode && missedSkeleton?.ids.has(selectedNode.id) && overviewTarget) {
       setSelectedNode(null);
       setHighlightedIds(null);
       setSelectedPath(null);
       setCameraTarget(overviewTarget);
     }
-  }, [selectedNode, missedSkeleton, overviewTarget]);
+  }, [selectedEdge, selectedNode, missedSkeleton, overviewTarget]);
 
   /* Fetch git remote metadata for GitHub deep-links */
   useEffect(() => {
@@ -283,11 +293,13 @@ export function GraphTab({ project }: GraphTabProps) {
   const handleSelectPath = useCallback(
     (path: string, nodeIds: Set<number>) => {
       if (!filteredData || !path || nodeIds.size === 0) {
+        setSelectedEdge(null);
         setHighlightedIds(null);
         setSelectedPath(null);
         setCameraTarget(null);
         return;
       }
+      setSelectedEdge(null);
       setSelectedPath(path);
       setHighlightedIds(nodeIds);
       setCameraTarget(computeCameraTarget(filteredData.nodes, nodeIds));
@@ -298,6 +310,7 @@ export function GraphTab({ project }: GraphTabProps) {
   const handleNodeClick = useCallback(
     (node: GraphNode) => {
       if (!filteredData) return;
+      setSelectedEdge(null);
 
       /* Clicking the missed skeleton re-centers the camera on that whole
        * cluster (it's small — the natural focus unit is the skeleton, not a
@@ -326,6 +339,24 @@ export function GraphTab({ project }: GraphTabProps) {
     [filteredData, missedSkeleton],
   );
 
+  const handleEdgeClick = useCallback((selection: GraphEdgeSelection) => {
+    const endpointIds = new Set([
+      selection.sourceNode.id,
+      selection.targetNode.id,
+    ]);
+    setSelectedEdge(selection);
+    setSelectedNode(null);
+    setDetailExpanded(false);
+    setSelectedPath(null);
+    setHighlightedIds(endpointIds);
+    setCameraTarget(
+      computeCameraTarget(
+        [selection.sourceNode, selection.targetNode],
+        endpointIds,
+      ),
+    );
+  }, []);
+
   const handleNavigateToNode = useCallback(
     (node: GraphNode) => {
       handleNodeClick(node);
@@ -335,6 +366,7 @@ export function GraphTab({ project }: GraphTabProps) {
 
   const closeDetailPanel = useCallback(() => {
     setSelectedNode(null);
+    setSelectedEdge(null);
     setHighlightedIds(null);
     setSelectedPath(null);
     setDetailExpanded(false);
@@ -485,7 +517,9 @@ export function GraphTab({ project }: GraphTabProps) {
                 cameraTarget={cameraTarget}
                 showLabels={showLabels}
                 display={display}
+                selectedEdge={selectedEdge}
                 onNodeClick={handleNodeClick}
+                onEdgeClick={handleEdgeClick}
                 onBackgroundClick={handleBackgroundClick}
               />
             </ErrorBoundary>
@@ -516,6 +550,7 @@ export function GraphTab({ project }: GraphTabProps) {
                 <Button
                   size="sm"
                   onClick={() => {
+                    setSelectedEdge(null);
                     setHighlightedIds(null);
                     setSelectedPath(null);
                     setSelectedNode(null);
