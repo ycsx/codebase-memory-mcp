@@ -1,0 +1,61 @@
+# Binding ownership policy for codebase-memory-mcp.
+#
+# This repository is user-owned, so ownership is expressed with individual
+# GitHub handles rather than organization teams.
+#
+# CODEOWNERS is the binding merge gate, not the reviewer directory.
+# Advisory area reviewers are recorded in MAINTAINERS.md. A handle appears in
+# this file only when that person is authorized to satisfy binding code-owner
+# approval for the matching path.
+
+# Default owner gate: every pull request crosses the project owner's desk.
+* @ycsx
+
+# Security-sensitive and authority-sensitive surfaces.
+/.github/ @ycsx
+/scripts/ @ycsx
+/Makefile.cbm @ycsx
+/SECURITY.md @ycsx
+/docs/SECURITY-DISCLOSURE.md @ycsx
+/CONTRIBUTING.md @ycsx
+/CODE_OF_CONDUCT.md @ycsx
+/DCO @ycsx
+/LICENSE @ycsx
+/MAINTAINERS.md @ycsx
+
+# Release and distribution surfaces.
+/pkg/ @ycsx
+/install.sh @ycsx
+/install.ps1 @ycsx
+/server.json @ycsx
+/glama.json @ycsx
+/flake.nix @ycsx
+/flake.lock @ycsx
+/THIRD_PARTY.md @ycsx
+/vendored/ @ycsx
+/internal/cbm/vendored/ @ycsx
+
+# Core product surfaces.
+/src/foundation/ @ycsx
+/src/store/ @ycsx
+/src/cypher/ @ycsx
+/src/graph_buffer/ @ycsx
+/src/mcp/ @ycsx
+/src/cli/ @ycsx
+/src/discover/ @ycsx
+/src/watcher/ @ycsx
+/src/pipeline/ @ycsx
+/src/git/ @ycsx
+/src/semantic/ @ycsx
+/src/simhash/ @ycsx
+/src/traces/ @ycsx
+/src/ui/ @ycsx
+
+# Extraction, language support, and graph UI.
+/internal/cbm/ @ycsx
+/tools/ @ycsx
+/graph-ui/ @ycsx
+
+# Test and reproduction infrastructure.
+/tests/ @ycsx
+/test-infrastructure/ @ycsx

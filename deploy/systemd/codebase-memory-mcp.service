@@ -1,0 +1,21 @@
+[Unit]
+Description=Codebase Memory remote MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codebase-memory-mcp
+Group=codebase-memory-mcp
+EnvironmentFile=/etc/codebase-memory-mcp/server.env
+ExecStart=/usr/local/bin/codebase-memory-mcp serve --bind=127.0.0.1 --port=19766
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/codebase-memory-mcp /var/log/codebase-memory-mcp
+
+[Install]
+WantedBy=multi-user.target

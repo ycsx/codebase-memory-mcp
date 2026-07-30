@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none';"
+    />
+    <title>风暴之眼</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <img class="brand-logo" src="../../assets/icon.png" alt="" aria-hidden="true" />
+      <div class="brand-copy">
+        <h1>风暴之眼</h1>
+        <p>MCP 控制台</p>
+      </div>
+      <div class="header-status" id="header-status">
+        <span class="status-dot"></span>
+        <span id="header-status-text">正在检测</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="service-heading" aria-labelledby="service-title">
+        <div>
+          <p class="eyebrow">本机服务</p>
+          <h2 id="service-title">运行概览</h2>
+        </div>
+        <div class="toolbar" aria-label="服务操作">
+          <button class="button button-primary" id="start-button" type="button" title="启动服务">
+            <i data-lucide="play" aria-hidden="true"></i>
+            <span>启动</span>
+          </button>
+          <button class="button" id="stop-button" type="button" title="停止服务">
+            <i data-lucide="square" aria-hidden="true"></i>
+            <span>停止</span>
+          </button>
+          <button class="icon-button" id="restart-button" type="button" title="重启服务" aria-label="重启服务">
+            <i data-lucide="rotate-cw" aria-hidden="true"></i>
+          </button>
+          <button class="button button-console" id="console-button" type="button" title="打开可视化控制台">
+            <i data-lucide="external-link" aria-hidden="true"></i>
+            <span>可视化分析</span>
+          </button>
+        </div>
+      </section>
+
+      <div class="notice" id="external-notice" hidden>
+        <i data-lucide="info" aria-hidden="true"></i>
+        <span>检测到由其他程序启动的服务。为避免影响现有 MCP 会话，此处仅展示状态，不提供停止操作。</span>
+      </div>
+
+      <div class="update-notice" id="update-notice" hidden aria-live="polite">
+        <div class="update-notice-copy">
+          <i data-lucide="circle-arrow-up" aria-hidden="true"></i>
+          <div>
+            <strong id="update-title">发现新版本</strong>
+            <span id="update-description">更新包将从 GitHub Release 下载并校验。</span>
+          </div>
+        </div>
+        <button class="button update-action" id="update-action-button" type="button">
+          <i data-lucide="download" aria-hidden="true"></i>
+          <span id="update-action-label">下载并安装</span>
+        </button>
+      </div>
+
+      <section class="metric-grid" aria-label="服务指标">
+        <article class="metric">
+          <div class="metric-icon"><i data-lucide="activity" aria-hidden="true"></i></div>
+          <div><span>服务状态</span><strong id="service-state">正在检测</strong></div>
+        </article>
+        <article class="metric">
+          <div class="metric-icon"><i data-lucide="cpu" aria-hidden="true"></i></div>
+          <div><span>进程 PID</span><strong id="service-pid">--</strong></div>
+        </article>
+        <article class="metric">
+          <div class="metric-icon"><i data-lucide="network" aria-hidden="true"></i></div>
+          <div><span>监听地址</span><strong id="service-address">127.0.0.1:--</strong></div>
+        </article>
+        <article class="metric">
+          <div class="metric-icon"><i data-lucide="clock-3" aria-hidden="true"></i></div>
+          <div><span>本次运行</span><strong id="service-uptime">--</strong></div>
+        </article>
+      </section>
+
+      <section class="prompt-section" aria-labelledby="prompt-title">
+        <div class="section-title-row prompt-title-row">
+          <div class="prompt-heading">
+            <div class="prompt-icon"><i data-lucide="bot" aria-hidden="true"></i></div>
+            <div>
+              <p class="eyebrow">AI 接入</p>
+              <h2 id="prompt-title">让 AI 正确使用本机 MCP</h2>
+            </div>
+          </div>
+          <button class="button prompt-copy" id="copy-prompt-button" type="button" title="复制 AI 接入提示词">
+            <i data-lucide="copy" aria-hidden="true"></i>
+            <span id="copy-prompt-label" aria-live="polite">复制提示词</span>
+          </button>
+        </div>
+        <div class="prompt-shell">
+          <pre id="connection-prompt">当前电脑已经安装并配置好 Codebase Memory MCP。不要下载、重装或改写 MCP 配置。请先确认当前会话能看到 codebase-memory-mcp 的工具；如果看不到，停止并告诉我需要重启或重新连接 AI 客户端。
+
+开始代码任务时先调用 list_projects。只有目标仓库尚未索引时才调用 index_repository；已索引项目使用 index_status 检查状态，不要为普通查询重复索引。
+
+按问题选择工具：查找符号和定义优先 search_graph；分析调用者、被调用者、依赖、数据流和跨服务链路优先 trace_path；读取已定位符号源码使用 get_code_snippet；复杂多跳和聚合使用 query_graph；修改影响使用 explain_impact；架构、边界和热点使用 get_architecture。已知单个文件的机械修改、精确字符串、错误文案、配置值和非代码文本，直接使用 rg/grep 或源码搜索。
+
+不要根据“引入次数”或 grep 命中数推断调用关系。引用文件或作出“没有影响、全部覆盖”之类结论前调用 check_index_coverage；图谱覆盖不足时回退源码搜索，并明确区分图谱证据与推断。响应出现 has_more 或 nextCursor 时继续分页。完成后简要报告使用的项目、关键图谱证据、覆盖限制和修改结果。</pre>
+        </div>
+      </section>
+
+      <section class="usage-section" aria-labelledby="usage-title">
+        <div class="section-title-row usage-title-row">
+          <div>
+            <p class="eyebrow">MCP 调用</p>
+            <h2 id="usage-title">文件调用频次</h2>
+          </div>
+          <p class="usage-meta" id="usage-meta">等待服务数据</p>
+        </div>
+        <div class="usage-summary" aria-label="MCP 调用摘要">
+          <div><span>累计调用</span><strong id="usage-total">--</strong></div>
+          <div><span>近 1 分钟</span><strong id="usage-minute">--</strong></div>
+          <div><span>近 1 小时</span><strong id="usage-hour">--</strong></div>
+          <div><span>涉及文件</span><strong id="usage-files">--</strong></div>
+        </div>
+        <div class="usage-table-shell">
+          <table class="usage-table">
+            <thead>
+              <tr>
+                <th scope="col">目标文件</th>
+                <th scope="col">累计</th>
+                <th scope="col">近 1 小时</th>
+                <th scope="col">主要工具</th>
+                <th scope="col">最近调用</th>
+              </tr>
+            </thead>
+            <tbody id="usage-file-rows">
+              <tr class="usage-empty"><td colspan="5">暂无 MCP 调用记录</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="details-section" aria-labelledby="details-title">
+        <div class="section-title-row">
+          <div>
+            <p class="eyebrow">服务信息</p>
+            <h2 id="details-title">连接与运行环境</h2>
+          </div>
+        </div>
+        <dl class="detail-list">
+          <div><dt>管理方式</dt><dd id="service-owner">--</dd></div>
+          <div><dt>内存占用</dt><dd id="service-memory">--</dd></div>
+          <div><dt>当前版本</dt><dd id="app-version">--</dd></div>
+          <div class="detail-path"><dt>可执行文件</dt><dd id="binary-path">正在查找...</dd></div>
+        </dl>
+      </section>
+
+      <section class="logs-section" aria-labelledby="logs-title">
+        <div class="section-title-row logs-title-row">
+          <div>
+            <p class="eyebrow">实时输出</p>
+            <h2 id="logs-title">服务日志</h2>
+          </div>
+          <button class="icon-button subtle" id="scroll-button" type="button" title="滚动到最新日志" aria-label="滚动到最新日志">
+            <i data-lucide="arrow-down-to-line" aria-hidden="true"></i>
+          </button>
+        </div>
+        <div class="log-shell" id="log-shell">
+          <pre id="log-output" aria-live="polite">等待服务输出...</pre>
+        </div>
+      </section>
+    </main>
+
+    <div class="dialog-backdrop" id="update-dialog" hidden>
+      <section class="update-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
+        <div class="update-dialog-heading">
+          <div class="update-dialog-icon"><i data-lucide="refresh-cw" aria-hidden="true"></i></div>
+          <div>
+            <p class="eyebrow">应用更新</p>
+            <h2 id="update-dialog-title">安装最新版本</h2>
+          </div>
+        </div>
+        <p class="update-dialog-copy" id="update-dialog-copy">
+          更新会停止相关 MCP 进程并关闭当前程序。安装完成后会重新打开风暴之眼，现有索引和配置会保留。
+        </p>
+        <div class="update-dialog-actions">
+          <button class="button" id="update-cancel-button" type="button">取消</button>
+          <button class="button button-primary" id="update-confirm-button" type="button">
+            <i data-lucide="download" aria-hidden="true"></i>
+            <span>确认更新</span>
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status" hidden>
+      <i data-lucide="circle-alert" aria-hidden="true"></i>
+      <span id="toast-message"></span>
+    </div>
+
+    <script src="../../node_modules/lucide/dist/umd/lucide.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

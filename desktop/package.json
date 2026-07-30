@@ -1,0 +1,26 @@
+{
+  "name": "codebase-memory-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "author": "ycsx/codebase-memory-mcp",
+  "description": "Desktop service controller for codebase-memory-mcp",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/service-manager.cjs && node --check src/binary-locator.cjs && node --check src/update-manager.cjs && node --check src/renderer/app.js",
+    "icon": "electron scripts/generate-icon.cjs",
+    "smoke:render": "electron tests/render-smoke.cjs",
+    "pack:win": "electron-builder --win dir --x64",
+    "pack:win:x64": "electron-builder --win dir --x64",
+    "pack:win:arm64": "electron-builder --win dir --arm64",
+    "dist:win": "electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "lucide": "^0.577.0"
+  },
+  "devDependencies": {
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12"
+  }
+}

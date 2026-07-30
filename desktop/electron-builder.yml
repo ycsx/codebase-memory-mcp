@@ -1,0 +1,27 @@
+appId: io.github.ycsx.codebase-memory.desktop
+productName: Codebase Memory
+artifactName: codebase-memory-desktop-${version}-${arch}.${ext}
+asar: true
+directories:
+  output: dist
+files:
+  - src/**/*
+  - assets/icon.png
+  - package.json
+  - node_modules/lucide/**/*
+win:
+  icon: assets/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Codebase Memory
+  runAfterFinish: true
