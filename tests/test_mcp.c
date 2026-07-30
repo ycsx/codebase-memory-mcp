@@ -282,7 +282,8 @@ TEST(mcp_initialize_response) {
 }
 
 TEST(mcp_usage_stats_aggregate_calls_by_file) {
-    char cache[] = "/tmp/cbm-usage-XXXXXX";
+    char cache[CBM_SZ_512];
+    snprintf(cache, sizeof(cache), "%s/cbm-usage-XXXXXX", cbm_tmpdir());
     if (!cbm_mkdtemp(cache)) {
         FAIL("cbm_mkdtemp failed");
     }
@@ -292,12 +293,11 @@ TEST(mcp_usage_stats_aggregate_calls_by_file) {
 
     cbm_usage_store_t *usage = cbm_usage_store_open();
     ASSERT_NOT_NULL(usage);
-    cbm_usage_record(usage, "search_code",
-                     "{\"project\":\"demo\",\"file_pattern\":\"src/app.c\"}", NULL, NULL,
-                     false, 1250);
+    cbm_usage_record(usage, "search_code", "{\"project\":\"demo\",\"file_pattern\":\"src/app.c\"}",
+                     NULL, NULL, false, 1250);
     cbm_usage_record(usage, "check_index_coverage",
-                     "{\"project\":\"demo\",\"paths\":[\"src/app.c\",\"src/lib.c\"]}",
-                     NULL, NULL, false, 850);
+                     "{\"project\":\"demo\",\"paths\":[\"src/app.c\",\"src/lib.c\"]}", NULL, NULL,
+                     false, 850);
     cbm_usage_record(usage, "query_graph", "{\"project\":\"demo\"}", NULL, NULL, true, 500);
     cbm_usage_store_close(usage);
 
@@ -806,9 +806,9 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":220,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",          "trace_path",     "explain_impact",
-        "get_code_snippet", "get_graph_schema",     "get_architecture", "search_code",
-        "list_projects",    "index_status",         "check_index_coverage", "detect_changes",
+        "search_graph",     "query_graph",      "trace_path",           "explain_impact",
+        "get_code_snippet", "get_graph_schema", "get_architecture",     "search_code",
+        "list_projects",    "index_status",     "check_index_coverage", "detect_changes",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1719,8 +1719,8 @@ TEST(tool_explain_impact_exact_symbol) {
     ASSERT_GT(cbm_store_insert_edge(st, &e3), 0);
 
     char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":621,\"method\":\"tools/call\"," 
-             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{" 
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":621,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
              "\"query\":\"saveOrder\",\"project\":\"impact-proj\",\"depth\":2}}}");
     ASSERT_NOT_NULL(resp);
     char *inner = extract_text_content(resp);
@@ -1760,10 +1760,10 @@ TEST(tool_explain_impact_ambiguous_candidates) {
     ASSERT_GT(cbm_store_upsert_node(st, &first), 0);
     ASSERT_GT(cbm_store_upsert_node(st, &second), 0);
 
-    char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":622,\"method\":\"tools/call\"," 
-             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{" 
-             "\"query\":\"renderPanel\",\"project\":\"impact-ambiguous\"}}}");
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":622,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
+                                   "\"query\":\"renderPanel\",\"project\":\"impact-ambiguous\"}}}");
     ASSERT_NOT_NULL(resp);
     char *inner = extract_text_content(resp);
     ASSERT_NOT_NULL(inner);
@@ -1804,10 +1804,10 @@ TEST(tool_explain_impact_file_aggregates_symbols) {
         .project = proj, .source_id = caller_id, .target_id = symbol_id, .type = "CALLS"};
     ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
 
-    char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":623,\"method\":\"tools/call\"," 
-             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{" 
-             "\"query\":\"utils/chat.js\",\"project\":\"impact-file\"}}}");
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":623,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
+                                   "\"query\":\"utils/chat.js\",\"project\":\"impact-file\"}}}");
     ASSERT_NOT_NULL(resp);
     char *inner = extract_text_content(resp);
     ASSERT_NOT_NULL(inner);
@@ -1853,8 +1853,8 @@ TEST(tool_explain_impact_filters_docs_and_merges_module_file_candidates) {
     ASSERT_GT(cbm_store_upsert_node(st, &other), 0);
 
     char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":624,\"method\":\"tools/call\"," 
-             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{" 
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":624,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
              "\"query\":\"utils/chat.js\",\"project\":\"impact-candidates\"}}}");
     ASSERT_NOT_NULL(resp);
     char *inner = extract_text_content(resp);
@@ -6571,12 +6571,11 @@ TEST(cross_repo_intelligence_honors_name_override) {
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
-    char *resp = cbm_mcp_handle_tool(
-        srv, "index_repository",
-        "{\"repo_path\":\"C:/source-directory\","
-        "\"name\":\"custom-source-index\","
-        "\"mode\":\"cross-repo-intelligence\","
-        "\"target_projects\":[\"missing-target\"]}");
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository",
+                                     "{\"repo_path\":\"C:/source-directory\","
+                                     "\"name\":\"custom-source-index\","
+                                     "\"mode\":\"cross-repo-intelligence\","
+                                     "\"target_projects\":[\"missing-target\"]}");
 
     ASSERT_NOT_NULL(resp);
     ASSERT_TRUE(response_contains_json_fragment(resp, "\"status\":\"success\""));
