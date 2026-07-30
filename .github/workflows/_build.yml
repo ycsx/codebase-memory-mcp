@@ -322,16 +322,23 @@ jobs:
           ARCHITECTURE: ${{ matrix.architecture }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $desktopVersion = $env:RELEASE_VERSION.TrimStart("v")
           npm --prefix desktop version $desktopVersion --no-git-tag-version --allow-same-version
+          if ($LASTEXITCODE -ne 0) { throw "npm version failed with exit code $LASTEXITCODE" }
           npm --prefix desktop ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
           npm --prefix desktop run check
+          if ($LASTEXITCODE -ne 0) { throw "desktop check failed with exit code $LASTEXITCODE" }
           npm --prefix desktop test
+          if ($LASTEXITCODE -ne 0) { throw "desktop tests failed with exit code $LASTEXITCODE" }
           if ($env:ARCHITECTURE -eq "arm64") {
             npm --prefix desktop run pack:win:arm64
           } else {
             npm --prefix desktop run pack:win:x64
           }
+          if ($LASTEXITCODE -ne 0) { throw "desktop packaging failed with exit code $LASTEXITCODE" }
 
       - name: Locate Inno Setup
         shell: pwsh
