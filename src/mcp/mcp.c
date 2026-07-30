@@ -467,7 +467,7 @@ static const tool_def_t TOOLS[] = {
      "and cross-service signals. Ambiguous searches return candidates; call again with a candidate "
      "target key to analyze the intended symbol. Static graph coverage is best-effort and cannot "
      "guarantee discovery of dynamic calls, reflection, runtime registration, or event-bus wiring.",
-     "{\"type\":\"object\",\"properties\":{" 
+     "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"},"
      "\"query\":{\"type\":\"string\",\"description\":\"File path, component, function, "
      "class, interface, or route name to resolve.\"},"
@@ -676,13 +676,13 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
 
 static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",          "trace_path",     "explain_impact",
-        "get_code_snippet", "get_graph_schema",     "get_architecture", "search_code",
-        "list_projects",    "index_status",         "check_index_coverage", "detect_changes",
+        "search_graph",     "query_graph",      "trace_path",           "explain_impact",
+        "get_code_snippet", "get_graph_schema", "get_architecture",     "search_code",
+        "list_projects",    "index_status",     "check_index_coverage", "detect_changes",
     };
     static const char *const scout_tools[] = {
-        "search_graph",  "trace_path",   "explain_impact",       "get_code_snippet",
-        "get_architecture", "list_projects", "index_status", "check_index_coverage",
+        "search_graph",     "trace_path",    "explain_impact", "get_code_snippet",
+        "get_architecture", "list_projects", "index_status",   "check_index_coverage",
     };
     if (!name) {
         return false;
@@ -1070,13 +1070,15 @@ static const int SUPPORTED_VERSION_COUNT =
 
 static const char MCP_SERVER_INSTRUCTIONS[] =
     "Choose tools by the question being answered. For a known single-file mechanical edit, exact "
-    "literal or error-message lookup, config value, or non-code text, use search_code or filesystem "
+    "literal or error-message lookup, config value, or non-code text, use search_code or "
+    "filesystem "
     "grep directly. For symbol discovery, callers/callees, dependencies, change impact, data flow, "
     "architecture, cross-service behavior, or hotspots, prefer the code graph: use search_graph to "
     "find symbols, "
     "trace_path for callers and callees, get_code_snippet for exact source, query_graph for "
     "complex multi-hop patterns, explain_impact for change consequences, and get_architecture for "
-    "orientation. Do not infer call or impact relationships from import/grep counts alone. Fall back "
+    "orientation. Do not infer call or impact relationships from import/grep counts alone. Fall "
+    "back "
     "to direct source search when graph coverage is insufficient. "
     "Call list_projects before initial use and index_repository only when a repository is not "
     "indexed or to force immediate freshness after a large external update. Once indexed, "
@@ -1088,9 +1090,12 @@ static const char MCP_SERVER_INSTRUCTIONS[] =
 static const char MCP_ANALYSIS_SERVER_INSTRUCTIONS[] =
     "This is the analysis tool profile; graph and index mutation tools are unavailable. Use "
     "list_projects and index_status to select a current graph project, then use search_graph, "
-    "trace_path, explain_impact, get_code_snippet, query_graph, and get_architecture for structural, "
-    "call, dependency, impact, data-flow, and cross-service analysis. Use search_code or filesystem "
-    "grep for a known single-file edit, exact literal, config, or non-code text; do not infer calls "
+    "trace_path, explain_impact, get_code_snippet, query_graph, and get_architecture for "
+    "structural, "
+    "call, dependency, impact, data-flow, and cross-service analysis. Use search_code or "
+    "filesystem "
+    "grep for a known single-file edit, exact literal, config, or non-code text; do not infer "
+    "calls "
     "from import/grep counts. Call check_index_coverage for every cited path and for scopes behind "
     "negative or "
     "exhaustive claims; read flagged ranges or skipped files directly. Coverage is best-effort, "
@@ -4919,10 +4924,22 @@ enum {
 };
 
 static const char *IMPACT_EDGE_TYPES[] = {
-    "CALLS",          "RESOLVED_CALLS",   "USAGE",            "IMPORTS",
-    "EXTENDS",        "IMPLEMENTS",       "HTTP_CALLS",       "ASYNC_CALLS",
-    "CROSS_HTTP_CALLS", "CROSS_ASYNC_CALLS", "CROSS_CHANNEL",  "CROSS_GRPC_CALLS",
-    "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS", "GRPC_CALLS",   "GRAPHQL_CALLS",
+    "CALLS",
+    "RESOLVED_CALLS",
+    "USAGE",
+    "IMPORTS",
+    "EXTENDS",
+    "IMPLEMENTS",
+    "HTTP_CALLS",
+    "ASYNC_CALLS",
+    "CROSS_HTTP_CALLS",
+    "CROSS_ASYNC_CALLS",
+    "CROSS_CHANNEL",
+    "CROSS_GRPC_CALLS",
+    "CROSS_GRAPHQL_CALLS",
+    "CROSS_TRPC_CALLS",
+    "GRPC_CALLS",
+    "GRAPHQL_CALLS",
     "TRPC_CALLS",
 };
 
@@ -5013,12 +5030,12 @@ static void impact_add_candidate(impact_candidate_t **items, int *count, int *ca
     memset(item, 0, sizeof(*item));
     item->key = key;
     item->file_target = file_target;
-    item->name = heap_strdup(file_target ? impact_path_leaf(file_path)
-                                         : (node->name ? node->name : qn));
+    item->name =
+        heap_strdup(file_target ? impact_path_leaf(file_path) : (node->name ? node->name : qn));
     item->qualified_name = heap_strdup(file_target ? "" : qn);
     item->label = heap_strdup(file_target ? "File" : (node->label ? node->label : ""));
-    item->file_path = heap_strdup(file_target ? file_path
-                                              : (node->file_path ? node->file_path : ""));
+    item->file_path =
+        heap_strdup(file_target ? file_path : (node->file_path ? node->file_path : ""));
     item->start_line = file_target ? 0 : node->start_line;
     item->end_line = file_target ? 0 : node->end_line;
 }
@@ -5099,7 +5116,7 @@ static char *impact_candidates_result(const char *query, impact_candidate_t *ite
         yyjson_mut_obj_add_int(doc, item, "start_line", items[i].start_line);
         yyjson_mut_obj_add_int(doc, item, "end_line", items[i].end_line);
         yyjson_mut_obj_add_strcpy(doc, item, "target_type",
-                                 items[i].file_target ? "file" : "symbol");
+                                  items[i].file_target ? "file" : "symbol");
         yyjson_mut_arr_add_val(arr, item);
     }
     yyjson_mut_obj_add_val(doc, root, "candidates", arr);
@@ -5175,8 +5192,8 @@ static void impact_bfs_union(cbm_store_t *store, const cbm_node_t *roots, int ro
                 if (visited_capacity > max_results) {
                     visited_capacity = max_results;
                 }
-                out->visited = safe_realloc(
-                    out->visited, (size_t)visited_capacity * sizeof(cbm_node_hop_t));
+                out->visited =
+                    safe_realloc(out->visited, (size_t)visited_capacity * sizeof(cbm_node_hop_t));
             }
             out->visited[out->visited_count++] = *hop;
             memset(hop, 0, sizeof(*hop));
@@ -5206,8 +5223,8 @@ static void impact_bfs_union(cbm_store_t *store, const cbm_node_t *roots, int ro
 }
 
 static bool impact_node_is_entry(const cbm_node_t *node) {
-    if (node->label && (strcmp(node->label, "Route") == 0 ||
-                        strcmp(node->label, "Endpoint") == 0)) {
+    if (node->label &&
+        (strcmp(node->label, "Route") == 0 || strcmp(node->label, "Endpoint") == 0)) {
         return true;
     }
     if (!node->properties_json || !node->properties_json[0]) {
@@ -5257,8 +5274,8 @@ static const char *impact_risk_code(cbm_risk_level_t risk) {
 }
 
 static char *impact_analysis_result(cbm_store_t *store, const char *query, const char *target_key,
-                                    const char *target_type, const cbm_node_t *roots, int root_count,
-                                    int depth, int limit) {
+                                    const char *target_type, const cbm_node_t *roots,
+                                    int root_count, int depth, int limit) {
     cbm_traverse_result_t traversal = {0};
     bool truncated = false;
     impact_bfs_union(store, roots, root_count, depth, limit, &traversal, &truncated);
@@ -5323,12 +5340,14 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
                                    : (roots[0].name ? roots[0].name : target_key);
     char summary_text[CBM_SZ_1K];
     if (traversal.visited_count == 0) {
-        snprintf(summary_text, sizeof(summary_text),
-                 "当前图谱中没有发现依赖「%.240s」的节点。修改仍可能影响未被静态索引识别的动态关系。",
-                 display_name);
+        snprintf(
+            summary_text, sizeof(summary_text),
+            "当前图谱中没有发现依赖「%.240s」的节点。修改仍可能影响未被静态索引识别的动态关系。",
+            display_name);
     } else {
         snprintf(summary_text, sizeof(summary_text),
-                 "%s风险：修改「%.240s」可能直接影响 %d 个节点，并继续传导到 %d 个间接节点，涉及 %d 个文件。",
+                 "%s风险：修改「%.240s」可能直接影响 %d 个节点，并继续传导到 %d 个间接节点，涉及 "
+                 "%d 个文件。",
                  risk_label, display_name, direct_count, indirect_count, affected_files);
     }
 
@@ -5345,17 +5364,16 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     yyjson_mut_obj_add_strcpy(doc, selected, "target_type", target_type);
     yyjson_mut_obj_add_strcpy(doc, selected, "name", display_name);
     yyjson_mut_obj_add_strcpy(doc, selected, "qualified_name",
-                             strcmp(target_type, "file") == 0
-                                 ? ""
-                                 : (roots[0].qualified_name ? roots[0].qualified_name : ""));
-    yyjson_mut_obj_add_strcpy(doc, selected, "label",
-                             strcmp(target_type, "file") == 0
-                                 ? "File"
-                                 : (roots[0].label ? roots[0].label : ""));
+                              strcmp(target_type, "file") == 0
+                                  ? ""
+                                  : (roots[0].qualified_name ? roots[0].qualified_name : ""));
+    yyjson_mut_obj_add_strcpy(
+        doc, selected, "label",
+        strcmp(target_type, "file") == 0 ? "File" : (roots[0].label ? roots[0].label : ""));
     yyjson_mut_obj_add_strcpy(doc, selected, "file_path",
-                             strcmp(target_type, "file") == 0
-                                 ? display_name
-                                 : (roots[0].file_path ? roots[0].file_path : ""));
+                              strcmp(target_type, "file") == 0
+                                  ? display_name
+                                  : (roots[0].file_path ? roots[0].file_path : ""));
     yyjson_mut_obj_add_val(doc, root, "selected", selected);
 
     yyjson_mut_val *summary = yyjson_mut_obj(doc);
@@ -5411,12 +5429,11 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     yyjson_mut_arr_add_strcpy(
         doc, limitations,
         "结果只覆盖已建立索引的静态关系；动态调用、反射、运行时注册和事件总线可能无法完整识别。");
-    yyjson_mut_arr_add_strcpy(
-        doc, limitations,
-        "间接影响表示图谱中存在依赖路径，不代表修改后一定会发生行为变化。");
+    yyjson_mut_arr_add_strcpy(doc, limitations,
+                              "间接影响表示图谱中存在依赖路径，不代表修改后一定会发生行为变化。");
     if (truncated) {
         yyjson_mut_arr_add_strcpy(doc, limitations,
-                                 "结果已达到本次查询上限，请缩小目标或提高 limit 后重新分析。");
+                                  "结果已达到本次查询上限，请缩小目标或提高 limit 后重新分析。");
     }
     yyjson_mut_obj_add_val(doc, root, "limitations", limitations);
 
@@ -8249,8 +8266,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
      * an invalid custom ref fail deterministically. */
     char cmd[CBM_SZ_2K];
 #ifdef _WIN32
-    snprintf(cmd, sizeof(cmd), "git -C \"%s\" rev-parse --verify \"%s^{commit}\" 2>&1",
-             root_path, base_branch);
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" rev-parse --verify \"%s^{commit}\" 2>&1", root_path,
+             base_branch);
 #else
     snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse --verify '%s^{commit}' 2>&1", root_path,
              base_branch);
@@ -8263,8 +8280,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         free(base_branch);
         free(scope);
         return detect_changes_error_result(
-            "git could not be started. Check that Git is installed and available on PATH.",
-            depth);
+            "git could not be started. Check that Git is installed and available on PATH.", depth);
     }
 
     char ref_detail[CBM_SZ_1K] = {0};
@@ -8275,8 +8291,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     }
     int ref_status = cbm_pclose(ref_fp);
     while (ref_used > 0 &&
-           (ref_detail[ref_used - SKIP_ONE] == '\n' ||
-            ref_detail[ref_used - SKIP_ONE] == '\r')) {
+           (ref_detail[ref_used - SKIP_ONE] == '\n' || ref_detail[ref_used - SKIP_ONE] == '\r')) {
         ref_detail[--ref_used] = '\0';
     }
     if (ref_status != 0) {
