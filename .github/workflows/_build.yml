@@ -350,7 +350,8 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc)) {
             throw "Inno Setup 6 compiler was not installed"
           }
-          & $iscc /?
+          $compiler = Get-Item -LiteralPath $iscc
+          Write-Host "Using Inno Setup compiler: $($compiler.FullName)"
 
       - name: Build per-user UI installer
         shell: pwsh
