@@ -8,6 +8,34 @@ param(
     [string]$Installer
 )
 
+function Remove-TestRootWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastError = $null
+    while (Test-Path -LiteralPath $Path) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            $lastError = $_
+            if ([DateTime]::UtcNow -ge $deadline) {
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    if (Test-Path -LiteralPath $Path) {
+        throw "Failed to remove installer smoke root after $TimeoutSeconds seconds: $($lastError.Exception.Message)"
+    }
+}
+
 $ErrorActionPreference = "Stop"
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $tempBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
@@ -157,7 +185,7 @@ try {
         $verifiedRoot = [System.IO.Path]::GetFullPath($testRoot)
         if ($verifiedRoot.StartsWith($tempBase, [System.StringComparison]::OrdinalIgnoreCase) -and
             (Split-Path -Leaf $verifiedRoot).StartsWith("cbm-installer-smoke-")) {
-            Remove-Item -LiteralPath $verifiedRoot -Recurse -Force
+            Remove-TestRootWithRetry -Path $verifiedRoot
         }
     }
 }

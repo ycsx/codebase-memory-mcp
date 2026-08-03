@@ -5,15 +5,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$ROOT/.github/workflows/release.yml"
 BUILD_WORKFLOW="$ROOT/.github/workflows/_build.yml"
+SMOKE_WORKFLOW="$ROOT/.github/workflows/_smoke.yml"
 PYTHON_BIN="${PYTHON:-python3}"
 
-"$PYTHON_BIN" - "$WORKFLOW" "$BUILD_WORKFLOW" <<'PY'
+"$PYTHON_BIN" - "$WORKFLOW" "$BUILD_WORKFLOW" "$SMOKE_WORKFLOW" <<'PY'
 import pathlib
 import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 build_text = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+smoke_text = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 blocks = {}
 current = []
 name = None
@@ -69,10 +71,22 @@ for architecture in ("amd64", "arm64"):
     if not re.search(pattern, build_text):
         failures.append(f"build: blocking darwin-{architecture} matrix leg is missing")
 
+homebrew_identity = (
+    'git config --global user.name "Codebase Memory CI"',
+    'git config --global user.email "ci@codebase-memory-mcp.invalid"',
+)
+tap_new_offset = smoke_text.find('brew tap-new "$TEST_TAP"')
+if tap_new_offset < 0:
+    failures.append("smoke: Homebrew tap creation is missing")
+for command in homebrew_identity:
+    command_offset = smoke_text.find(command)
+    if command_offset < 0 or (tap_new_offset >= 0 and command_offset > tap_new_offset):
+        failures.append(f"smoke: Git identity must be configured before tap creation ({command})")
+
 if failures:
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
     raise SystemExit(1)
 
-print("PASS: release gate chain and macOS artifact requirements are enforced")
+print("PASS: release gates, macOS artifacts, and package smoke contracts are enforced")
 PY
