@@ -1739,8 +1739,7 @@ static void format_import_edge_properties(const CBMImport *imp, bool symbol_bind
 }
 
 static const cbm_gbuf_node_t *create_java_external_type(cbm_pipeline_ctx_t *ctx,
-                                                        const CBMImport *imp,
-                                                        const char *rel) {
+                                                        const CBMImport *imp, const char *rel) {
     if (!ctx || !ctx->gbuf || !imp || !imp->module_path || !imp->local_name || !rel ||
         !ends_with(rel, ".java") || imp->local_name[0] < 'A' || imp->local_name[0] > 'Z') {
         return NULL;
@@ -1761,20 +1760,16 @@ static const cbm_gbuf_node_t *create_java_external_type(cbm_pipeline_ctx_t *ctx,
     cbm_json_escape(escaped_module, sizeof(escaped_module), imp->module_path);
     char properties[CBM_SZ_2K];
     snprintf(properties, sizeof(properties),
-             "{\"external\":true,\"language\":\"java\",\"module_path\":\"%s\"}",
-             escaped_module);
-    int64_t node_id = cbm_gbuf_upsert_node(ctx->gbuf, "ExternalType", imp->local_name, type_qn,
-                                           "", 0, 0, properties);
+             "{\"external\":true,\"language\":\"java\",\"module_path\":\"%s\"}", escaped_module);
+    int64_t node_id = cbm_gbuf_upsert_node(ctx->gbuf, "ExternalType", imp->local_name, type_qn, "",
+                                           0, 0, properties);
     free(type_qn);
     return node_id > 0 ? cbm_gbuf_find_by_id(ctx->gbuf, node_id) : NULL;
 }
 
-int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf,
-                                               cbm_gbuf_t *dest_gbuf,
-                                               const char *callee_name,
-                                               const char **import_keys,
-                                               const char **import_vals,
-                                               int import_count) {
+int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf, cbm_gbuf_t *dest_gbuf,
+                                               const char *callee_name, const char **import_keys,
+                                               const char **import_vals, int import_count) {
     if (!lookup_gbuf || !dest_gbuf || !callee_name || !callee_name[0] || !import_keys ||
         !import_vals || import_count <= 0) {
         return 0;
@@ -1808,8 +1803,7 @@ int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf,
     const char *member_end = member_start;
     while ((*member_end >= 'A' && *member_end <= 'Z') ||
            (*member_end >= 'a' && *member_end <= 'z') ||
-           (*member_end >= '0' && *member_end <= '9') || *member_end == '_' ||
-           *member_end == '$') {
+           (*member_end >= '0' && *member_end <= '9') || *member_end == '_' || *member_end == '$') {
         member_end++;
     }
     size_t member_len = (size_t)(member_end - member_start);

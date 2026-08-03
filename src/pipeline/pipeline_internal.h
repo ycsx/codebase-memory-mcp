@@ -187,12 +187,9 @@ int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResul
  * Returns the node ID in dest_gbuf, or 0 when the call is not an external
  * Java import call. lookup_gbuf is the read-only graph that owns IMPORTS
  * targets; dest_gbuf may be a per-worker edge buffer. */
-int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf,
-                                               cbm_gbuf_t *dest_gbuf,
-                                               const char *callee_name,
-                                               const char **import_keys,
-                                               const char **import_vals,
-                                               int import_count);
+int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf, cbm_gbuf_t *dest_gbuf,
+                                               const char *callee_name, const char **import_keys,
+                                               const char **import_vals, int import_count);
 
 /* Build a namespace → File-node-QN map from a set of extraction results.
  * Each result that declared a namespace/package contributes one entry keyed by
