@@ -2,10 +2,12 @@
 
 > **Fork notice:** This repository is maintained at
 > [ycsx/codebase-memory-mcp](https://github.com/ycsx/codebase-memory-mcp) and contains
-> additional Vue 2 / Webpack static-analysis support. It is based on the original
-> [DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) project.
+> additional Vue 2 / Webpack analysis, a localized graph console, Windows Desktop
+> control and update workflows, and signed cross-platform release packaging. It is
+> based on the original [DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)
+> project.
 
-[![GitHub Release](https://img.shields.io/badge/release-not_published-lightgrey)](https://github.com/ycsx/codebase-memory-mcp/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/ycsx/codebase-memory-mcp?display_name=tag)](https://github.com/ycsx/codebase-memory-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/ycsx/codebase-memory-mcp/dry-run.yml?label=CI)](https://github.com/ycsx/codebase-memory-mcp/actions/workflows/dry-run.yml)
 [![Tests](https://img.shields.io/badge/tests-5604_passing-brightgreen)](https://github.com/ycsx/codebase-memory-mcp)
@@ -16,7 +18,7 @@
 [![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](INSTALL.md)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ycsx/codebase-memory-mcp/badge)](https://scorecard.dev/viewer/?uri=github.com/ycsx/codebase-memory-mcp)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
-[![VirusTotal](https://img.shields.io/badge/VirusTotal-release_pipeline_ready-lightgrey?logo=virustotal)](SECURITY.md)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-release_gate-brightgreen?logo=virustotal)](SECURITY.md)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.27277-b31b1b?logo=arxiv)](https://arxiv.org/abs/2603.27277)
 
 **The fastest and most efficient code intelligence engine for AI coding agents.** Full-indexes an average repository in milliseconds, the Linux kernel (28M LOC, 75K files) in 3 minutes. Answers structural queries in under 1ms. Builds as a single static binary for macOS, Linux, and Windows.
@@ -25,7 +27,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 
 > **Research** — The design and benchmarks behind this project are described in the preprint [*Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*](https://arxiv.org/abs/2603.27277) (arXiv:2603.27277). Evaluated across 31 real-world repositories: 83% answer quality, 10× fewer tokens, 2.1× fewer tool calls vs. file-by-file exploration.
 
-> **Security & Trust** — This tool reads your codebase and writes to your agent configuration files. That is what it is designed to do. If you prefer to audit before running, the [full source is here](https://github.com/ycsx/codebase-memory-mcp). The release workflow is configured to sign, checksum, and scan future fork binaries. All processing happens 100% locally; your code never leaves your machine. Found a security issue? See [SECURITY.md](SECURITY.md).
+> **Security & Trust** — This tool reads your codebase and writes to your agent configuration files. That is what it is designed to do. If you prefer to audit before running, the [full source is here](https://github.com/ycsx/codebase-memory-mcp). Published release artifacts include SHA-256 checksums, Sigstore bundles, provenance, an SBOM, and VirusTotal scanning. All processing happens 100% locally; your code never leaves your machine. Found a security issue? See [SECURITY.md](SECURITY.md).
 
 <p align="center">
   <img src="docs/graph-ui-screenshot.png" alt="Graph visualization UI showing the codebase-memory-mcp knowledge graph" width="800">
@@ -36,7 +38,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 ## Why codebase-memory-mcp
 
 - **Extreme indexing speed** — Linux kernel (28M LOC, 75K files) in 3 minutes. RAM-first pipeline: LZ4 compression, in-memory SQLite, fused Aho-Corasick pattern matching. Memory released after indexing.
-- **Plug and play** — single static binary for macOS (arm64/amd64), Linux (arm64/amd64), and Windows (amd64). No Docker, no runtime dependencies, no API keys. Build → `install` → restart agent → done.
+- **Plug and play** — release binaries for macOS, Linux, and Windows on arm64 and amd64, plus a per-user Windows Desktop installer. No Docker, API keys, or language runtimes.
 - **158 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **43 supported automatic/conditional client surfaces** — `install` configures detected clients and safely activates conditional clients only when their documented platform, marker, or explicit existing config path is present. See [Multi-Agent Support](#multi-agent-support) for the complete matrix and manual/UI-only boundaries.
@@ -46,46 +48,41 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 
 ## Quick Start
 
-### Install from source (available now)
+The supported installation path uses the artifacts from the
+[latest GitHub Release](https://github.com/ycsx/codebase-memory-mcp/releases/latest).
+The shell and PowerShell installers detect the current architecture and verify the
+downloaded archive against `checksums.txt`; Windows Desktop setup packages are
+architecture-specific.
 
-The fork does not currently publish GitHub Release assets, so source installation is
-the working installation path. See [INSTALL.md](INSTALL.md) for prerequisites and
-native Windows details.
+### macOS / Linux
 
-**macOS / Linux** (standard binary):
-```bash
-curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/scripts/setup.sh | bash -s -- --from-source
-```
+Install the standard MCP server:
 
-With the embedded graph UI:
-```bash
-curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/scripts/setup.sh | bash -s -- --from-source --ui
-```
-
-**Windows native build** (run the build commands in an MSYS2 CLANG64 shell):
-```bash
-git clone https://github.com/ycsx/codebase-memory-mcp.git
-cd codebase-memory-mcp
-scripts/build.sh --with-ui CC=clang CXX=clang++
-./build/c/codebase-memory-mcp.exe install -y
-```
-
-### Install from a GitHub Release
-
-These commands become usable after this fork publishes a release containing the
-matching `codebase-memory-mcp[-ui]-<os>-<arch>` assets and `checksums.txt`.
-
-**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash
-# Add --ui for the embedded graph UI:
+```
+
+Install the variant with the embedded graph UI:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash -s -- --ui
 ```
 
-**Windows:** download and run
-`codebase-memory-mcp-ui-windows-<arch>-setup.exe` from the latest release. The
-per-user installer needs no administrator rights, creates the visual-console
-shortcut, and keeps indexes/settings when the application is uninstalled.
+Available options are `--ui`, `--standard`, `--skip-config`, and `--dir=<path>`.
+On Linux, the script selects the fully static `-portable` asset for compatibility
+with older distributions. On macOS, it selects `arm64` for Apple Silicon and
+`amd64` for Intel. macOS release binaries are `.tar.gz` archives; this release
+does not include a `.dmg` or `.pkg` installer.
+
+### Windows
+
+Most Windows PCs use **AMD64**; Windows on Arm devices use **ARM64**. Download the
+matching `codebase-memory-mcp-ui-windows-<amd64|arm64>-setup.exe` from the
+[latest release](https://github.com/ycsx/codebase-memory-mcp/releases/latest).
+The per-user installer needs no administrator rights, includes the MCP binary and
+the **风暴之眼** Desktop controller, creates application shortcuts, and offers to
+launch the Desktop app when setup completes. Indexes and settings are retained
+across upgrades and uninstall by default.
 
 The PowerShell installer remains available for scripted and standard-binary
 installations:
@@ -106,16 +103,15 @@ Unblock-File .\install.ps1
 
 > **Note:** If you see a script execution policy error, run `Set-ExecutionPolicy -Scope Process Bypass` first, or invoke with `PowerShell -ExecutionPolicy Bypass -File .\install.ps1`.
 
-Options: `--ui` (graph visualization), `--skip-config` (binary only, no agent setup), `--dir=<path>` (custom location).
-
 Restart your coding agent. Say **"Index this project"** — done.
 
 <details>
 <summary>Manual install</summary>
 
 1. **Download** the archive for your platform from the [latest release](https://github.com/ycsx/codebase-memory-mcp/releases/latest):
-   - `codebase-memory-mcp-<os>-<arch>.tar.gz` (macOS/Linux) or `.zip` (Windows) — standard
+   - `codebase-memory-mcp-<os>-<arch>.tar.gz` (macOS) or `.zip` (Windows) — standard
    - `codebase-memory-mcp-ui-<os>-<arch>.tar.gz` / `.zip` — with graph visualization
+   - Linux uses the equivalent `-portable.tar.gz` assets for the broadest compatibility
 
 2. **Extract and install** (each archive includes `install.sh` or `install.ps1`):
 
@@ -141,9 +137,15 @@ The `install` command auto-detects installed coding agents and configures their 
 
 ### Graph Visualization UI
 
-The UI is embedded by the `--with-ui` build. For the currently available source installation, add `--ui` to `scripts/setup.sh` or run `scripts/build.sh --with-ui`. Release archives and registry variants become available only after this fork publishes them.
+The UI is included in every `codebase-memory-mcp-ui-*` release archive and in the
+Windows Desktop installer. It supports Chinese and English and provides:
 
-Then run the foreground visual console:
+- local-folder and Git-remote indexes, with per-index and sequential update-all actions
+- Git polling, index freshness/health status, and cross-repository linking
+- project, graph, impact, hotspot, file-risk, symbol-ranking, and control views
+- process/resource monitoring, logs, and coding-client integration previews
+
+Run the foreground visual console from a UI-enabled binary:
 
 ```bash
 codebase-memory-mcp console --port=9749
@@ -151,6 +153,21 @@ codebase-memory-mcp console --port=9749
 
 The command opens `http://127.0.0.1:9749` automatically and serves only on the
 loopback interface. Add `--no-open` for CI or headless environments.
+
+### Windows Desktop: 风暴之眼
+
+The Windows setup installs **风暴之眼**, a system-tray Desktop controller for the
+local MCP console service. It can:
+
+- start, stop, and restart the service it manages, while treating externally started services as read-only
+- open **可视化分析** and show service state, PID, port, uptime, memory, and live logs
+- copy an AI connection prompt that assumes MCP is already installed and ready
+- summarize MCP invocation count and frequency at file level
+- check GitHub Releases for updates, download the matching AMD64/ARM64 installer,
+  verify SHA-256, stop the managed service, install, and relaunch the Desktop app
+
+The service listens on loopback only and uses port `9749` by default. Automatic
+Desktop installation updates are currently Windows-only.
 
 ### Auto-Index
 
@@ -166,13 +183,16 @@ Watcher registration is controlled separately by `auto_watch` (default `true`). 
 
 ### Keeping Up to Date
 
-For a source installation, pull the fork and rebuild. After the fork publishes a release, the built-in updater can be used:
+Release installations can use the built-in CLI updater:
 
 ```bash
 codebase-memory-mcp update
 ```
 
-The MCP server checks the ycsx repository for updates and notifies on the first tool call when a newer fork release exists.
+The MCP server checks the ycsx repository and notifies on the first tool call when
+a newer release exists. On Windows, **风暴之眼** also checks for a matching setup
+package and performs a checksum-verified installer upgrade. Source installations
+should pull the repository and rebuild instead.
 
 ### Uninstall
 
@@ -229,7 +249,8 @@ Removes owned agent config entries, skills, hooks, instructions, and the install
 - **Auto-sync**: Background watcher detects file changes and re-indexes automatically
 - **Route nodes**: REST endpoints are first-class graph entities
 - **CLI mode**: `codebase-memory-mcp cli search_graph '{"project": "my-project", "name_pattern": ".*Handler.*"}'`
-- **Distribution status**: source builds are available now; npm, PyPI, Homebrew, Scoop, Winget, Chocolatey, AUR, and `go install` metadata are release templates until separately published for this fork
+- **Primary distribution**: signed GitHub Release archives and Windows Desktop installers are published for amd64 and arm64
+- **Package-manager metadata**: npm, PyPI, Homebrew, Scoop, Winget, Chocolatey, AUR, and `go install` definitions live under `pkg/`; registry availability and ownership can differ, so verify that a package resolves to `ycsx/codebase-memory-mcp` before installing
 
 ## Team-Shared Graph Artifact
 
@@ -308,19 +329,24 @@ When you open a memory/performance issue, **attach the `.ndjson` trajectory** �
 
 ## Installation
 
-### Planned Pre-built Binaries
+### Published v0.9.0 Release Assets
 
-The following artifact names are produced by the release workflow, but this fork has not published them yet:
+The [v0.9.0 release](https://github.com/ycsx/codebase-memory-mcp/releases/tag/v0.9.0)
+publishes the following binaries:
 
-| Platform | Standard | With Graph UI |
-|----------|----------|---------------|
-| macOS (Apple Silicon) | `codebase-memory-mcp-darwin-arm64.tar.gz` | `codebase-memory-mcp-ui-darwin-arm64.tar.gz` |
-| macOS (Intel) | `codebase-memory-mcp-darwin-amd64.tar.gz` | `codebase-memory-mcp-ui-darwin-amd64.tar.gz` |
-| Linux (x86_64) | `codebase-memory-mcp-linux-amd64.tar.gz` | `codebase-memory-mcp-ui-linux-amd64.tar.gz` |
-| Linux (ARM64) | `codebase-memory-mcp-linux-arm64.tar.gz` | `codebase-memory-mcp-ui-linux-arm64.tar.gz` |
-| Windows (x86_64) | `codebase-memory-mcp-windows-amd64.zip` | `codebase-memory-mcp-ui-windows-amd64.zip` |
+| Platform | Standard | With Graph UI | Desktop installer |
+|----------|----------|---------------|-------------------|
+| macOS (Apple Silicon) | `codebase-memory-mcp-darwin-arm64.tar.gz` | `codebase-memory-mcp-ui-darwin-arm64.tar.gz` | — |
+| macOS (Intel) | `codebase-memory-mcp-darwin-amd64.tar.gz` | `codebase-memory-mcp-ui-darwin-amd64.tar.gz` | — |
+| Linux (x86_64) | `codebase-memory-mcp-linux-amd64.tar.gz`<br>`codebase-memory-mcp-linux-amd64-portable.tar.gz` | `codebase-memory-mcp-ui-linux-amd64.tar.gz`<br>`codebase-memory-mcp-ui-linux-amd64-portable.tar.gz` | — |
+| Linux (ARM64) | `codebase-memory-mcp-linux-arm64.tar.gz`<br>`codebase-memory-mcp-linux-arm64-portable.tar.gz` | `codebase-memory-mcp-ui-linux-arm64.tar.gz`<br>`codebase-memory-mcp-ui-linux-arm64-portable.tar.gz` | — |
+| Windows (AMD64) | `codebase-memory-mcp-windows-amd64.zip` | `codebase-memory-mcp-ui-windows-amd64.zip` | `codebase-memory-mcp-ui-windows-amd64-setup.exe` |
+| Windows (ARM64) | `codebase-memory-mcp-windows-arm64.zip` | `codebase-memory-mcp-ui-windows-arm64.zip` | `codebase-memory-mcp-ui-windows-arm64-setup.exe` |
 
-A future release must include `checksums.txt` with SHA-256 hashes. The binaries are built to be statically linked with no shared library dependencies.
+The release also includes `checksums.txt`, Sigstore `.bundle` files, `sbom.json`,
+`LICENSE`, and `THIRD_PARTY_NOTICES.md`. The shell installer chooses Linux
+`-portable` assets automatically. macOS currently uses archives rather than a
+native `.dmg` or `.pkg` installer.
 
 > **Windows note**: SmartScreen may show a warning for unsigned software. Click **"More info"** → **"Run anyway"**. Verify integrity with `checksums.txt`.
 
@@ -346,12 +372,24 @@ Invoke-WebRequest https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/mai
 
 ### Package Registries
 
-The manifests under `pkg/` are maintained as release templates. Installing the existing public package with the same name may install the upstream project, not this fork. Use the source instructions above until ycsx publishes fork-owned packages.
+GitHub Releases are the primary supported channel for this fork. Manifests under
+`pkg/` are maintained for package-manager distribution, but a registry package can
+lag the latest release or belong to the upstream project. Check its repository and
+download URLs before installation.
 
-### Install via Claude Code
+### Connect an AI Client
 
-```
-You: "Install this MCP server: https://github.com/ycsx/codebase-memory-mcp"
+The Windows Desktop includes a copyable version of this prompt. It deliberately
+assumes the MCP binary is already installed:
+
+```text
+codebase-memory-mcp is already installed and ready on this machine. Connect it to
+the current AI client as a local stdio MCP server named "codebase-memory-mcp";
+locate the installed executable and do not reinstall it from GitHub. Verify that
+its MCP tools are available after configuration and tell me if the client must be
+restarted. For single-file literal lookups, use rg/grep directly. For architecture,
+call relationships, dependency tracing, cross-file impact, hotspots, and graph-wide
+analysis, prefer the codebase-memory-mcp graph tools and check index freshness first.
 ```
 
 ### Build from Source
@@ -765,26 +803,19 @@ internal/cbm/         Vendored tree-sitter grammars (158 languages) + AST extrac
 
 ## Security
 
-Future fork release binaries are required to pass this multi-layer pipeline before publication:
+Published release binaries must pass this multi-layer pipeline before publication:
 
-- **VirusTotal** — all binaries scanned by 70+ antivirus engines (zero detections required to publish)
+- **VirusTotal** — all binaries are scanned by multiple antivirus engines and the release gate must pass
 - **SLSA Level 3** — cryptographic build provenance generated by the trusted GitHub Actions build workflow; verify with `gh attestation verify <file> --repo ycsx/codebase-memory-mcp --signer-workflow ycsx/codebase-memory-mcp/.github/workflows/_build.yml`
 - **Sigstore cosign** — keyless signatures on all artifacts; bundles included in every release
 - **SHA-256 checksums** — `checksums.txt` published with every release; verified by both install scripts before extraction
-- **CodeQL SAST** — blocks release pipeline if any open alerts remain
-- **Zero runtime dependencies** — no transitive supply chain; all libraries vendored at compile time
+- **CodeQL SAST** — blocks the release pipeline if open alerts remain
+- **Zero runtime dependencies** — no transitive runtime supply chain; libraries are vendored at compile time
 
-### Upstream v0.7.0 VirusTotal scans (historical reference)
-
-| Binary | SHA-256 | VirusTotal |
-|--------|---------|-----------|
-| `linux-amd64` | `8e12bb2d6ead7f20a6d3...` | [0/72 ✅](https://www.virustotal.com/gui/file/8e12bb2d6ead7f20a6d3bf2be1e51f978c38acce810f0734f510d134b039d152/detection) |
-| `linux-arm64` | `10f7136bfbf3950c6b2a...` | [0/72 ✅](https://www.virustotal.com/gui/file/10f7136bfbf3950c6b2a1a950bbf85e88b97ee55ab00b4dfbc2a5e9c2ede8672/detection) |
-| `darwin-arm64` | `7062a7408906344bf4f8...` | [0/72 ✅](https://www.virustotal.com/gui/file/7062a7408906344bf4f835e9580048af85d12dd2b7cec0edf869df93ad9a0592/detection) |
-| `darwin-amd64` | `28c6d640e1a0ac7bfcab...` | [0/72 ✅](https://www.virustotal.com/gui/file/28c6d640e1a0ac7bfcab5094c2186eced5264a20dcdffcb4455a1b28c5df2171/detection) |
-| `windows-amd64` | `9c3ddcf78368fd4fa891...` | [0/72 ✅](https://www.virustotal.com/gui/file/9c3ddcf78368fd4fa89156a553641bf1e03640b4fb6dd29a12c84aa5bc98cd86/detection) |
-
-The fork release workflow is configured to include scan links in GitHub Release notes after a release is published.
+The published [v0.9.0 release](https://github.com/ycsx/codebase-memory-mcp/releases/tag/v0.9.0)
+passed these gates. Release notes contain the scan results; checksums, signing
+bundles, and the SBOM are published beside the binaries, while provenance is
+available through GitHub attestations.
 
 ## License
 
