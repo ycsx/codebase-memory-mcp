@@ -581,22 +581,20 @@ TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges) {
     int64_t python_route_id = cbm_store_upsert_node(java, &python_route);
     ASSERT_GT(java_web_id, 0);
     ASSERT_GT(java_python_id, 0);
-    cbm_edge_t to_web = {
-        .project = "java",
-        .source_id = java_web_id,
-        .target_id = web_route_id,
-        .type = "CROSS_HTTP_CALLS",
-        .properties_json =
-            "{\"target_project\":\"web\",\"target_function\":\"callJava\","
-            "\"target_file\":\"src/api.ts\"}"};
-    cbm_edge_t to_python = {
-        .project = "java",
-        .source_id = java_python_id,
-        .target_id = python_route_id,
-        .type = "CROSS_HTTP_CALLS",
-        .properties_json =
-            "{\"target_project\":\"python\",\"target_function\":\"call_java\","
-            "\"target_file\":\"server/client.py\"}"};
+    cbm_edge_t to_web = {.project = "java",
+                         .source_id = java_web_id,
+                         .target_id = web_route_id,
+                         .type = "CROSS_HTTP_CALLS",
+                         .properties_json =
+                             "{\"target_project\":\"web\",\"target_function\":\"callJava\","
+                             "\"target_file\":\"src/api.ts\"}"};
+    cbm_edge_t to_python = {.project = "java",
+                            .source_id = java_python_id,
+                            .target_id = python_route_id,
+                            .type = "CROSS_HTTP_CALLS",
+                            .properties_json =
+                                "{\"target_project\":\"python\",\"target_function\":\"call_java\","
+                                "\"target_file\":\"server/client.py\"}"};
     ASSERT_GT(cbm_store_insert_edge(java, &to_web), 0);
     ASSERT_GT(cbm_store_insert_edge(java, &to_python), 0);
     cbm_store_close(java);
@@ -605,14 +603,10 @@ TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges) {
     cbm_store_t *web = cbm_store_open_path(path);
     ASSERT_NOT_NULL(web);
     ASSERT_EQ(cbm_store_upsert_project(web, "web", "/tmp/web"), CBM_STORE_OK);
-    cbm_node_t web_noise1 = {.project = "web",
-                             .label = "Function",
-                             .name = "aaa",
-                             .qualified_name = "web.aaa"};
-    cbm_node_t web_noise2 = {.project = "web",
-                             .label = "Function",
-                             .name = "bbb",
-                             .qualified_name = "web.bbb"};
+    cbm_node_t web_noise1 = {
+        .project = "web", .label = "Function", .name = "aaa", .qualified_name = "web.aaa"};
+    cbm_node_t web_noise2 = {
+        .project = "web", .label = "Function", .name = "bbb", .qualified_name = "web.bbb"};
     cbm_node_t web_handler = {.project = "web",
                               .label = "Function",
                               .name = "callJava",
@@ -628,14 +622,10 @@ TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges) {
     cbm_store_t *python = cbm_store_open_path(path);
     ASSERT_NOT_NULL(python);
     ASSERT_EQ(cbm_store_upsert_project(python, "python", "/tmp/python"), CBM_STORE_OK);
-    cbm_node_t python_noise1 = {.project = "python",
-                                .label = "Function",
-                                .name = "aaa",
-                                .qualified_name = "python.aaa"};
-    cbm_node_t python_noise2 = {.project = "python",
-                                .label = "Function",
-                                .name = "bbb",
-                                .qualified_name = "python.bbb"};
+    cbm_node_t python_noise1 = {
+        .project = "python", .label = "Function", .name = "aaa", .qualified_name = "python.aaa"};
+    cbm_node_t python_noise2 = {
+        .project = "python", .label = "Function", .name = "bbb", .qualified_name = "python.bbb"};
     cbm_node_t python_handler = {.project = "python",
                                  .label = "Function",
                                  .name = "call_java",
@@ -650,10 +640,9 @@ TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges) {
     th_server_t ts;
     ASSERT_EQ(th_server_start(&ts), 0);
     char response[65536];
-    int response_len =
-        th_http(cbm_http_server_port(ts.srv),
-                "GET /api/layout?project=java&max_nodes=2 HTTP/1.1\r\n\r\n", response,
-                sizeof(response));
+    int response_len = th_http(cbm_http_server_port(ts.srv),
+                               "GET /api/layout?project=java&max_nodes=2 HTTP/1.1\r\n\r\n",
+                               response, sizeof(response));
     ASSERT_GT(response_len, 0);
     ASSERT_EQ(th_status(response), 200);
     th_server_stop(&ts);
@@ -766,9 +755,9 @@ TEST(ui_server_integrations_returns_read_only_plan) {
     th_server_t ts;
     ASSERT_EQ(th_server_start(&ts), 0);
     char resp[65536];
-    int n = th_http(cbm_http_server_port(ts.srv),
-                    "GET /api/integrations HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp,
-                    sizeof(resp));
+    int n =
+        th_http(cbm_http_server_port(ts.srv),
+                "GET /api/integrations HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp, sizeof(resp));
     ASSERT_GT(n, 0);
     ASSERT_EQ(th_status(resp), 200);
     ASSERT_NOT_NULL(strstr(resp, "\"type\": \"agent.install.plan.v1\""));
@@ -915,6 +904,38 @@ TEST(ui_server_browse_utf8_directory) {
     PASS();
 }
 
+TEST(ui_server_project_update_requires_project_name) {
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char resp[4096];
+    int n = th_http(cbm_http_server_port(ts.srv),
+                    "POST /api/project-update HTTP/1.1\r\n"
+                    "Host: 127.0.0.1\r\n"
+                    "Content-Length: 0\r\n\r\n",
+                    resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 400);
+    ASSERT_NOT_NULL(strstr(resp, "\"error\":\"missing project\""));
+    th_server_stop(&ts);
+    PASS();
+}
+
+TEST(ui_server_project_update_rejects_unknown_project) {
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char resp[4096];
+    int n = th_http(cbm_http_server_port(ts.srv),
+                    "POST /api/project-update?name=does-not-exist HTTP/1.1\r\n"
+                    "Host: 127.0.0.1\r\n"
+                    "Content-Length: 0\r\n\r\n",
+                    resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 404);
+    ASSERT_NOT_NULL(strstr(resp, "\"error\":\"project not found\""));
+    th_server_stop(&ts);
+    PASS();
+}
+
 TEST(ui_server_delete_project_unwatches_after_delete) {
     ui_delete_fixture_t fx;
     ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
@@ -949,8 +970,7 @@ TEST(ui_server_delete_project_unicode_cache_path) {
     ui_delete_fixture_t fx;
     ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
 
-    snprintf(fx.cache_dir, sizeof(fx.cache_dir), "%s/%s", fx.tmpdir,
-             "\xE7\xBC\x93\xE5\xAD\x98");
+    snprintf(fx.cache_dir, sizeof(fx.cache_dir), "%s/%s", fx.tmpdir, "\xE7\xBC\x93\xE5\xAD\x98");
     ASSERT_EQ(th_mkdir_p(fx.cache_dir), 0);
 #ifdef _WIN32
     wchar_t wide_cache[512];
@@ -1574,6 +1594,8 @@ SUITE(httpd) {
     RUN_TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges);
     RUN_TEST(ui_server_browse_traversal_probe);
     RUN_TEST(ui_server_browse_utf8_directory);
+    RUN_TEST(ui_server_project_update_requires_project_name);
+    RUN_TEST(ui_server_project_update_rejects_unknown_project);
     RUN_TEST(ui_server_delete_project_unwatches_after_delete);
     RUN_TEST(ui_server_delete_project_unicode_cache_path);
     RUN_TEST(ui_server_delete_project_preserves_local_source);

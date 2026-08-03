@@ -117,7 +117,14 @@ char *cbm_pipeline_fqn_compute(const char *project, const char *rel_path, const 
 
     char *path = strdup(rel_path ? rel_path : "");
     cbm_normalize_path_sep(path);
-    strip_file_extension(path);
+    /* File-node QNs must retain the complete filename so sibling files that
+     * share a stem remain distinct. Module and symbol QNs still strip the
+     * extension because C/C++ declaration/definition resolution relies on
+     * header and source files sharing a module stem. */
+    bool is_file_qn = name && strcmp(name, "__file__") == 0;
+    if (!is_file_qn) {
+        strip_file_extension(path);
+    }
 
     const char *segments[CBM_SZ_256];
     int seg_count = 0;

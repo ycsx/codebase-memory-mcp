@@ -84,10 +84,13 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          cp LICENSE install.sh build/c/
-          scripts/gen-third-party-notices.sh build/c/THIRD_PARTY_NOTICES.md
+          STAGE_DIR=$(mktemp -d)
+          trap 'rm -rf "$STAGE_DIR"' EXIT
+          cp build/c/codebase-memory-mcp LICENSE install.sh "$STAGE_DIR/"
+          scripts/gen-third-party-notices.sh "$STAGE_DIR/THIRD_PARTY_NOTICES.md"
+          bash scripts/ci/strip-release-binary.sh "$STAGE_DIR/codebase-memory-mcp" "$GOOS"
           tar -czf "codebase-memory-mcp-${GOOS}-${GOARCH}.tar.gz" \
-            -C build/c codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
+            -C "$STAGE_DIR" codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
 
       - name: Attest standard binary provenance
         if: ${{ inputs.attest }}
@@ -120,10 +123,13 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          cp LICENSE install.sh build/c/
-          scripts/gen-third-party-notices.sh build/c/THIRD_PARTY_NOTICES.md
+          STAGE_DIR=$(mktemp -d)
+          trap 'rm -rf "$STAGE_DIR"' EXIT
+          cp build/c/codebase-memory-mcp LICENSE install.sh "$STAGE_DIR/"
+          scripts/gen-third-party-notices.sh "$STAGE_DIR/THIRD_PARTY_NOTICES.md"
+          bash scripts/ci/strip-release-binary.sh "$STAGE_DIR/codebase-memory-mcp" "$GOOS"
           tar -czf "codebase-memory-mcp-ui-${GOOS}-${GOARCH}.tar.gz" \
-            -C build/c codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
+            -C "$STAGE_DIR" codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
 
       - name: Attest UI binary provenance
         if: ${{ inputs.attest }}
@@ -173,6 +179,7 @@ jobs:
           BIN=build/c/codebase-memory-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
           cp "$BIN" codebase-memory-mcp.exe
+          bash scripts/ci/strip-release-binary.sh codebase-memory-mcp.exe windows
           scripts/gen-third-party-notices.sh THIRD_PARTY_NOTICES.md
           zip codebase-memory-mcp-windows-amd64.zip codebase-memory-mcp.exe LICENSE install.ps1 THIRD_PARTY_NOTICES.md
 
@@ -199,6 +206,7 @@ jobs:
           BIN=build/c/codebase-memory-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
           cp "$BIN" codebase-memory-mcp.exe
+          bash scripts/ci/strip-release-binary.sh codebase-memory-mcp.exe windows
           scripts/gen-third-party-notices.sh THIRD_PARTY_NOTICES.md
           zip codebase-memory-mcp-ui-windows-amd64.zip codebase-memory-mcp.exe LICENSE install.ps1 THIRD_PARTY_NOTICES.md
 
@@ -254,6 +262,7 @@ jobs:
           BIN=build/c/codebase-memory-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
           cp "$BIN" codebase-memory-mcp.exe
+          bash scripts/ci/strip-release-binary.sh codebase-memory-mcp.exe windows
           scripts/gen-third-party-notices.sh THIRD_PARTY_NOTICES.md
           zip codebase-memory-mcp-windows-arm64.zip codebase-memory-mcp.exe LICENSE install.ps1 THIRD_PARTY_NOTICES.md
 
@@ -280,6 +289,7 @@ jobs:
           BIN=build/c/codebase-memory-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
           cp "$BIN" codebase-memory-mcp.exe
+          bash scripts/ci/strip-release-binary.sh codebase-memory-mcp.exe windows
           scripts/gen-third-party-notices.sh THIRD_PARTY_NOTICES.md
           zip codebase-memory-mcp-ui-windows-arm64.zip codebase-memory-mcp.exe LICENSE install.ps1 THIRD_PARTY_NOTICES.md
 
@@ -427,10 +437,13 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: |
-          cp LICENSE install.sh build/c/
-          scripts/gen-third-party-notices.sh build/c/THIRD_PARTY_NOTICES.md
+          STAGE_DIR=$(mktemp -d)
+          trap 'rm -rf "$STAGE_DIR"' EXIT
+          cp build/c/codebase-memory-mcp LICENSE install.sh "$STAGE_DIR/"
+          scripts/gen-third-party-notices.sh "$STAGE_DIR/THIRD_PARTY_NOTICES.md"
+          bash scripts/ci/strip-release-binary.sh "$STAGE_DIR/codebase-memory-mcp" linux
           tar -czf "codebase-memory-mcp-linux-${ARCH}-portable.tar.gz" \
-            -C build/c codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
+            -C "$STAGE_DIR" codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
 
       - name: Attest standard binary provenance
         if: ${{ inputs.attest }}
@@ -452,10 +465,13 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         run: |
-          cp LICENSE install.sh build/c/
-          scripts/gen-third-party-notices.sh build/c/THIRD_PARTY_NOTICES.md
+          STAGE_DIR=$(mktemp -d)
+          trap 'rm -rf "$STAGE_DIR"' EXIT
+          cp build/c/codebase-memory-mcp LICENSE install.sh "$STAGE_DIR/"
+          scripts/gen-third-party-notices.sh "$STAGE_DIR/THIRD_PARTY_NOTICES.md"
+          bash scripts/ci/strip-release-binary.sh "$STAGE_DIR/codebase-memory-mcp" linux
           tar -czf "codebase-memory-mcp-ui-linux-${ARCH}-portable.tar.gz" \
-            -C build/c codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
+            -C "$STAGE_DIR" codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
 
       - name: Attest UI binary provenance
         if: ${{ inputs.attest }}

@@ -70,6 +70,49 @@ static int setup_parallel_repo(void) {
     fprintf(f, "package util\n\nfunc Help() {}\n");
     fclose(f);
 
+    snprintf(path, sizeof(path), "%s/probe", g_par_tmpdir);
+    cbm_mkdir(path);
+    snprintf(path, sizeof(path), "%s/probe/Shape.java", g_par_tmpdir);
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "package probe;\npublic interface Shape {\n    double area();\n}\n");
+    fclose(f);
+    snprintf(path, sizeof(path), "%s/probe/Circle.java", g_par_tmpdir);
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "package probe;\npublic class Circle implements Shape {\n"
+               "    @Override\n    public double area() { return 1.0; }\n}\n");
+    fclose(f);
+    snprintf(path, sizeof(path), "%s/probe/Base.java", g_par_tmpdir);
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "package probe;\npublic class Base extends Circle {\n"
+               "    @Override\n    public double area() { return 0.0; }\n}\n");
+    fclose(f);
+
+    /* Deliberate same-name project type: the external Fastjson import below
+     * must not bind to this class or its method. */
+    snprintf(path, sizeof(path), "%s/probe/JSON.java", g_par_tmpdir);
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "package probe;\npublic class JSON {\n"
+               "    public static String toJSONString(Object value) { return \"local\"; }\n}\n");
+    fclose(f);
+    snprintf(path, sizeof(path), "%s/probe/FastjsonClient.java", g_par_tmpdir);
+    f = fopen(path, "w");
+    if (!f)
+        return -1;
+    fprintf(f, "package probe;\nimport com.alibaba.fastjson.JSON;\n"
+               "import com.alibaba.fastjson.JSONObject;\n"
+               "public class FastjsonClient {\n"
+               "    public String encode(Object value) { return JSON.toJSONString(value); }\n"
+               "    public JSONObject decode(String value) { return JSONObject.parseObject(value); }\n}\n");
+    fclose(f);
+
     return 0;
 }
 
@@ -81,6 +124,31 @@ static void teardown_parallel_repo(void) {
     if (g_par_tmpdir[0])
         rm_rf(g_par_tmpdir);
     g_par_tmpdir[0] = '\0';
+}
+
+/* Production indexing runs the structure pass before definitions/extraction.
+ * These focused parity helpers call the lower-level passes directly, so seed
+ * the File nodes that IMPORTS edges require without pulling in pipeline.c's
+ * private structure-pass implementation. */
+static void seed_file_nodes(cbm_gbuf_t *gbuf, const char *project,
+                            const cbm_file_info_t *files, int file_count) {
+    for (int i = 0; i < file_count; i++) {
+        const char *rel = files[i].rel_path;
+        if (!rel) {
+            continue;
+        }
+        char *file_qn = cbm_pipeline_fqn_compute(project, rel, "__file__");
+        if (!file_qn) {
+            continue;
+        }
+        const char *slash = strrchr(rel, '/');
+        const char *basename = slash ? slash + SKIP_ONE : rel;
+        const char *ext = strrchr(basename, '.');
+        char properties[CBM_SZ_256];
+        snprintf(properties, sizeof(properties), "{\"extension\":\"%s\"}", ext ? ext : "");
+        cbm_gbuf_upsert_node(gbuf, "File", basename, file_qn, rel, 0, 0, properties);
+        free(file_qn);
+    }
 }
 
 /* ── Run sequential pipeline on files, returning gbuf ─────────────── */
@@ -100,6 +168,7 @@ static cbm_gbuf_t *run_sequential(const char *project, const char *repo_path,
         .cancelled = &cancelled,
     };
 
+    seed_file_nodes(gbuf, project, files, file_count);
     cbm_init();
     cbm_pipeline_pass_definitions(&ctx, files, file_count);
     cbm_pipeline_pass_calls(&ctx, files, file_count);
@@ -129,6 +198,7 @@ static cbm_gbuf_t *run_parallel_with_extract_opts(const char *project, const cha
         .cancelled = &cancelled,
     };
 
+    seed_file_nodes(gbuf, project, files, file_count);
     _Atomic int64_t shared_ids;
     int64_t gbuf_next = cbm_gbuf_next_id(gbuf);
     atomic_init(&shared_ids, gbuf_next);
@@ -313,6 +383,68 @@ TEST(parallel_implements_parity) {
     if (rc == -1)
         FAIL("setup failed");
     ASSERT_EQ(rc, 0);
+    PASS();
+}
+
+TEST(parallel_semantic_fixture_expected_counts) {
+    if (ensure_parity_setup() != 0)
+        FAIL("setup failed");
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(g_seq_gbuf, "IMPLEMENTS"), 1);
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(g_par_gbuf, "IMPLEMENTS"), 1);
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(g_seq_gbuf, "INHERITS"), 1);
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(g_par_gbuf, "INHERITS"), 1);
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(g_seq_gbuf, "OVERRIDE"), 2);
+    ASSERT_EQ(cbm_gbuf_edge_count_by_type(g_par_gbuf, "OVERRIDE"), 2);
+    PASS();
+}
+
+TEST(parallel_java_external_import_call_parity) {
+    if (ensure_parity_setup() != 0)
+        FAIL("setup failed");
+
+    char *type_qn = strdup("par-test.com.alibaba.fastjson.JSON");
+    ASSERT_NOT_NULL(type_qn);
+    const char *object_type_qn = "par-test.com.alibaba.fastjson.JSONObject";
+    char method_qn[1024];
+    snprintf(method_qn, sizeof(method_qn), "%s.toJSONString", type_qn);
+    char parse_method_qn[1024];
+    snprintf(parse_method_qn, sizeof(parse_method_qn), "%s.parseObject", object_type_qn);
+
+    const cbm_gbuf_t *graphs[] = {g_seq_gbuf, g_par_gbuf};
+    for (int i = 0; i < 2; i++) {
+        const cbm_gbuf_node_t *type_node = cbm_gbuf_find_by_qn(graphs[i], type_qn);
+        const cbm_gbuf_node_t *object_type_node = cbm_gbuf_find_by_qn(graphs[i], object_type_qn);
+        const cbm_gbuf_node_t *method_node = cbm_gbuf_find_by_qn(graphs[i], method_qn);
+        const cbm_gbuf_node_t *parse_method_node = cbm_gbuf_find_by_qn(graphs[i], parse_method_qn);
+        ASSERT_NOT_NULL(type_node);
+        ASSERT_NOT_NULL(object_type_node);
+        ASSERT_NOT_NULL(method_node);
+        ASSERT_NOT_NULL(parse_method_node);
+        ASSERT_STR_EQ(type_node->label, "ExternalType");
+        ASSERT_STR_EQ(object_type_node->label, "ExternalType");
+        ASSERT_STR_EQ(method_node->label, "ExternalMethod");
+        ASSERT_STR_EQ(parse_method_node->label, "ExternalMethod");
+
+        const cbm_gbuf_edge_t **edges = NULL;
+        int edge_count = 0;
+        ASSERT_EQ(cbm_gbuf_find_edges_by_target_type(graphs[i], type_node->id, "IMPORTS", &edges,
+                                                     &edge_count),
+                  0);
+        ASSERT_GT(edge_count, 0);
+        ASSERT_EQ(cbm_gbuf_find_edges_by_target_type(graphs[i], object_type_node->id, "IMPORTS",
+                                                     &edges, &edge_count),
+                  0);
+        ASSERT_GT(edge_count, 0);
+        ASSERT_EQ(cbm_gbuf_find_edges_by_target_type(graphs[i], method_node->id, "CALLS", &edges,
+                                                     &edge_count),
+                  0);
+        ASSERT_GT(edge_count, 0);
+        ASSERT_EQ(cbm_gbuf_find_edges_by_target_type(graphs[i], parse_method_node->id, "CALLS",
+                                                     &edges, &edge_count),
+                  0);
+        ASSERT_GT(edge_count, 0);
+    }
+    free(type_qn);
     PASS();
 }
 
@@ -1173,6 +1305,8 @@ SUITE(parallel) {
     RUN_TEST(parallel_usage_parity);
     RUN_TEST(parallel_inherits_parity);
     RUN_TEST(parallel_implements_parity);
+    RUN_TEST(parallel_semantic_fixture_expected_counts);
+    RUN_TEST(parallel_java_external_import_call_parity);
     RUN_TEST(parallel_total_edges);
     RUN_TEST(parallel_empty_files);
     RUN_TEST(parallel_args_json_no_overflow);

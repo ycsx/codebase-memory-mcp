@@ -128,16 +128,14 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
             }
             const cbm_gbuf_node_t *target = NULL;
             const cbm_gbuf_node_t *symbol = NULL;
+            if (!file_qn) {
+                file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
+            }
             if (imp->imported_name && imp->imported_name[0]) {
-                if (!file_qn) {
-                    file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
-                }
                 target = cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
                 symbol = cbm_pipeline_resolve_import_symbol_node(ctx, target, imp);
             } else {
-                char *target_qn = cbm_pipeline_fqn_module(ctx->project_name, imp->module_path);
-                target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
-                free(target_qn);
+                target = cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
             }
             if (!target) {
                 continue;
@@ -571,6 +569,21 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
 
     cbm_resolution_t res = cbm_registry_resolve(ctx->registry, call->callee_name, module_qn,
                                                 imp_keys, imp_vals, imp_count);
+    if (lang == CBM_LANG_JAVA) {
+        int64_t external_id = cbm_pipeline_upsert_java_external_call(
+            ctx->gbuf, ctx->gbuf, call->callee_name, imp_keys, imp_vals, imp_count);
+        const cbm_gbuf_node_t *external_node =
+            external_id > 0 ? cbm_gbuf_find_by_id(ctx->gbuf, external_id) : NULL;
+        if (external_node && source_node->id != external_node->id) {
+            cbm_resolution_t external_res = {.qualified_name = external_node->qualified_name,
+                                             .strategy = "external_import",
+                                             .confidence = 0.95,
+                                             .candidate_count = 1};
+            emit_classified_edge(ctx, call, source_node, external_node, &external_res, module_qn,
+                                 imp_keys, imp_vals, imp_count, false);
+            return SKIP_ONE;
+        }
+    }
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
         /* Resolution is empty when the callee belongs to an EXTERNAL client
          * library whose source is not in the indexed tree (e.g. `requests.get`,

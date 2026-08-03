@@ -1382,6 +1382,28 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
         return target;
     }
 
+    /* External Java types use their package-qualified class name directly.
+     * cbm_pipeline_fqn_module() treats the last dotted segment as a file
+     * extension, so it cannot represent com.example.Type without dropping
+     * Type. Reuse an already-materialized ExternalType on later passes. */
+    if (source_rel && ends_with(source_rel, ".java") && imp->local_name &&
+        imp->local_name[0] >= 'A' && imp->local_name[0] <= 'Z') {
+        const char *leaf = strrchr(imp->module_path, '.');
+        leaf = leaf ? leaf + SKIP_ONE : imp->module_path;
+        if (leaf[0] && strcmp(leaf, imp->local_name) == 0) {
+            size_t qn_size = strlen(ctx->project_name) + strlen(imp->module_path) + 2;
+            char *external_qn = malloc(qn_size);
+            if (external_qn) {
+                snprintf(external_qn, qn_size, "%s.%s", ctx->project_name, imp->module_path);
+                target = cbm_gbuf_find_by_qn(ctx->gbuf, external_qn);
+                free(external_qn);
+                if (target && target->label && strcmp(target->label, "ExternalType") == 0) {
+                    return target;
+                }
+            }
+        }
+    }
+
     /* Strategy 1b: sibling-file resolution for build/markup grammars whose
      * import string is a sibling filename or directory (SCSS partials, Just/
      * BitBake/func includes, Meson subdir, Pony use). */
@@ -1465,6 +1487,23 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
      * connect the importer to any unrelated index function in the repository. */
     if (source_uses_es_module_paths(source_rel)) {
         return NULL;
+    }
+
+    /* A Java type import carries its fully-qualified package path. If that
+     * package was not found above, a project-wide simple-name fallback is not
+     * valid: `org.slf4j.Logger` must not bind to an unrelated in-project
+     * Logger class. Leave conventional type imports unresolved here so the
+     * edge pass can materialize an explicit ExternalType instead. Lowercase
+     * leaves are excluded because they are normally static members or package
+     * wildcard imports, which need richer import metadata before synthesis. */
+    if (source_rel && ends_with(source_rel, ".java") && imp->local_name &&
+        imp->local_name[0] >= 'A' && imp->local_name[0] <= 'Z' &&
+        strchr(imp->module_path, '.') != NULL) {
+        const char *leaf = strrchr(imp->module_path, '.');
+        leaf = leaf ? leaf + SKIP_ONE : imp->module_path;
+        if (strcmp(leaf, imp->local_name) == 0) {
+            return NULL;
+        }
     }
 
     /* Strategy 3: symbol-name fallback.  Derive a representative imported
@@ -1699,6 +1738,106 @@ static void format_import_edge_properties(const CBMImport *imp, bool symbol_bind
     snprintf(out, out_size, "{\"local_name\":\"%s\"}", escaped_local);
 }
 
+static const cbm_gbuf_node_t *create_java_external_type(cbm_pipeline_ctx_t *ctx,
+                                                        const CBMImport *imp,
+                                                        const char *rel) {
+    if (!ctx || !ctx->gbuf || !imp || !imp->module_path || !imp->local_name || !rel ||
+        !ends_with(rel, ".java") || imp->local_name[0] < 'A' || imp->local_name[0] > 'Z') {
+        return NULL;
+    }
+    const char *leaf = strrchr(imp->module_path, '.');
+    leaf = leaf ? leaf + SKIP_ONE : imp->module_path;
+    if (!leaf[0] || strcmp(leaf, imp->local_name) != 0) {
+        return NULL;
+    }
+
+    size_t qn_size = strlen(ctx->project_name) + strlen(imp->module_path) + 2;
+    char *type_qn = malloc(qn_size);
+    if (!type_qn) {
+        return NULL;
+    }
+    snprintf(type_qn, qn_size, "%s.%s", ctx->project_name, imp->module_path);
+    char escaped_module[CBM_SZ_1K];
+    cbm_json_escape(escaped_module, sizeof(escaped_module), imp->module_path);
+    char properties[CBM_SZ_2K];
+    snprintf(properties, sizeof(properties),
+             "{\"external\":true,\"language\":\"java\",\"module_path\":\"%s\"}",
+             escaped_module);
+    int64_t node_id = cbm_gbuf_upsert_node(ctx->gbuf, "ExternalType", imp->local_name, type_qn,
+                                           "", 0, 0, properties);
+    free(type_qn);
+    return node_id > 0 ? cbm_gbuf_find_by_id(ctx->gbuf, node_id) : NULL;
+}
+
+int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf,
+                                               cbm_gbuf_t *dest_gbuf,
+                                               const char *callee_name,
+                                               const char **import_keys,
+                                               const char **import_vals,
+                                               int import_count) {
+    if (!lookup_gbuf || !dest_gbuf || !callee_name || !callee_name[0] || !import_keys ||
+        !import_vals || import_count <= 0) {
+        return 0;
+    }
+
+    const char *dot = strchr(callee_name, '.');
+    size_t prefix_len = dot ? (size_t)(dot - callee_name) : strlen(callee_name);
+    if (prefix_len == 0 || prefix_len >= CBM_SZ_256) {
+        return 0;
+    }
+    char prefix[CBM_SZ_256];
+    memcpy(prefix, callee_name, prefix_len);
+    prefix[prefix_len] = '\0';
+
+    const char *type_qn = NULL;
+    for (int i = 0; i < import_count; i++) {
+        if (import_keys[i] && import_vals[i] && strcmp(import_keys[i], prefix) == 0) {
+            type_qn = import_vals[i];
+            break;
+        }
+    }
+    if (!type_qn) {
+        return 0;
+    }
+    const cbm_gbuf_node_t *type_node = cbm_gbuf_find_by_qn(lookup_gbuf, type_qn);
+    if (!type_node || !type_node->label || strcmp(type_node->label, "ExternalType") != 0) {
+        return 0;
+    }
+
+    const char *member_start = dot && dot[SKIP_ONE] ? dot + SKIP_ONE : prefix;
+    const char *member_end = member_start;
+    while ((*member_end >= 'A' && *member_end <= 'Z') ||
+           (*member_end >= 'a' && *member_end <= 'z') ||
+           (*member_end >= '0' && *member_end <= '9') || *member_end == '_' ||
+           *member_end == '$') {
+        member_end++;
+    }
+    size_t member_len = (size_t)(member_end - member_start);
+    if (member_len == 0 || member_len >= CBM_SZ_256) {
+        return 0;
+    }
+    char member_name[CBM_SZ_256];
+    memcpy(member_name, member_start, member_len);
+    member_name[member_len] = '\0';
+    char method_qn[CBM_SZ_2K];
+    int qn_len = snprintf(method_qn, sizeof(method_qn), "%s.%s", type_qn, member_name);
+    if (qn_len <= 0 || (size_t)qn_len >= sizeof(method_qn)) {
+        return 0;
+    }
+
+    char escaped_owner[CBM_SZ_1K];
+    char escaped_callee[CBM_SZ_512];
+    cbm_json_escape(escaped_owner, sizeof(escaped_owner), type_qn);
+    cbm_json_escape(escaped_callee, sizeof(escaped_callee), callee_name);
+    char properties[CBM_SZ_2K];
+    snprintf(properties, sizeof(properties),
+             "{\"external\":true,\"language\":\"java\",\"owner\":\"%s\","
+             "\"callee\":\"%s\",\"strategy\":\"external_import\"}",
+             escaped_owner, escaped_callee);
+    return cbm_gbuf_upsert_node(dest_gbuf, "ExternalMethod", member_name, method_qn, "", 0, 0,
+                                properties);
+}
+
 int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
                                      const char *rel, CBMHashTable *namespace_map) {
     if (!ctx || !ctx->gbuf || !result || !rel) {
@@ -1719,6 +1858,9 @@ int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResul
         }
         const cbm_gbuf_node_t *target =
             cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
+        if (!target) {
+            target = create_java_external_type(ctx, imp, rel);
+        }
         if (!target || target->id == source_node->id) {
             continue;
         }

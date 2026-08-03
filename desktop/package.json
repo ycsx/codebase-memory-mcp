@@ -7,7 +7,7 @@
   "main": "src/main.cjs",
   "scripts": {
     "start": "electron .",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test tests/desktop.test.mjs tests/update-manager.test.mjs",
     "check": "node --check src/main.cjs && node --check src/preload.cjs && node --check src/service-manager.cjs && node --check src/binary-locator.cjs && node --check src/update-manager.cjs && node --check src/renderer/app.js",
     "icon": "electron scripts/generate-icon.cjs",
     "smoke:render": "electron tests/render-smoke.cjs",

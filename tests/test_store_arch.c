@@ -275,7 +275,8 @@ TEST(arch_path_scoping) {
     ASSERT_TRUE(whole_pkg_nodes > scoped_pkg_nodes);
     ASSERT_EQ(scoped_pkg_nodes, 1);
 
-    ASSERT_TRUE(cbm_store_count_nodes(s, "pscope") > cbm_store_count_nodes_scoped(s, "pscope", "apps/foo"));
+    ASSERT_TRUE(cbm_store_count_nodes(s, "pscope") >
+                cbm_store_count_nodes_scoped(s, "pscope", "apps/foo"));
 
     cbm_architecture_info_t scoped_slash;
     memset(&scoped_slash, 0, sizeof(scoped_slash));
@@ -738,6 +739,38 @@ TEST(adr_render_empty) {
     char *rendered = cbm_adr_render(&sec);
     ASSERT_STR_EQ(rendered, "");
     free(rendered);
+    PASS();
+}
+
+static char *adr_test_fill(int len) {
+    char *s = malloc((size_t)len + 1);
+    if (s) {
+        memset(s, 'x', (size_t)len);
+        s[len] = '\0';
+    }
+    return s;
+}
+
+/* Combined section contents can exceed the fixed render buffer. The render
+ * cursor must remain clamped so a later section cannot write out of bounds. */
+TEST(adr_render_oversized_sections_no_overflow) {
+    enum { ADR_RENDER_BUFSZ = 16384 };
+    cbm_adr_sections_t sec = {.count = 3};
+    sec.keys[0] = strdup("A");
+    sec.values[0] = adr_test_fill(15995);
+    sec.keys[1] = strdup("B");
+    sec.values[1] = adr_test_fill(385);
+    sec.keys[2] = strdup("C");
+    sec.values[2] = strdup("z");
+    for (int i = 0; i < 3; i++) {
+        ASSERT_NOT_NULL(sec.values[i]);
+    }
+
+    char *rendered = cbm_adr_render(&sec);
+    ASSERT_NOT_NULL(rendered);
+    ASSERT_TRUE(strlen(rendered) < ADR_RENDER_BUFSZ);
+    free(rendered);
+    cbm_adr_sections_free(&sec);
     PASS();
 }
 
@@ -1393,6 +1426,7 @@ SUITE(store_arch) {
     RUN_TEST(adr_render_all_sections);
     RUN_TEST(adr_render_non_canonical);
     RUN_TEST(adr_render_empty);
+    RUN_TEST(adr_render_oversized_sections_no_overflow);
     RUN_TEST(adr_parse_render_roundtrip);
     RUN_TEST(adr_update_sections);
     RUN_TEST(adr_update_overflow);

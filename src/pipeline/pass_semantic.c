@@ -452,14 +452,8 @@ static void sem_process_def_edges(cbm_pipeline_ctx_t *ctx, const CBMDefinition *
             }
             const cbm_gbuf_node_t *base_node = cbm_gbuf_find_by_qn(ctx->gbuf, base_qn);
             if (base_node && node->id != base_node->id) {
-                /* A base that resolves to an Interface is an IMPLEMENTS relation
-                 * (Java `implements`, C# `: IFace`, TS `implements`); a Class/
-                 * Type/Enum base is plain INHERITS. */
-                const char *base_label = cbm_registry_label_of(ctx->registry, base_qn);
-                const char *edge_type = (base_label && strcmp(base_label, "Interface") == 0)
-                                            ? "IMPLEMENTS"
-                                            : "INHERITS";
-                cbm_gbuf_insert_edge(ctx->gbuf, node->id, base_node->id, edge_type, "{}");
+                cbm_gbuf_insert_edge(ctx->gbuf, node->id, base_node->id,
+                                     cbm_semantic_base_edge_type(base_node), "{}");
                 (*inherits_count)++;
             }
         }
@@ -576,8 +570,77 @@ int cbm_pipeline_pass_semantic(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *f
     int go_impl = cbm_pipeline_implements_go(ctx);
     implements_count += go_impl;
 
+    int overrides = cbm_pipeline_override_explicit(ctx);
+
     cbm_log_info("pass.done", "pass", "semantic", "inherits", itoa_log(inherits_count), "decorates",
-                 itoa_log(decorates_count), "implements", itoa_log(implements_count), "errors",
-                 itoa_log(errors));
+                 itoa_log(decorates_count), "implements", itoa_log(implements_count), "overrides",
+                 itoa_log(overrides), "errors", itoa_log(errors));
     return 0;
+}
+
+const char *cbm_semantic_base_edge_type(const cbm_gbuf_node_t *base_node) {
+    return (base_node && base_node->label && strcmp(base_node->label, "Interface") == 0)
+               ? "IMPLEMENTS"
+               : "INHERITS";
+}
+
+static int override_match_methods(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *cls,
+                                  const cbm_gbuf_node_t *base) {
+    const cbm_gbuf_edge_t **cls_methods = NULL;
+    int cls_method_count = 0;
+    cbm_gbuf_find_edges_by_source_type(ctx->gbuf, cls->id, "DEFINES_METHOD", &cls_methods,
+                                       &cls_method_count);
+    if (cls_method_count == 0) {
+        return 0;
+    }
+
+    const cbm_gbuf_edge_t **base_methods = NULL;
+    int base_method_count = 0;
+    cbm_gbuf_find_edges_by_source_type(ctx->gbuf, base->id, "DEFINES_METHOD", &base_methods,
+                                       &base_method_count);
+    int created = 0;
+    for (int c = 0; c < cls_method_count; c++) {
+        const cbm_gbuf_node_t *child_method =
+            cbm_gbuf_find_by_id(ctx->gbuf, cls_methods[c]->target_id);
+        if (!child_method || !child_method->name) {
+            continue;
+        }
+        for (int b = 0; b < base_method_count; b++) {
+            const cbm_gbuf_node_t *base_method =
+                cbm_gbuf_find_by_id(ctx->gbuf, base_methods[b]->target_id);
+            if (base_method && base_method->name && child_method->id != base_method->id &&
+                strcmp(child_method->name, base_method->name) == 0) {
+                cbm_gbuf_insert_edge(ctx->gbuf, child_method->id, base_method->id, "OVERRIDE",
+                                     "{}");
+                created++;
+                break;
+            }
+        }
+    }
+    return created;
+}
+
+int cbm_pipeline_override_explicit(cbm_pipeline_ctx_t *ctx) {
+    if (!ctx || !ctx->gbuf) {
+        return 0;
+    }
+    int created = 0;
+    static const char *base_edge_types[] = {"IMPLEMENTS", "INHERITS"};
+    for (size_t t = 0; t < sizeof(base_edge_types) / sizeof(base_edge_types[0]); t++) {
+        const cbm_gbuf_edge_t **edges = NULL;
+        int edge_count = 0;
+        cbm_gbuf_find_edges_by_type(ctx->gbuf, base_edge_types[t], &edges, &edge_count);
+        for (int e = 0; e < edge_count; e++) {
+            const cbm_gbuf_node_t *cls = cbm_gbuf_find_by_id(ctx->gbuf, edges[e]->source_id);
+            const cbm_gbuf_node_t *base = cbm_gbuf_find_by_id(ctx->gbuf, edges[e]->target_id);
+            if (!cls || !base) {
+                continue;
+            }
+            if (cls->file_path && fp_ends_with(cls->file_path, ".go")) {
+                continue;
+            }
+            created += override_match_methods(ctx, cls, base);
+        }
+    }
+    return created;
 }

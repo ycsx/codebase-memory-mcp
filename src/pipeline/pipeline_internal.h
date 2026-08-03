@@ -183,6 +183,17 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_symbol_node(const cbm_pipelin
 int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
                                      const char *rel, CBMHashTable *namespace_map);
 
+/* Materialize a Java method reached through an imported ExternalType.
+ * Returns the node ID in dest_gbuf, or 0 when the call is not an external
+ * Java import call. lookup_gbuf is the read-only graph that owns IMPORTS
+ * targets; dest_gbuf may be a per-worker edge buffer. */
+int64_t cbm_pipeline_upsert_java_external_call(const cbm_gbuf_t *lookup_gbuf,
+                                               cbm_gbuf_t *dest_gbuf,
+                                               const char *callee_name,
+                                               const char **import_keys,
+                                               const char **import_vals,
+                                               int import_count);
+
 /* Build a namespace → File-node-QN map from a set of extraction results.
  * Each result that declared a namespace/package contributes one entry keyed by
  * the namespace string (e.g. "App.Utils", "com.example").  Returns NULL when no
@@ -268,6 +279,13 @@ int cbm_compute_change_coupling(const cbm_commit_files_t *commits, int commit_co
  * Finds Interface nodes, matches method sets against Class nodes,
  * creates IMPLEMENTS + OVERRIDE edges. Returns edge count created. */
 int cbm_pipeline_implements_go(cbm_pipeline_ctx_t *ctx);
+
+/* Select the edge type for an explicit base relation from the resolved target
+ * node. Both sequential and parallel resolution must use this decision. */
+const char *cbm_semantic_base_edge_type(const cbm_gbuf_node_t *base_node);
+
+/* Add Method-to-Method OVERRIDE edges for explicit non-Go base relations. */
+int cbm_pipeline_override_explicit(cbm_pipeline_ctx_t *ctx);
 
 /* ── Git diff helpers (pass_gitdiff.c) ───────────────────────────── */
 

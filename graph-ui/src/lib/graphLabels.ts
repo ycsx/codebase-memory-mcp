@@ -17,6 +17,8 @@ const NODE_LABELS_ZH: Record<string, string> = {
   TypeAlias: "类型别名",
   Function: "函数",
   Method: "方法",
+  ExternalType: "外部类型",
+  ExternalMethod: "外部方法",
   Constructor: "构造函数",
   Variable: "变量",
   Constant: "常量",

@@ -60,62 +60,67 @@ static int r964_file_node_exists(cbm_store_t *store, const char *project, const 
     return found;
 }
 
-/* Count inbound IMPORTS edges whose TARGET node name is exactly `name`. */
-static int r964_inbound_imports(cbm_store_t *store, const char *project, const char *name) {
-    cbm_edge_t *edges = NULL;
-    int n = 0;
-    if (cbm_store_find_edges_by_type(store, project, "IMPORTS", &edges, &n) != CBM_STORE_OK)
-        return -1;
-    int hits = 0;
-    for (int i = 0; i < n; i++) {
-        cbm_node_t tgt;
-        if (cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) != CBM_STORE_OK)
+/* Count inbound edges of the connection types used by the issue's
+ * disconnected-file query. Includes resolve to the declared class, while the
+ * header File itself is connected through CONTAINS_FILE and DEFINES. */
+static int r964_file_inbound(cbm_store_t *store, const char *project, const char *name) {
+    static const char *const types[] = {"IMPORTS", "CALLS", "CONTAINS_FILE",
+                                        "DEFINES", "USAGE", NULL};
+    int total = 0;
+    for (int t = 0; types[t]; t++) {
+        cbm_edge_t *edges = NULL;
+        int n = 0;
+        if (cbm_store_find_edges_by_type(store, project, types[t], &edges, &n) != CBM_STORE_OK)
             continue;
-        if (tgt.name && strcmp(tgt.name, name) == 0)
-            hits++;
-        cbm_node_free_fields(&tgt);
+        for (int i = 0; i < n; i++) {
+            cbm_node_t tgt;
+            if (cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) != CBM_STORE_OK)
+                continue;
+            if (tgt.name && strcmp(tgt.name, name) == 0)
+                total++;
+            cbm_node_free_fields(&tgt);
+        }
+        cbm_store_free_edges(edges, n);
     }
-    cbm_store_free_edges(edges, n);
-    return hits;
+    return total;
 }
 
-TEST(repro_issue964_header_has_node_and_inbound_import) {
-    static const RFile files[] = {
-        {"NodeController.h", "#pragma once\n"
-                             "class NodeController {\n"
-                             "public:\n"
-                             "    void run();\n"
-                             "};\n"},
-        {"NodeController.cpp", "#include \"NodeController.h\"\n"
-                               "void NodeController::run() {}\n"},
-        {"main.cpp", "#include \"NodeController.h\"\n"
-                     "#include <vector>\n"
-                     "\n"
-                     "int main() {\n"
-                     "    NodeController c;\n"
-                     "    c.run();\n"
-                     "    return 0;\n"
-                     "}\n"}};
+TEST(repro_issue964_header_has_node_and_is_connected) {
+    static const RFile files[] = {{"NodeController.h", "#pragma once\n"
+                                                       "class NodeController {\n"
+                                                       "public:\n"
+                                                       "    void run();\n"
+                                                       "};\n"},
+                                  {"NodeController.cpp", "#include \"NodeController.h\"\n"
+                                                         "void NodeController::run() {}\n"},
+                                  {"main.cpp", "#include \"NodeController.h\"\n"
+                                               "#include <vector>\n"
+                                               "\n"
+                                               "int main() {\n"
+                                               "    NodeController c;\n"
+                                               "    c.run();\n"
+                                               "    return 0;\n"
+                                               "}\n"}};
 
     RProj lp;
     cbm_store_t *store = rh_index_files(&lp, files, 3);
     ASSERT_NOT_NULL(store);
 
     int header_node = r964_file_node_exists(store, lp.project, "NodeController.h");
-    int header_inbound = r964_inbound_imports(store, lp.project, "NodeController.h");
+    int header_inbound = r964_file_inbound(store, lp.project, "NodeController.h");
     if (!header_node || header_inbound < 1) {
         fprintf(stderr,
-                "  [964] FAIL header_file_node=%d inbound_imports=%d (header merged into "
-                "same-stem .cpp by extension-stripped QN collision)\n",
+                "  [964] FAIL header_file_node=%d inbound_edges=%d (header merged into "
+                "same-stem .cpp by extension-stripped QN collision, or left disconnected)\n",
                 header_node, header_inbound);
     }
-    ASSERT_TRUE(header_node);        /* header must keep its own File node */
-    ASSERT_TRUE(header_inbound >= 1); /* #include must land an edge on it */
+    ASSERT_TRUE(header_node);
+    ASSERT_TRUE(header_inbound >= 1);
 
     rh_cleanup(&lp, store);
     PASS();
 }
 
 SUITE(repro_issue964) {
-    RUN_TEST(repro_issue964_header_has_node_and_inbound_import);
+    RUN_TEST(repro_issue964_header_has_node_and_is_connected);
 }

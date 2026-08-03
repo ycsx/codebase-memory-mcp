@@ -143,6 +143,7 @@ struct cbm_http_server {
 #define MAX_INDEX_JOBS 4
 
 typedef struct {
+    unsigned long long job_id;
     char root_path[1024];
     char project_name[256];
     char remote_url[CBM_REMOTE_URL_MAX];
@@ -157,6 +158,16 @@ typedef struct {
 } index_job_t;
 
 static index_job_t g_index_jobs[MAX_INDEX_JOBS];
+static atomic_ullong g_next_index_job_id = 1;
+
+static bool any_index_job_running(void) {
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        if (atomic_load(&g_index_jobs[i].status) == 1) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* ── Serve embedded asset ─────────────────────────────────────── */
 
@@ -908,8 +919,7 @@ static char *build_integrations_plan(void) {
 static void handle_integrations_get(cbm_http_conn_t *c) {
     char *plan = build_integrations_plan();
     if (!plan) {
-        cbm_http_replyf(c, 503, g_cors_json,
-                        "%s", "{\"error\":\"integration plan unavailable\"}");
+        cbm_http_replyf(c, 503, g_cors_json, "%s", "{\"error\":\"integration plan unavailable\"}");
         return;
     }
     cbm_http_replyf(c, 200, g_cors_json, "%s", plan);
@@ -1117,9 +1127,8 @@ static void *index_thread_fn(void *arg) {
     if (job->remote_url[0]) {
         char remote_error[1024] = {0};
         if (cbm_remote_repo_prepare(job->project_name, job->remote_url, job->remote_branch,
-                                    job->poll_interval_sec, job->root_path,
-                                    sizeof(job->root_path), remote_error,
-                                    sizeof(remote_error)) != 0) {
+                                    job->poll_interval_sec, job->root_path, sizeof(job->root_path),
+                                    remote_error, sizeof(remote_error)) != 0) {
             set_job_error(job, remote_error);
             atomic_store(&job->status, 3);
             cbm_log_warn("ui.remote.prepare_failed", "project", job->project_name, "detail",
@@ -1197,8 +1206,8 @@ static void *index_thread_fn(void *arg) {
 
     wchar_t *wide_log_path = cbm_utf8_to_wide(log_file);
     HANDLE hlog = wide_log_path ? CreateFileW(wide_log_path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
-                                    : INVALID_HANDLE_VALUE;
+                                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+                                : INVALID_HANDLE_VALUE;
     free(wide_log_path);
     STARTUPINFOW si_proc = {.cb = sizeof(si_proc)};
     if (hlog != INVALID_HANDLE_VALUE) {
@@ -1319,6 +1328,75 @@ static void *index_thread_fn(void *arg) {
     return NULL;
 }
 
+enum {
+    INDEX_JOB_NO_SLOT = -1,
+    INDEX_JOB_ALREADY_RUNNING = -2,
+    INDEX_JOB_THREAD_FAILED = -3,
+};
+
+static int start_index_job(cbm_http_server_t *srv, const char *root_path, const char *project_name,
+                           const char *remote_url, const char *remote_branch,
+                           int poll_interval_sec) {
+    int slot = INDEX_JOB_NO_SLOT;
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        int status = atomic_load(&g_index_jobs[i].status);
+        if (project_name && project_name[0] && status == 1 &&
+            strcmp(g_index_jobs[i].project_name, project_name) == 0) {
+            return INDEX_JOB_ALREADY_RUNNING;
+        }
+        if (slot == INDEX_JOB_NO_SLOT && (status == 0 || status == 2 || status == 3)) {
+            slot = i;
+        }
+    }
+    if (slot == INDEX_JOB_NO_SLOT) {
+        return INDEX_JOB_NO_SLOT;
+    }
+
+    /* The UI MCP instance caches the last queried SQLite store. On Windows that
+     * open handle prevents the index worker's atomic temp-DB replacement, so a
+     * fully successful parse otherwise ends as phase=dump / exit code 1. Drop
+     * named-project stores before every local or remote background update. The
+     * initial in-memory store is intentionally preserved by evict_idle(). */
+    cbm_mcp_server_evict_idle(srv->mcp, 0);
+
+    index_job_t *job = &g_index_jobs[slot];
+    job->job_id = atomic_fetch_add(&g_next_index_job_id, 1);
+    snprintf(job->root_path, sizeof(job->root_path), "%s", root_path);
+    snprintf(job->project_name, sizeof(job->project_name), "%s", project_name ? project_name : "");
+    snprintf(job->remote_url, sizeof(job->remote_url), "%s", remote_url ? remote_url : "");
+    snprintf(job->remote_branch, sizeof(job->remote_branch), "%s",
+             remote_branch ? remote_branch : "");
+    job->poll_interval_sec = poll_interval_sec;
+    job->watcher = srv->watcher;
+    job->error_msg[0] = '\0';
+    atomic_store(&job->status, 1);
+
+    cbm_thread_t tid;
+    if (cbm_thread_create(&tid, 0, index_thread_fn, job) != 0) {
+        atomic_store(&job->status, 3);
+        set_job_error(job, "thread creation failed");
+        return INDEX_JOB_THREAD_FAILED;
+    }
+    cbm_thread_detach(&tid);
+    return slot;
+}
+
+static bool reply_index_job_error(cbm_http_conn_t *c, int result) {
+    if (result == INDEX_JOB_ALREADY_RUNNING) {
+        cbm_http_replyf(c, 409, g_cors_json, "{\"error\":\"repository is already being indexed\"}");
+        return true;
+    }
+    if (result == INDEX_JOB_NO_SLOT) {
+        cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
+        return true;
+    }
+    if (result == INDEX_JOB_THREAD_FAILED) {
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
+        return true;
+    }
+    return false;
+}
+
 /* POST /api/index — body: {"root_path": "/abs/path", "project_name": "..."} */
 static void handle_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
                                const cbm_http_req_t *req) {
@@ -1350,44 +1428,15 @@ static void handle_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
-    /* Find free job slot */
-    int slot = -1;
-    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
-        int st = atomic_load(&g_index_jobs[i].status);
-        if (st == 0 || st == 2 || st == 3) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) {
-        yyjson_doc_free(doc);
-        cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
-        return;
-    }
-
-    index_job_t *job = &g_index_jobs[slot];
-    snprintf(job->root_path, sizeof(job->root_path), "%s", rpath);
-    snprintf(job->project_name, sizeof(job->project_name), "%s", project_name);
-    job->remote_url[0] = '\0';
-    job->remote_branch[0] = '\0';
-    job->poll_interval_sec = 0;
-    job->watcher = srv->watcher;
-    job->error_msg[0] = '\0';
-    atomic_store(&job->status, 1);
+    int slot = start_index_job(srv, rpath, project_name, NULL, NULL, 0);
     yyjson_doc_free(doc);
-
-    /* Spawn background thread */
-    cbm_thread_t tid;
-    if (cbm_thread_create(&tid, 0, index_thread_fn, job) != 0) {
-        atomic_store(&job->status, 3);
-        snprintf(job->error_msg, sizeof(job->error_msg), "thread creation failed");
-        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
+    if (reply_index_job_error(c, slot)) {
         return;
     }
-    cbm_thread_detach(&tid); /* Don't leak thread handle */
 
-    cbm_http_replyf(c, 202, g_cors_json, "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\"}",
-                    slot, job->root_path);
+    cbm_http_replyf(c, 202, g_cors_json,
+                    "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,\"path\":\"%s\"}",
+                    g_index_jobs[slot].job_id, slot, g_index_jobs[slot].root_path);
 }
 
 /* POST /api/remote-index — clone a managed SSH repository and index it. */
@@ -1416,8 +1465,9 @@ static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c
     char normalized_url[CBM_REMOTE_URL_MAX] = {0};
     if (!cbm_remote_repo_normalize_url(remote_url, normalized_url, sizeof(normalized_url))) {
         yyjson_doc_free(doc);
-        cbm_http_replyf(c, 400, g_cors_json,
-                        "{\"error\":\"unsupported repository URL; use an SSH or HTTPS repository URL\"}");
+        cbm_http_replyf(
+            c, 400, g_cors_json,
+            "{\"error\":\"unsupported repository URL; use an SSH or HTTPS repository URL\"}");
         return;
     }
     if (!cbm_remote_repo_validate_branch(branch)) {
@@ -1436,14 +1486,14 @@ static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c
     bool project_ok = false;
     if (requested_project[0]) {
         size_t project_len = strlen(requested_project);
-        project_ok = project_len < sizeof(project_name) &&
-                     cbm_validate_project_name(requested_project);
+        project_ok =
+            project_len < sizeof(project_name) && cbm_validate_project_name(requested_project);
         if (project_ok) {
             memcpy(project_name, requested_project, project_len + 1);
         }
     } else {
-        project_ok = cbm_remote_repo_default_project(normalized_url, project_name,
-                                                      sizeof(project_name));
+        project_ok =
+            cbm_remote_repo_default_project(normalized_url, project_name, sizeof(project_name));
     }
     if (!project_ok) {
         yyjson_doc_free(doc);
@@ -1466,52 +1516,21 @@ static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c
         return;
     }
 
-    int slot = -1;
-    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
-        int status = atomic_load(&g_index_jobs[i].status);
-        if (status == 1 && strcmp(g_index_jobs[i].project_name, project_name) == 0) {
-            yyjson_doc_free(doc);
-            cbm_http_replyf(c, 409, g_cors_json,
-                            "{\"error\":\"repository is already being indexed\"}");
-            return;
-        }
-        if (slot < 0 && (status == 0 || status == 2 || status == 3)) {
-            slot = i;
-        }
-    }
-    if (slot < 0) {
-        yyjson_doc_free(doc);
-        cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
-        return;
-    }
-
-    index_job_t *job = &g_index_jobs[slot];
-    snprintf(job->root_path, sizeof(job->root_path), "%s", managed_path);
-    snprintf(job->project_name, sizeof(job->project_name), "%s", project_name);
-    snprintf(job->remote_url, sizeof(job->remote_url), "%s", normalized_url);
-    snprintf(job->remote_branch, sizeof(job->remote_branch), "%s", branch);
-    job->poll_interval_sec = poll_interval_sec;
-    job->watcher = srv->watcher;
-    job->error_msg[0] = '\0';
-    atomic_store(&job->status, 1);
+    int slot =
+        start_index_job(srv, managed_path, project_name, normalized_url, branch, poll_interval_sec);
     yyjson_doc_free(doc);
-
-    cbm_thread_t tid;
-    if (cbm_thread_create(&tid, 0, index_thread_fn, job) != 0) {
-        atomic_store(&job->status, 3);
-        set_job_error(job, "thread creation failed");
-        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
+    if (reply_index_job_error(c, slot)) {
         return;
     }
-    cbm_thread_detach(&tid);
 
     char escaped_path[2048];
     char escaped_project[512];
-    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), job->root_path);
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), g_index_jobs[slot].root_path);
     cbm_json_escape(escaped_project, (int)sizeof(escaped_project), project_name);
     cbm_http_replyf(c, 202, g_cors_json,
-                    "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\",\"project\":\"%s\"}",
-                    slot, escaped_path, escaped_project);
+                    "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,"
+                    "\"path\":\"%s\",\"project\":\"%s\"}",
+                    g_index_jobs[slot].job_id, slot, escaped_path, escaped_project);
 }
 
 static void handle_remote_info(cbm_http_conn_t *c, const cbm_http_req_t *req) {
@@ -1535,9 +1554,50 @@ static void handle_remote_info(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char escaped_branch[512];
     cbm_json_escape(escaped_url, (int)sizeof(escaped_url), config.remote_url);
     cbm_json_escape(escaped_branch, (int)sizeof(escaped_branch), config.branch);
-    cbm_http_replyf(c, 200, g_cors_json,
-                    "{\"managed\":true,\"remote_url\":\"%s\",\"branch\":\"%s\",\"poll_interval_sec\":%d}",
-                    escaped_url, escaped_branch, config.poll_interval_sec);
+    cbm_http_replyf(
+        c, 200, g_cors_json,
+        "{\"managed\":true,\"remote_url\":\"%s\",\"branch\":\"%s\",\"poll_interval_sec\":%d}",
+        escaped_url, escaped_branch, config.poll_interval_sec);
+}
+
+/* POST /api/project-update?name=X — refresh source, then rebuild its graph. */
+static void handle_project_update(cbm_http_server_t *srv, cbm_http_conn_t *c,
+                                  const cbm_http_req_t *req) {
+    char project[256] = {0};
+    if (!cbm_http_query_param(req->query, "name", project, (int)sizeof(project)) ||
+        !cbm_validate_project_name(project)) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project\"}");
+        return;
+    }
+
+    char root_path[1024];
+    if (!root_path_for_project(project, root_path, sizeof(root_path))) {
+        cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
+        return;
+    }
+    if (!cbm_is_dir(root_path)) {
+        cbm_http_replyf(c, 409, g_cors_json, "{\"error\":\"repository directory is unavailable\"}");
+        return;
+    }
+
+    cbm_remote_repo_config_t config;
+    bool is_remote = cbm_remote_repo_load(root_path, &config) == 0;
+    int slot =
+        start_index_job(srv, root_path, project, is_remote ? config.remote_url : NULL,
+                        is_remote ? config.branch : NULL, is_remote ? config.poll_interval_sec : 0);
+    if (reply_index_job_error(c, slot)) {
+        return;
+    }
+
+    char escaped_path[2048];
+    char escaped_project[512];
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), root_path);
+    cbm_json_escape(escaped_project, (int)sizeof(escaped_project), project);
+    cbm_http_replyf(c, 202, g_cors_json,
+                    "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,\"path\":\"%s\","
+                    "\"project\":\"%s\",\"source\":\"%s\"}",
+                    g_index_jobs[slot].job_id, slot, escaped_path, escaped_project,
+                    is_remote ? "remote" : "local");
 }
 
 static void handle_remote_sync(cbm_http_server_t *srv, cbm_http_conn_t *c,
@@ -1565,7 +1625,7 @@ static void handle_remote_sync(cbm_http_server_t *srv, cbm_http_conn_t *c,
 
 /* GET /api/index-status — returns status of all index jobs */
 static void handle_index_status(cbm_http_conn_t *c) {
-    char buf[2048] = "[";
+    char buf[16384] = "[";
     int pos = 1;
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
         int st = atomic_load(&g_index_jobs[i].status);
@@ -1574,9 +1634,19 @@ static void handle_index_status(cbm_http_conn_t *c) {
         if (pos > 1)
             buf[pos++] = ',';
         const char *ss = st == 1 ? "indexing" : st == 2 ? "done" : "error";
+        char escaped_path[2048];
+        char escaped_project[512];
+        char escaped_error[512];
+        cbm_json_escape(escaped_path, (int)sizeof(escaped_path), g_index_jobs[i].root_path);
+        cbm_json_escape(escaped_project, (int)sizeof(escaped_project),
+                        g_index_jobs[i].project_name);
+        cbm_json_escape(escaped_error, (int)sizeof(escaped_error),
+                        st == 3 ? g_index_jobs[i].error_msg : "");
         http_appendf(buf, sizeof(buf), &pos,
-                     "{\"slot\":%d,\"status\":\"%s\",\"path\":\"%s\",\"error\":\"%s\"}", i, ss,
-                     g_index_jobs[i].root_path, st == 3 ? g_index_jobs[i].error_msg : "");
+                     "{\"job_id\":%llu,\"slot\":%d,\"status\":\"%s\",\"path\":\"%s\","
+                     "\"project\":\"%s\",\"source\":\"%s\",\"error\":\"%s\"}",
+                     g_index_jobs[i].job_id, i, ss, escaped_path, escaped_project,
+                     g_index_jobs[i].remote_url[0] ? "remote" : "local", escaped_error);
     }
     buf[pos++] = ']';
     buf[pos] = '\0';
@@ -1777,8 +1847,8 @@ static bool layout_cross_set_append(layout_cross_set_t *set, int64_t source, int
         return false;
     set->edges[set->count++] =
         (layout_cross_edge_t){.source = source, .target = target, .type = type_copy};
-    (void)layout_id_list_append_unique(&set->target_ids, &set->target_count,
-                                       &set->target_capacity, target);
+    (void)layout_id_list_append_unique(&set->target_ids, &set->target_count, &set->target_capacity,
+                                       target);
     return true;
 }
 
@@ -1821,8 +1891,7 @@ static int64_t *find_cross_source_ids(cbm_store_t *store, const char *project, i
     int64_t *ids = NULL;
     int count = 0, capacity = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!layout_id_list_append_unique(&ids, &count, &capacity,
-                                          sqlite3_column_int64(stmt, 0)))
+        if (!layout_id_list_append_unique(&ids, &count, &capacity, sqlite3_column_int64(stmt, 0)))
             break;
     }
     sqlite3_finalize(stmt);
@@ -1840,17 +1909,16 @@ static void find_resolved_cross_edges(cbm_store_t *source_store, const char *sou
         return;
 
     sqlite3_stmt *stmt = NULL;
-    const char *sql =
-        "SELECT e.source_id, e.type, n.qualified_name, "
-        "json_extract(e.properties, '$.target_qualified_name'), "
-        "json_extract(e.properties, '$.target_file'), "
-        "json_extract(e.properties, '$.target_function') "
-        "FROM edges e LEFT JOIN nodes n "
-        "  ON n.id = e.target_id AND n.project = e.project "
-        "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
-        "  AND json_valid(e.properties) "
-        "  AND json_extract(e.properties, '$.target_project') = ?2 "
-        "ORDER BY e.source_id, e.id";
+    const char *sql = "SELECT e.source_id, e.type, n.qualified_name, "
+                      "json_extract(e.properties, '$.target_qualified_name'), "
+                      "json_extract(e.properties, '$.target_file'), "
+                      "json_extract(e.properties, '$.target_function') "
+                      "FROM edges e LEFT JOIN nodes n "
+                      "  ON n.id = e.target_id AND n.project = e.project "
+                      "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
+                      "  AND json_valid(e.properties) "
+                      "  AND json_extract(e.properties, '$.target_project') = ?2 "
+                      "ORDER BY e.source_id, e.id";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return;
     sqlite3_bind_text(stmt, 1, source_project, -1, SQLITE_STATIC);
@@ -2147,8 +2215,7 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         yyjson_mut_val *cross_arr = yyjson_mut_arr(mdoc);
         for (int ci = 0; ci < cross.count; ci++) {
             layout_cross_edge_t *edge = &cross.edges[ci];
-            if (!layout_has_node(layout, edge->source) ||
-                !layout_has_node(lp_layout, edge->target))
+            if (!layout_has_node(layout, edge->source) || !layout_has_node(lp_layout, edge->target))
                 continue;
             yyjson_mut_val *ce = yyjson_mut_obj(mdoc);
             yyjson_mut_obj_add_int(mdoc, ce, "source", edge->source);
@@ -2243,6 +2310,15 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
 
     /* POST /rpc → JSON-RPC dispatch (reuses existing MCP tools) */
     if (is_post && cbm_http_path_match(req->path, "/rpc")) {
+        /* A graph query can reopen and cache the database after start_index_job
+         * evicts it. Windows then refuses the worker's atomic DB replacement.
+         * Keep progress/log endpoints available, but do not admit new cached
+         * graph readers until every background update has published. */
+        if (any_index_job_running()) {
+            cbm_http_replyf(c, 409, g_cors_json,
+                            "{\"error\":\"graph update in progress; retry after indexing completes\"}");
+            return;
+        }
         handle_rpc(c, req, srv->mcp);
         return;
     }
@@ -2265,6 +2341,11 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
+    /* POST /api/project-update → refresh local/Git source and rebuild its graph */
+    if (is_post && cbm_http_path_match(req->path, "/api/project-update*")) {
+        handle_project_update(srv, c, req);
+        return;
+    }
 
     /* POST /api/remote-index → clone a managed Git repository and index it */
     if (is_post && cbm_http_path_match(req->path, "/api/remote-index")) {

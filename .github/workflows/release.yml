@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_tests:
+        description: "Skip tests for a re-release of an already test-green commit; build, smoke, soak, and verify still run"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,6 +57,7 @@ jobs:
 
   # ── 2. Tests (all platforms, full suite for release) ────────────
   test:
+    if: ${{ !inputs.skip_tests }}
     needs: [lint]
     uses: ./.github/workflows/_test.yml
     with:
@@ -60,6 +66,7 @@ jobs:
 
   # ── 3. Build all platforms ──────────────────────────────────────
   build:
+    if: ${{ !cancelled() && !failure() }}
     needs: [test]
     permissions:
       contents: read
@@ -72,6 +79,7 @@ jobs:
 
   # ── 4. Smoke test every binary ──────────────────────────────────
   smoke:
+    if: ${{ !cancelled() && !failure() }}
     needs: [build]
     uses: ./.github/workflows/_smoke.yml
     with:
@@ -79,7 +87,7 @@ jobs:
 
   # ── 5. Soak tests ──────────────────────────────────────────────
   soak:
-    if: ${{ inputs.soak_level != 'none' }}
+    if: ${{ !cancelled() && !failure() && inputs.soak_level != 'none' }}
     needs: [build]
     uses: ./.github/workflows/_soak.yml
     with:
@@ -90,7 +98,10 @@ jobs:
   # ── 6. Create DRAFT release ────────────────────────────────────
   release-draft:
     needs: [smoke, soak]
-    if: ${{ !cancelled() && !failure() }}
+    if: >-
+      ${{ !cancelled() && !failure()
+      && needs.smoke.result == 'success'
+      && (needs.soak.result == 'success' || needs.soak.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -105,6 +116,24 @@ jobs:
 
       - name: List artifacts
         run: ls -la *.tar.gz *.zip *.exe
+
+      - name: Require macOS release artifacts
+        shell: bash
+        run: |
+          required=(
+            codebase-memory-mcp-darwin-amd64.tar.gz
+            codebase-memory-mcp-darwin-arm64.tar.gz
+            codebase-memory-mcp-ui-darwin-amd64.tar.gz
+            codebase-memory-mcp-ui-darwin-arm64.tar.gz
+          )
+          missing=0
+          for artifact in "${required[@]}"; do
+            if [ ! -f "$artifact" ]; then
+              echo "::error title=Missing macOS release artifact::$artifact was not produced"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
 
       - name: Generate checksums
         run: sha256sum *.tar.gz *.zip *.exe > checksums.txt

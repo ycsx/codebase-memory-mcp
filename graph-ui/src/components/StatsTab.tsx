@@ -1,7 +1,21 @@
 import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Checkbox } from "@/components/ui/checkbox";
-import { CheckCircle2, GitBranch, GitMerge, LoaderCircle, RefreshCw } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowUpRight,
+  CheckCircle2,
+  Database,
+  FolderGit2,
+  FolderOpen,
+  GitMerge,
+  Layers3,
+  LoaderCircle,
+  Network,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { callTool } from "../api/rpc";
 import { useProjects } from "../hooks/useProjects";
 import { colorForLabel } from "../lib/colors";
@@ -76,8 +90,6 @@ interface RemoteProjectInfo {
 function RemoteProjectControls({ project }: { project: string }) {
   const t = useUiMessages();
   const [info, setInfo] = useState<RemoteProjectInfo | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<"scheduled" | "error" | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,52 +104,28 @@ function RemoteProjectControls({ project }: { project: string }) {
     return () => { cancelled = true; };
   }, [project]);
 
-  const syncNow = async () => {
-    setSyncing(true);
-    setSyncStatus(null);
-    try {
-      const res = await fetch(`/api/remote-sync?project=${encodeURIComponent(project)}`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed");
-      setSyncStatus("scheduled");
-    } catch {
-      setSyncStatus("error");
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  if (!info?.managed) return null;
+  if (!info) return null;
+  if (!info.managed) {
+    return (
+      <div className="mt-4 flex items-center gap-2 border-t border-white/[0.06] pt-3 text-[12px] text-foreground/55">
+        <FolderOpen className="h-4 w-4 text-amber-300/80" aria-hidden="true" />
+        <span className="font-medium">{t.projects.localSource}</span>
+      </div>
+    );
+  }
 
   const pollMinutes = Math.max(1, Math.round((info.poll_interval_sec ?? 300) / 60));
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mt-3 pt-3 border-t border-border/20 text-[10px]">
+    <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.06] pt-3 text-[12px]">
       <span
-        className="inline-flex min-w-0 items-center gap-1.5 text-foreground/40"
+        className="inline-flex min-w-0 items-center gap-2 text-foreground/55"
         title={info.remote_url}
       >
-        <GitBranch className="w-3.5 h-3.5 text-primary/70 shrink-0" aria-hidden="true" />
-        <span className="font-medium text-primary/80">{t.projects.gitRemote}</span>
-        <span className="font-mono truncate max-w-[180px]">{info.branch}</span>
-        <span className="text-foreground/20">{t.projects.pollEvery(pollMinutes)}</span>
+        <FolderGit2 className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+        <span className="font-medium text-primary">{t.projects.gitRemote}</span>
+        <span className="max-w-[240px] truncate font-mono text-foreground/65">{info.branch}</span>
+        <span className="text-foreground/35">{t.projects.pollEvery(pollMinutes)}</span>
       </span>
-      <button
-        type="button"
-        onClick={syncNow}
-        disabled={syncing}
-        className="inline-flex items-center gap-1 rounded-md px-2 py-1 bg-white/[0.04] hover:bg-white/[0.07] text-foreground/45 hover:text-foreground/70 transition-all disabled:opacity-30"
-        title={t.projects.syncNow}
-      >
-        <RefreshCw className={`w-3 h-3 ${syncing ? "animate-spin" : ""}`} aria-hidden="true" />
-        {t.projects.syncNow}
-      </button>
-      {syncStatus && (
-        <span className={syncStatus === "scheduled" ? "text-emerald-400/70" : "text-destructive/80"}>
-          {syncStatus === "scheduled" ? t.projects.syncScheduled : t.projects.syncFailed}
-        </span>
-      )}
     </div>
   );
 }
@@ -184,7 +172,7 @@ function AdrButton({ project }: { project: string }) {
     <>
       <button
         onClick={() => { setOpen(true); fetchAdr(); }}
-        className={`px-2.5 py-1 rounded-lg text-[10px] font-medium transition-all ${
+        className={`inline-flex h-9 items-center rounded-lg px-3 text-[12px] font-semibold transition-all ${
           hasAdr
             ? "bg-accent/15 text-accent hover:bg-accent/25"
             : "bg-white/[0.03] text-foreground/25 hover:text-foreground/40 hover:bg-white/[0.06]"
@@ -924,12 +912,58 @@ export function CrossRepositoryPanel({
 
 /* ── Main Stats Tab ─────────────────────────────────────── */
 
+interface IndexJobStatus {
+  job_id?: number;
+  slot: number;
+  status: "indexing" | "done" | "error";
+  path: string;
+  project?: string;
+  source?: "local" | "remote";
+  error?: string;
+}
+
+interface ProjectUpdateResponse {
+  job_id: number;
+  slot: number;
+  project: string;
+  source: "local" | "remote";
+}
+
+const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForProjectUpdate(job: ProjectUpdateResponse): Promise<void> {
+  const deadline = Date.now() + 60 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const res = await fetch("/api/index-status");
+    if (!res.ok) throw new Error(`Status request failed (${res.status})`);
+    const jobs = await res.json() as IndexJobStatus[];
+    const current = jobs.find((candidate) =>
+      candidate.job_id === job.job_id ||
+      (candidate.job_id === undefined && candidate.slot === job.slot),
+    );
+    if (current?.status === "done") return;
+    if (current?.status === "error") {
+      throw new Error(current.error || "Indexing failed");
+    }
+    await wait(1000);
+  }
+  throw new Error("Index update timed out");
+}
+
 export function StatsTab({ onSelectProject }: StatsTabProps) {
   const t = useUiMessages();
   const { projects, loading, error, refresh } = useProjects();
   const [showModal, setShowModal] = useState(false);
   const [indexing, setIndexing] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
+  const [updatingProjects, setUpdatingProjects] = useState<Set<string>>(() => new Set());
+  const [batchProgress, setBatchProgress] = useState<{
+    current: number;
+    total: number;
+    project: string;
+  } | null>(null);
 
   const aggregate = useMemo(() => {
     let totalNodes = 0, totalEdges = 0;
@@ -953,19 +987,96 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
     }
   }, [refresh, t.projects]);
 
+  const executeProjectUpdate = useCallback(async (name: string) => {
+    setUpdatingProjects((current) => new Set(current).add(name));
+    try {
+      const res = await fetch(`/api/project-update?name=${encodeURIComponent(name)}`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? `Update failed (${res.status})`);
+      await waitForProjectUpdate(data as ProjectUpdateResponse);
+    } finally {
+      setUpdatingProjects((current) => {
+        const next = new Set(current);
+        next.delete(name);
+        return next;
+      });
+    }
+  }, []);
+
+  const updateProject = useCallback(async (name: string) => {
+    setUpdateError(null);
+    setUpdateNotice(null);
+    try {
+      await executeProjectUpdate(name);
+      await refresh();
+      setUpdateNotice(t.projects.updateComplete(name));
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : "Update failed";
+      setUpdateError(`${t.projects.updateFailed(name)}: ${detail}`);
+    }
+  }, [executeProjectUpdate, refresh, t.projects]);
+
+  const updateAllProjects = useCallback(async () => {
+    if (projects.length === 0 || batchProgress) return;
+    setUpdateError(null);
+    setUpdateNotice(null);
+    const failures: string[] = [];
+    for (let index = 0; index < projects.length; index++) {
+      const name = projects[index].project.name;
+      setBatchProgress({ current: index + 1, total: projects.length, project: name });
+      try {
+        await executeProjectUpdate(name);
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : "Update failed";
+        failures.push(`${name}: ${detail}`);
+      }
+    }
+    setBatchProgress(null);
+    await refresh();
+    const completed = projects.length - failures.length;
+    setUpdateNotice(t.projects.updateAllComplete(completed, projects.length));
+    if (failures.length > 0) setUpdateError(failures.join(" · "));
+  }, [batchProgress, executeProjectUpdate, projects, refresh, t.projects]);
+
   return (
     <ScrollArea className="h-full">
-      <div className="p-8 max-w-3xl mx-auto">
+      <div className="index-workspace mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-[24px] font-semibold text-foreground">{t.projects.workspaceTitle}</h1>
+            <p className="mt-1 text-[14px] font-medium text-foreground/55">
+              {t.projects.indexedProjects}
+              <span className="ml-2 tabular-nums text-primary">{aggregate.projects}</span>
+            </p>
+          </div>
+          <button
+            onClick={refresh}
+            disabled={loading}
+            aria-label={t.common.refresh}
+            title={t.common.refresh}
+            className="inline-flex h-9 w-9 items-center justify-center self-start rounded-lg border border-white/[0.08] bg-white/[0.04] text-foreground/55 transition-colors hover:bg-white/[0.08] hover:text-foreground disabled:opacity-30 sm:self-auto"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
+          </button>
+        </div>
+
         {projects.length > 0 && (
-          <div className="flex gap-4 mb-8">
+          <div className="mb-7 grid grid-cols-1 gap-3 sm:grid-cols-3">
             {[
-              { label: t.tabs.projects, value: aggregate.projects, color: "text-primary" },
-              { label: t.projects.nodes, value: aggregate.nodes, color: "text-foreground/80" },
-              { label: t.projects.edges, value: aggregate.edges, color: "text-foreground/80" },
-            ].map((s) => (
-              <div key={s.label} className="flex-1 rounded-xl border border-border/30 bg-white/[0.02] p-4">
-                <p className="text-[10px] text-foreground/25 uppercase tracking-widest mb-1">{s.label}</p>
-                <p className={`text-[22px] font-semibold tabular-nums ${s.color}`}>{s.value.toLocaleString()}</p>
+              { label: t.tabs.projects, value: aggregate.projects, color: "text-primary", icon: Database },
+              { label: t.projects.nodes, value: aggregate.nodes, color: "text-sky-300", icon: Layers3 },
+              { label: t.projects.edges, value: aggregate.edges, color: "text-amber-300", icon: Network },
+            ].map(({ label, value, color, icon: Icon }) => (
+              <div key={label} className="flex min-h-[92px] items-center gap-4 rounded-lg border border-white/[0.08] bg-card/75 px-5 py-4 shadow-sm">
+                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white/[0.05] ${color}`}>
+                  <Icon className="h-5 w-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <p className="text-[13px] font-medium text-foreground/55">{label}</p>
+                  <p className={`mt-0.5 text-[24px] font-semibold tabular-nums ${color}`}>{value.toLocaleString()}</p>
+                </div>
               </div>
             ))}
           </div>
@@ -975,57 +1086,128 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
           <IndexProgress onComplete={refresh} onDismiss={() => setIndexing(false)} />
         )}
 
+        {batchProgress && (
+          <div className="mb-5 rounded-lg border border-primary/25 bg-primary/[0.07] p-4" role="status">
+            <div className="flex items-center gap-3">
+              <RefreshCw className="h-5 w-5 shrink-0 animate-spin text-primary" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-3 text-[13px] font-medium">
+                  <span className="text-primary">{t.projects.updateAllProgress(batchProgress.current, batchProgress.total)}</span>
+                  <span className="truncate font-mono text-foreground/65">{batchProgress.project}</span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
+                  <div
+                    className="h-full rounded-full bg-primary transition-[width] duration-300"
+                    style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {updateNotice && (
+          <div className="mb-5 flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.07] px-4 py-3 text-[13px] text-emerald-300" role="status">
+            <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>{updateNotice}</span>
+          </div>
+        )}
+
         {projects.length > 0 && (
           <CrossRepositoryPanel projects={projects} onComplete={refresh} />
         )}
 
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-[15px] font-semibold text-foreground/80">{t.projects.indexedProjects}</h2>
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowModal(true)} className="px-3 py-1.5 rounded-lg bg-primary/15 hover:bg-primary/25 text-primary text-[12px] font-medium transition-all">+ {t.index.newIndex}</button>
-            <button onClick={refresh} disabled={loading} className="px-3 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.07] text-[12px] text-foreground/40 font-medium transition-all disabled:opacity-30">{loading ? "..." : t.common.refresh}</button>
+        <div className="mb-5 mt-7 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="text-[18px] font-semibold text-foreground/90">{t.projects.indexedProjects}</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => void updateAllProjects()}
+              disabled={projects.length === 0 || Boolean(batchProgress) || updatingProjects.size > 0}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-amber-300/20 bg-amber-300/[0.08] px-3.5 text-[13px] font-semibold text-amber-200 transition-colors hover:bg-amber-300/[0.14] disabled:opacity-35"
+            >
+              <RefreshCw className={`h-4 w-4 ${batchProgress ? "animate-spin" : ""}`} aria-hidden="true" />
+              {t.projects.updateAll}
+            </button>
+            <button
+              onClick={() => setShowModal(true)}
+              className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-3.5 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              {t.index.newIndex}
+            </button>
           </div>
         </div>
 
-        {(error || deleteError) && <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4 mb-6"><p className="text-destructive text-[13px]">{deleteError ?? error}</p></div>}
-
-        {!loading && projects.length === 0 && !error && (
-          <div className="text-center py-20">
-            <p className="text-foreground/25 text-[13px] mb-2">{t.projects.noIndexedProjects}</p>
-            <button onClick={() => setShowModal(true)} className="px-4 py-2 rounded-lg bg-primary/15 hover:bg-primary/25 text-primary text-[12px] font-medium transition-all">{t.projects.indexFirstRepository}</button>
+        {(error || deleteError || updateError) && (
+          <div className="mb-6 flex items-start gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.07] p-4 text-destructive">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <p className="text-[13px] leading-5">{updateError ?? deleteError ?? error}</p>
           </div>
         )}
 
-        <div className="space-y-3">
+        {!loading && projects.length === 0 && !error && (
+          <div className="rounded-lg border border-dashed border-white/[0.12] bg-card/40 py-20 text-center">
+            <Database className="mx-auto mb-4 h-9 w-9 text-foreground/25" aria-hidden="true" />
+            <p className="mb-4 text-[14px] text-foreground/55">{t.projects.noIndexedProjects}</p>
+            <button onClick={() => setShowModal(true)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-primary px-4 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90">
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              {t.projects.indexFirstRepository}
+            </button>
+          </div>
+        )}
+
+        <div className="space-y-3.5">
           {projects.map((p) => {
             const totalNodes = p.schema?.node_labels?.reduce((s, l) => s + l.count, 0) ?? 0;
             const totalEdges = p.schema?.edge_types?.reduce((s, t) => s + t.count, 0) ?? 0;
+            const isUpdating = updatingProjects.has(p.project.name);
             return (
-              <div key={p.project.name} className="rounded-xl border border-border/30 bg-white/[0.02] hover:bg-white/[0.035] transition-all p-5">
-                <div className="flex items-start justify-between gap-3 mb-3">
-                  <div className="min-w-0 flex items-start gap-2.5">
-                    <div className="mt-1.5"><HealthDot name={p.project.name} /></div>
-                    <div className="min-w-0">
-                      <h3 className="text-[14px] font-semibold text-foreground/90 mb-0.5">{p.project.name}</h3>
-                      <p className="text-[11px] text-foreground/20 font-mono truncate">{p.project.root_path}</p>
+              <article key={p.project.name} className="rounded-lg border border-white/[0.08] bg-card/70 p-4 shadow-sm transition-colors hover:border-white/[0.14] hover:bg-card sm:p-5">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <div className="mt-2"><HealthDot name={p.project.name} /></div>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="mb-1 text-[16px] font-semibold text-foreground">{p.project.name}</h3>
+                      <p className="break-all font-mono text-[12px] leading-5 text-foreground/45">{p.project.root_path}</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <AdrButton project={p.project.name} />
-                    <button onClick={() => onSelectProject(p.project.name)} className="px-3 py-1.5 rounded-lg bg-primary/15 hover:bg-primary/25 text-primary text-[12px] font-medium transition-all">{t.projects.viewGraph}</button>
-                    <button onClick={() => deleteProject(p.project.name)} className="px-2 py-1.5 rounded-lg hover:bg-destructive/10 text-foreground/20 hover:text-destructive text-[12px] transition-all" title={t.projects.deleteTitle}>✕</button>
+                    <button
+                      onClick={() => void updateProject(p.project.name)}
+                      disabled={isUpdating || Boolean(batchProgress)}
+                      className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/[0.09] bg-white/[0.04] px-3 text-[13px] font-semibold text-foreground/70 transition-colors hover:bg-white/[0.08] hover:text-foreground disabled:opacity-35"
+                    >
+                      <RefreshCw className={`h-4 w-4 ${isUpdating ? "animate-spin" : ""}`} aria-hidden="true" />
+                      {isUpdating ? t.projects.updating : t.projects.updateGraph}
+                    </button>
+                    <button
+                      onClick={() => onSelectProject(p.project.name)}
+                      className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary/15 px-3 text-[13px] font-semibold text-primary transition-colors hover:bg-primary/25"
+                    >
+                      {t.projects.viewGraph}
+                      <ArrowUpRight className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                    <button
+                      onClick={() => deleteProject(p.project.name)}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-foreground/35 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      title={t.projects.deleteTitle}
+                      aria-label={t.projects.deleteTitle}
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
                 {p.schema && (
                   <>
-                    <div className="flex gap-6 text-[12px] text-foreground/30 mb-3">
-                      <span><strong className="text-foreground/55 tabular-nums">{totalNodes.toLocaleString()}</strong> {t.projects.nodes}</span>
-                      <span><strong className="text-foreground/55 tabular-nums">{totalEdges.toLocaleString()}</strong> {t.projects.edges}</span>
+                    <div className="mb-3 mt-4 flex gap-6 text-[13px] text-foreground/45">
+                      <span><strong className="mr-1 text-[14px] text-sky-300 tabular-nums">{totalNodes.toLocaleString()}</strong> {t.projects.nodes}</span>
+                      <span><strong className="mr-1 text-[14px] text-amber-300 tabular-nums">{totalEdges.toLocaleString()}</strong> {t.projects.edges}</span>
                     </div>
-                    <div className="flex flex-wrap gap-1">
+                    <div className="flex flex-wrap gap-1.5">
                       {p.schema.node_labels?.map((l) => (
-                        <span key={l.label} className="inline-flex items-center gap-1 px-1.5 py-[2px] rounded-md text-[10px] font-medium" style={{ backgroundColor: colorForLabel(l.label) + "10", color: colorForLabel(l.label) + "bb" }}>
-                          <span className="w-[4px] h-[4px] rounded-full" style={{ backgroundColor: colorForLabel(l.label) }} />
+                        <span key={l.label} className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.05] px-2 py-1 text-[11px] font-medium" style={{ backgroundColor: colorForLabel(l.label) + "12", color: colorForLabel(l.label) }}>
+                          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: colorForLabel(l.label) }} />
                           {l.label} {l.count.toLocaleString()}
                         </span>
                       ))}
@@ -1033,7 +1215,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
                   </>
                 )}
                 <RemoteProjectControls project={p.project.name} />
-              </div>
+              </article>
             );
           })}
         </div>

@@ -360,6 +360,10 @@ jobs:
       - name: Test homebrew installation
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
+          GIT_AUTHOR_NAME: Codebase Memory CI
+          GIT_AUTHOR_EMAIL: ci@codebase-memory-mcp.invalid
+          GIT_COMMITTER_NAME: Codebase Memory CI
+          GIT_COMMITTER_EMAIL: ci@codebase-memory-mcp.invalid
         run: |
           eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           ARCHIVE=codebase-memory-mcp-linux-amd64-portable.tar.gz

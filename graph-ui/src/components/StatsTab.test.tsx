@@ -273,6 +273,102 @@ describe("StatsTab index modal", () => {
   });
 });
 
+describe("StatsTab project updates", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mockIndexedProjects(names: string[]) {
+    const updateRequests: string[] = [];
+    const jobs = new Map<number, string>();
+    let nextJobId = 10;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/ui-config") {
+        return new Response(JSON.stringify({ lang: "en" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/rpc") {
+        const request = JSON.parse(String(init?.body));
+        const payload = request.params.name === "list_projects"
+          ? { projects: names.map((name) => ({ name, root_path: `C:/repo/${name}` })) }
+          : { node_labels: [{ label: "Function", count: 4 }], edge_types: [{ type: "CALLS", count: 3 }] };
+        return new Response(JSON.stringify({
+          result: { content: [{ text: JSON.stringify(payload) }] },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.startsWith("/api/remote-info")) {
+        return new Response(JSON.stringify({ managed: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.startsWith("/api/project-health")) {
+        return new Response(JSON.stringify({ status: "healthy", nodes: 4, edges: 3 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.startsWith("/api/project-update")) {
+        const query = url.split("?", 2)[1] ?? "";
+        const name = new URLSearchParams(query).get("name") ?? "";
+        updateRequests.push(name);
+        const jobId = nextJobId++;
+        jobs.set(jobId, name);
+        return new Response(JSON.stringify({
+          status: "indexing",
+          job_id: jobId,
+          slot: 0,
+          project: name,
+          source: "local",
+        }), { status: 202, headers: { "Content-Type": "application/json" } });
+      }
+      if (url === "/api/index-status") {
+        const status = Array.from(jobs, ([job_id, project]) => ({
+          job_id,
+          slot: 0,
+          status: "done",
+          path: `C:/repo/${project}`,
+          project,
+          source: "local",
+        }));
+        return new Response(JSON.stringify(status), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, updateRequests };
+  }
+
+  it("updates one project and waits for its exact job", async () => {
+    const { fetchMock } = mockIndexedProjects(["local-one"]);
+    render(<StatsTab onSelectProject={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: messages.en.projects.updateGraph }));
+
+    expect(await screen.findByText(messages.en.projects.updateComplete("local-one"))).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/project-update?name=local-one", { method: "POST" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/index-status");
+  });
+
+  it("updates all projects sequentially", async () => {
+    const { updateRequests } = mockIndexedProjects(["alpha", "beta"]);
+    render(<StatsTab onSelectProject={() => {}} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: messages.en.projects.updateAll }));
+
+    expect(await screen.findByText(messages.en.projects.updateAllComplete(2, 2))).toBeInTheDocument();
+    expect(updateRequests).toEqual(["alpha", "beta"]);
+  });
+});
+
 describe("IndexProgress", () => {
   beforeEach(() => {
     vi.useFakeTimers();

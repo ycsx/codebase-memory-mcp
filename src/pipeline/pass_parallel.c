@@ -2293,6 +2293,25 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         atomic_fetch_add_explicit(&rc->time_ns_rc_hint, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
 
+        if (lang == CBM_LANG_JAVA) {
+            int64_t external_id = cbm_pipeline_upsert_java_external_call(
+                rc->main_gbuf, ws->local_edge_buf, call->callee_name, imp_keys, imp_vals,
+                imp_count);
+            const cbm_gbuf_node_t *external_node =
+                external_id > 0 ? cbm_gbuf_find_by_id(ws->local_edge_buf, external_id) : NULL;
+            if (external_node && source_node->id != external_node->id) {
+                cbm_resolution_t external_res = {.qualified_name = external_node->qualified_name,
+                                                 .strategy = "external_import",
+                                                 .confidence = 0.95,
+                                                 .candidate_count = 1};
+                emit_service_edge(ws->local_edge_buf, source_node, external_node, call,
+                                  &external_res, module_qn, rc->registry, rc->main_gbuf, imp_keys,
+                                  imp_vals, imp_count, false);
+                ws->calls_resolved++;
+                continue;
+            }
+        }
+
         /* Perl call-graph noise guard (#476), mirroring the sequential pass
          * (pass_calls.c). Perl has no LSP resolver; for builtins (push/shift/
          * keys/...) and method calls ($obj->m, unresolved receiver), suppress
@@ -2530,7 +2549,8 @@ static void resolve_def_inherits(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         }
         const cbm_gbuf_node_t *bn = cbm_gbuf_find_by_qn(rc->main_gbuf, bqn);
         if (bn && node->id != bn->id) {
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, bn->id, "INHERITS", "{}");
+            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, bn->id,
+                                 cbm_semantic_base_edge_type(bn), "{}");
             ws->semantic_resolved++;
         }
     }
@@ -3002,6 +3022,9 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 
     /* Go-style implicit interface satisfaction (needs full graph, serial) */
     int go_impl = cbm_pipeline_implements_go(ctx);
+
+    /* Explicit-language overrides need the complete merged graph. */
+    total_lsp_overrides += cbm_pipeline_override_explicit(ctx);
 
     if (atomic_load(ctx->cancelled)) {
         return CBM_NOT_FOUND;
