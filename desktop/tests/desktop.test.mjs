@@ -45,6 +45,18 @@ test("binary locator preserves the documented priority", () => {
   assert.equal(selected, candidates[1]);
 });
 
+test("macOS packaged binary is discovered inside app resources", () => {
+  const candidates = binaryCandidates({
+    appPath: "/Applications/Codebase Memory.app/Contents/Resources/app.asar",
+    resourcesPath: "/Applications/Codebase Memory.app/Contents/Resources",
+    env: {},
+    platform: "darwin",
+  });
+  assert.ok(candidates.some((candidate) => candidate
+    .replaceAll("\\", "/")
+    .endsWith("/Contents/Resources/bin/codebase-memory-mcp")));
+});
+
 test("configured port validates JSON and valid TCP range", () => {
   const env = { USERPROFILE: "C:\\Users\\test" };
   assert.equal(configPath({ env }), "C:\\Users\\test\\.cache\\codebase-memory-mcp\\config.json");
@@ -133,13 +145,15 @@ test("usage stats are read from the local console endpoint", async () => {
 });
 
 test("desktop exposes branding, AI routing, usage stats, and verified updates", async () => {
-  const [html, appSource, preloadSource, mainSource, updaterSource, iconSource] = await Promise.all([
+  const [html, appSource, preloadSource, mainSource, updaterSource, iconSource, builderConfig, packageJson] = await Promise.all([
     readFile(new URL("../src/renderer/index.html", import.meta.url), "utf8"),
     readFile(new URL("../src/renderer/app.js", import.meta.url), "utf8"),
     readFile(new URL("../src/preload.cjs", import.meta.url), "utf8"),
     readFile(new URL("../src/main.cjs", import.meta.url), "utf8"),
     readFile(new URL("../src/update-manager.cjs", import.meta.url), "utf8"),
     readFile(new URL("../assets/icon.svg", import.meta.url), "utf8"),
+    readFile(new URL("../electron-builder.yml", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
 
   assert.match(html, /<h1>风暴之眼<\/h1>/);
@@ -166,4 +180,12 @@ test("desktop exposes branding, AI routing, usage stats, and verified updates", 
   assert.match(updaterSource, /checksums\.txt/);
   assert.match(updaterSource, /SHA-256/);
   assert.match(iconSource, /<title>风暴之眼<\/title>/);
+  assert.match(builderConfig, /^mac:/m);
+  assert.match(builderConfig, /resources\/bin\/codebase-memory-mcp/);
+  assert.match(builderConfig, /THIRD_PARTY_NOTICES\.md/);
+  assert.match(builderConfig, /hardenedRuntime: false/);
+  assert.match(builderConfig, /CFBundleDisplayName: 风暴之眼/);
+  assert.match(builderConfig, /^dmg:/m);
+  assert.match(packageJson, /dist:mac:x64/);
+  assert.match(packageJson, /dist:mac:arm64/);
 });

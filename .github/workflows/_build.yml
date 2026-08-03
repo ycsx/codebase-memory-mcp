@@ -137,10 +137,88 @@ jobs:
         with:
           subject-path: codebase-memory-mcp-ui-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
 
+      - name: Build macOS Desktop DMG
+        if: startsWith(matrix.os, 'macos')
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_ARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p desktop/resources/bin
+          cp build/c/codebase-memory-mcp desktop/resources/bin/codebase-memory-mcp
+          chmod +x desktop/resources/bin/codebase-memory-mcp
+          scripts/gen-third-party-notices.sh desktop/resources/THIRD_PARTY_NOTICES.md
+
+          if [ -n "$RELEASE_VERSION" ]; then
+            npm --prefix desktop version "${RELEASE_VERSION#v}" --no-git-tag-version --allow-same-version
+          fi
+          npm --prefix desktop ci
+          npm --prefix desktop run check
+          npm --prefix desktop test
+
+          if [ "$RELEASE_ARCH" = "arm64" ]; then
+            npm --prefix desktop run dist:mac:arm64
+          else
+            npm --prefix desktop run dist:mac:x64
+          fi
+
+          DMG_COUNT=$(find desktop/dist -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')
+          if [ "$DMG_COUNT" -ne 1 ]; then
+            echo "Expected exactly one DMG, found $DMG_COUNT" >&2
+            find desktop/dist -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+          DMG_SOURCE=$(find desktop/dist -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          cp "$DMG_SOURCE" "codebase-memory-mcp-ui-darwin-${RELEASE_ARCH}.dmg"
+
+      - name: Verify macOS Desktop DMG
+        if: startsWith(matrix.os, 'macos')
+        env:
+          RELEASE_ARCH: ${{ matrix.goarch }}
+        run: |
+          DMG="codebase-memory-mcp-ui-darwin-${RELEASE_ARCH}.dmg"
+          MOUNT_DIR=$(mktemp -d)
+          cleanup() {
+            hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true
+            rmdir "$MOUNT_DIR" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_DIR" -quiet
+          APP=$(find "$MOUNT_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [ -z "$APP" ]; then
+            echo "DMG does not contain an application bundle" >&2
+            exit 1
+          fi
+
+          codesign --verify --deep --strict "$APP"
+          DESKTOP_BINARY="$APP/Contents/MacOS/Codebase Memory"
+          MCP_BINARY="$APP/Contents/Resources/bin/codebase-memory-mcp"
+          test -x "$DESKTOP_BINARY"
+          test -x "$MCP_BINARY"
+          test -f "$APP/Contents/Resources/LICENSE"
+          test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          "$MCP_BINARY" --version
+
+          if [ "$RELEASE_ARCH" = "arm64" ]; then
+            file "$DESKTOP_BINARY" | grep -q 'arm64'
+            file "$MCP_BINARY" | grep -q 'arm64'
+          else
+            file "$DESKTOP_BINARY" | grep -q 'x86_64'
+            file "$MCP_BINARY" | grep -q 'x86_64'
+          fi
+
+      - name: Attest macOS Desktop DMG provenance
+        if: ${{ inputs.attest && startsWith(matrix.os, 'macos') }}
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: codebase-memory-mcp-ui-darwin-${{ matrix.goarch }}.dmg
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: "*.tar.gz"
+          path: |
+            *.tar.gz
+            *.dmg
 
   build-windows:
     runs-on: windows-latest

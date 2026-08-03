@@ -4996,9 +4996,13 @@ TEST(tool_list_projects_ignores_missed_coverage_helper) {
                                    "\"params\":{\"name\":\"list_projects\",\"arguments\":{}}}");
     ASSERT_NOT_NULL(list);
     ASSERT_NOT_NULL(strstr(list, "remote-main"));
+    char *list_inner = extract_text_content(list);
+    ASSERT_NOT_NULL(list_inner);
+    ASSERT_NOT_NULL(strstr(list_inner, "\"indexed_at\":\""));
     ASSERT_NULL(strstr(list, "::missed"));
     ASSERT_NULL(strstr(list, "first-main"));
     ASSERT_NULL(strstr(list, "second-main"));
+    free(list_inner);
     free(list);
 
     char *query = cbm_mcp_server_handle(

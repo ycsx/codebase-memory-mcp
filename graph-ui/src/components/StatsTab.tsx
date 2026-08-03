@@ -5,6 +5,7 @@ import {
   AlertCircle,
   ArrowUpRight,
   CheckCircle2,
+  Clock3,
   Database,
   FolderGit2,
   FolderOpen,
@@ -20,9 +21,52 @@ import { callTool } from "../api/rpc";
 import { useProjects } from "../hooks/useProjects";
 import { colorForLabel } from "../lib/colors";
 import { useUiMessages } from "../lib/i18n";
+import { compareNames } from "../lib/sort";
 
 interface StatsTabProps {
   onSelectProject: (project: string) => void;
+}
+
+function formatIndexedAt(value?: string): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function IndexedAt({
+  value,
+  label,
+  missingLabel,
+}: {
+  value?: string;
+  label: string;
+  missingLabel: string;
+}) {
+  const formatted = formatIndexedAt(value);
+  return (
+    <div
+      className="inline-flex min-w-0 items-center gap-2 whitespace-nowrap text-[12px] text-foreground/45"
+      title={value || missingLabel}
+    >
+      <Clock3 className="h-4 w-4 shrink-0 text-foreground/35" aria-hidden="true" />
+      <span>{label}</span>
+      {formatted ? (
+        <time dateTime={value} className="font-mono tabular-nums text-foreground/65">
+          {formatted}
+        </time>
+      ) : (
+        <span className="text-foreground/30">{missingLabel}</span>
+      )}
+    </div>
+  );
 }
 
 /* ── Glowy health dot ───────────────────────────────────── */
@@ -265,7 +309,7 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
       if (data.error) throw new Error(data.error);
       lastBrowsedRef.current = data.path ?? "";
       setCurrentPath(data.path ?? "");
-      setDirs((data.dirs ?? []).sort());
+      setDirs((data.dirs ?? []).sort(compareNames));
       setRoots(data.roots ?? ["/"]);
       setParentPath(data.parent ?? "/");
     } catch (e) {
@@ -974,6 +1018,20 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
     return { projects: projects.length, nodes: totalNodes, edges: totalEdges };
   }, [projects]);
 
+  const latestIndexedAt = useMemo(() => {
+    let latest: string | undefined;
+    let latestMs = Number.NEGATIVE_INFINITY;
+    for (const item of projects) {
+      const value = item.project.indexed_at;
+      const milliseconds = value ? Date.parse(value) : Number.NaN;
+      if (!Number.isNaN(milliseconds) && milliseconds > latestMs) {
+        latest = value;
+        latestMs = milliseconds;
+      }
+    }
+    return latest;
+  }, [projects]);
+
   const deleteProject = useCallback(async (name: string) => {
     if (!confirm(t.projects.deleteConfirm(name))) return;
     setDeleteError(null);
@@ -1120,6 +1178,13 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
         <div className="mb-5 mt-7 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-[18px] font-semibold text-foreground/90">{t.projects.indexedProjects}</h2>
           <div className="flex flex-wrap items-center gap-2">
+            {projects.length > 0 && (
+              <IndexedAt
+                value={latestIndexedAt}
+                label={t.projects.latestReindex}
+                missingLabel={t.projects.noReindexRecord}
+              />
+            )}
             <button
               onClick={() => void updateAllProjects()}
               disabled={projects.length === 0 || Boolean(batchProgress) || updatingProjects.size > 0}
@@ -1172,6 +1237,11 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <IndexedAt
+                      value={p.project.indexed_at}
+                      label={t.projects.lastReindexed}
+                      missingLabel={t.projects.noReindexRecord}
+                    />
                     <AdrButton project={p.project.name} />
                     <button
                       onClick={() => void updateProject(p.project.name)}

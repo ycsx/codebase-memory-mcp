@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, act, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CrossRepositoryPanel, StatsTab, IndexProgress } from "./StatsTab";
 import { messages } from "../lib/i18n";
@@ -94,6 +94,34 @@ describe("StatsTab index modal", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Index beta" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Browse D:/" })).toBeInTheDocument();
+  });
+
+  it("sorts picker directories alphabetically without case sensitivity", async () => {
+    mockProjectsFetch((url) => {
+      if (!url.startsWith("/api/browse")) return undefined;
+      return new Response(JSON.stringify({
+        path: "/home/dev",
+        parent: "/home",
+        dirs: ["zeta", "Beta", "alpha10", "Alpha2"],
+        roots: ["/"],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+
+    render(<StatsTab onSelectProject={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Index your first repository" }));
+
+    const browseButtons = await Promise.all(
+      ["Alpha2", "alpha10", "Beta", "zeta"].map((name) =>
+        screen.findByRole("button", { name: `Browse ${name}` }),
+      ),
+    );
+    const displayedNames = browseButtons
+      .map((button) => button.parentElement)
+      .filter((row): row is HTMLElement => row !== null)
+      .sort((left, right) => left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)
+      .map((row) => within(row).getByRole("button", { name: /^Browse / }).textContent);
+
+    expect(displayedNames).toEqual(["/Alpha2", "/alpha10", "/Beta", "/zeta"]);
   });
 
   it("navigates Windows breadcrumb segments to real drive paths", async () => {
@@ -280,7 +308,7 @@ describe("StatsTab project updates", () => {
     vi.restoreAllMocks();
   });
 
-  function mockIndexedProjects(names: string[]) {
+  function mockIndexedProjects(names: string[], indexedAt: Record<string, string> = {}) {
     const updateRequests: string[] = [];
     const jobs = new Map<number, string>();
     let nextJobId = 10;
@@ -295,7 +323,11 @@ describe("StatsTab project updates", () => {
       if (url === "/rpc") {
         const request = JSON.parse(String(init?.body));
         const payload = request.params.name === "list_projects"
-          ? { projects: names.map((name) => ({ name, root_path: `C:/repo/${name}` })) }
+          ? { projects: names.map((name) => ({
+              name,
+              root_path: `C:/repo/${name}`,
+              indexed_at: indexedAt[name],
+            })) }
           : { node_labels: [{ label: "Function", count: 4 }], edge_types: [{ type: "CALLS", count: 3 }] };
         return new Response(JSON.stringify({
           result: { content: [{ text: JSON.stringify(payload) }] },
@@ -366,6 +398,25 @@ describe("StatsTab project updates", () => {
 
     expect(await screen.findByText(messages.en.projects.updateAllComplete(2, 2))).toBeInTheDocument();
     expect(updateRequests).toEqual(["alpha", "beta"]);
+  });
+
+  it("sorts projects case-insensitively and shows project and latest reindex times", async () => {
+    const older = "2026-08-01T02:03:00Z";
+    const newer = "2026-08-02T03:04:00Z";
+    mockIndexedProjects(
+      ["zeta", "Beta", "alpha10", "Alpha2"],
+      { zeta: older, Beta: newer, alpha10: older, Alpha2: older },
+    );
+
+    render(<StatsTab onSelectProject={() => {}} />);
+
+    const cards = await screen.findAllByRole("article");
+    expect(cards.map((card) => within(card).getByRole("heading", { level: 3 }).textContent))
+      .toEqual(["Alpha2", "alpha10", "Beta", "zeta"]);
+
+    expect(screen.getAllByText(messages.en.projects.lastReindexed)).toHaveLength(4);
+    expect(screen.getByText(messages.en.projects.latestReindex)).toBeInTheDocument();
+    expect(document.querySelector(`time[datetime="${newer}"]`)).toBeInTheDocument();
   });
 });
 

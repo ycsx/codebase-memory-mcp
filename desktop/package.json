@@ -14,7 +14,9 @@
     "pack:win": "electron-builder --win dir --x64",
     "pack:win:x64": "electron-builder --win dir --x64",
     "pack:win:arm64": "electron-builder --win dir --arm64",
-    "dist:win": "electron-builder --win nsis --x64"
+    "dist:win": "electron-builder --win nsis --x64",
+    "dist:mac:x64": "electron-builder --mac dmg --x64",
+    "dist:mac:arm64": "electron-builder --mac dmg --arm64"
   },
   "dependencies": {
     "lucide": "^0.577.0"

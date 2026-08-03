@@ -25,3 +25,22 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: Codebase Memory
   runAfterFinish: true
+mac:
+  icon: assets/icon.png
+  category: public.app-category.developer-tools
+  identity: "-"
+  hardenedRuntime: false
+  extendInfo:
+    CFBundleDisplayName: 风暴之眼
+    CFBundleName: 风暴之眼
+  target:
+    - dmg
+  extraResources:
+    - from: resources/bin/codebase-memory-mcp
+      to: bin/codebase-memory-mcp
+    - from: ../LICENSE
+      to: LICENSE
+    - from: resources/THIRD_PARTY_NOTICES.md
+      to: THIRD_PARTY_NOTICES.md
+dmg:
+  title: 风暴之眼 ${version}

@@ -1,0 +1,19 @@
+project_id,project,task,task_label,condition,request_tokens,output_tokens,full_output_tokens,exchange_tokens,output_chars,full_output_chars,output_truncated,output_lines,median_ms,min_ms,max_ms,output_sha256
+aikb-java,aikb-java (Java),architecture,架构摸底,baseline,123,19101,91763,19224,50040,246287,true,507,87.51,82.03,94.06,b80592dd76f77152befb67a5d39879a834d17defbd43c56e1c457e4e71b7bdf1
+aikb-java,aikb-java (Java),architecture,架构摸底,mcp,87,731,731,818,2133,2133,false,53,457.24,408.46,475.89,6a60db76e1d6afd7dbf9957bb7df41eb22d6a5540ff5a133ec0ed02011e6f090
+aikb-java,aikb-java (Java),definition,定义定位,baseline,136,16276,198841,16412,50040,606272,true,359,395.38,302.57,1260.14,4754709e060ae221026e49266ed261a7061ac4914536d00d421c99422e2730d5
+aikb-java,aikb-java (Java),definition,定义定位,mcp,142,105,105,247,338,338,false,6,157.29,140.29,311.43,f8614b4d46cc475b58a3f583517fd1ced978fbcda66cce6e3095ad1c258a2d1b
+aikb-java,aikb-java (Java),relations,两跳关系追踪,baseline,137,17149,633383,17286,50040,1904605,true,321,333.43,327.19,418.64,ff12e594caa2de142fa20dd186cfbd8cc3d326e0bbc5cec6e4c178a6fda0b2e0
+aikb-java,aikb-java (Java),relations,两跳关系追踪,mcp,132,4430,4430,4562,15832,15832,false,116,109.25,102.72,149.65,37b147b2a1526f1c6c3808ae9c56706b0b94f608b7085246abd23de6d23c045c
+aikb-web,aikb-web (Vue 2/JavaScript),architecture,架构摸底,baseline,136,17472,21542,17608,50040,63402,true,761,785.33,542.04,866.32,5ff0b123c73c1c44badae7866f2b78c07c5b1673f1ca1dd94de9c33d4b6c2029
+aikb-web,aikb-web (Vue 2/JavaScript),architecture,架构摸底,mcp,91,1625,1625,1716,4878,4878,false,74,371.07,269.46,417.41,5b950c2b6a7b3beed5d7d97ff82c211ccd85b95edf6ae9293b014c7b58d33bb4
+aikb-web,aikb-web (Vue 2/JavaScript),definition,定义定位,baseline,139,16092,18361,16231,50040,57041,true,508,425.39,347.61,573.31,0cdb3cc0affde6c1aa3feb1e0e2bee80c352c136f203b17a2fe7a63815e6d4ad1
+aikb-web,aikb-web (Vue 2/JavaScript),definition,定义定位,mcp,127,98,98,225,301,301,false,6,88.69,86.98,148.81,633926698ca03ce4907da0ba93439f912c67df6c16614259433dc6d724490cfb
+aikb-web,aikb-web (Vue 2/JavaScript),relations,两跳关系追踪,baseline,140,15626,53843,15766,50040,165169,true,493,531.15,479.01,582.26,68ed96e744f853f75e39bacbcd99052684545dcf061dfb7cc7f0ff0ac07d9efa
+aikb-web,aikb-web (Vue 2/JavaScript),relations,两跳关系追踪,mcp,124,117,117,241,368,368,false,9,128.39,77.24,132.09,32bfe78e7478c17d1ff13f9c87afe8de88065f003f2b146bec623c2f12f7682b
+cbm-c,codebase-memory-mcp (C/TypeScript),architecture,架构摸底,baseline,141,6617,6617,6758,19520,19520,false,663,71.03,68.5,71.5,f369c8487508b136ac94f9e3366a3bffadcd2fcd86464e48338acacb6884fade
+cbm-c,codebase-memory-mcp (C/TypeScript),architecture,架构摸底,mcp,87,1253,1253,1340,4462,4462,false,88,210.64,205.56,252.81,7ca4e77bf96436bdb7a8b07136725f80fedf4edce80b507133d3edec1d7a9f8b
+cbm-c,codebase-memory-mcp (C/TypeScript),definition,定义定位,baseline,122,225,225,347,552,552,false,12,153.64,131.36,181.47,7cc4de9f2bd06b4e984bf9d791891cb5d75bbf3003feeeb9d6aac2e203c97444
+cbm-c,codebase-memory-mcp (C/TypeScript),definition,定义定位,mcp,97,84,84,181,251,251,false,6,89.21,83.75,178.79,6d6a79addd27efdacead923dc4d29eb7bab6988b73c1820c150f88ab5f7274ed
+cbm-c,codebase-memory-mcp (C/TypeScript),relations,两跳关系追踪,baseline,123,776,776,899,1951,1951,false,36,161.48,154.28,164.83,51d8b36a0cfeb6ac7b70ffbfadc3463893dafbd11beda58a579cacd7aa669221
+cbm-c,codebase-memory-mcp (C/TypeScript),relations,两跳关系追踪,mcp,96,1751,1751,1847,6143,6143,false,92,72.9,72,88.95,36ee5be42e88ce8fb8dd0d5eda8ea6eae71b968b8ff593f3e15328237888b956

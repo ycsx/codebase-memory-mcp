@@ -38,7 +38,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 ## Why codebase-memory-mcp
 
 - **Extreme indexing speed** — Linux kernel (28M LOC, 75K files) in 3 minutes. RAM-first pipeline: LZ4 compression, in-memory SQLite, fused Aho-Corasick pattern matching. Memory released after indexing.
-- **Plug and play** — release binaries for macOS, Linux, and Windows on arm64 and amd64, plus a per-user Windows Desktop installer. No Docker, API keys, or language runtimes.
+- **Plug and play** — release binaries for macOS, Linux, and Windows on arm64 and amd64, plus Windows Setup and macOS DMG Desktop installers. No Docker, API keys, or language runtimes.
 - **158 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **43 supported automatic/conditional client surfaces** — `install` configures detected clients and safely activates conditional clients only when their documented platform, marker, or explicit existing config path is present. See [Multi-Agent Support](#multi-agent-support) for the complete matrix and manual/UI-only boundaries.
@@ -51,8 +51,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 The supported installation path uses the artifacts from the
 [latest GitHub Release](https://github.com/ycsx/codebase-memory-mcp/releases/latest).
 The shell and PowerShell installers detect the current architecture and verify the
-downloaded archive against `checksums.txt`; Windows Desktop setup packages are
-architecture-specific.
+downloaded archive against `checksums.txt`; Desktop packages are architecture-specific.
 
 ### macOS / Linux
 
@@ -71,14 +70,22 @@ curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/insta
 Available options are `--ui`, `--standard`, `--skip-config`, and `--dir=<path>`.
 On Linux, the script selects the fully static `-portable` asset for compatibility
 with older distributions. On macOS, it selects `arm64` for Apple Silicon and
-`amd64` for Intel. macOS release binaries are `.tar.gz` archives; this release
-does not include a `.dmg` or `.pkg` installer.
+`amd64` for Intel. macOS CLI and UI binaries are also available as `.tar.gz`
+archives. To install the Desktop app directly:
+
+- [Download macOS Apple Silicon DMG](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-darwin-arm64.dmg)
+- [Download macOS Intel DMG](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-darwin-amd64.dmg)
+
+The DMG contains an ad-hoc signed app and is not Apple-notarized yet, so Gatekeeper
+can require explicit confirmation on first launch. No `.pkg` installer is published.
 
 ### Windows
 
-Most Windows PCs use **AMD64**; Windows on Arm devices use **ARM64**. Download the
-matching `codebase-memory-mcp-ui-windows-<amd64|arm64>-setup.exe` from the
-[latest release](https://github.com/ycsx/codebase-memory-mcp/releases/latest).
+Most Windows PCs use **AMD64**; Windows on Arm devices use **ARM64**:
+
+- [Download Windows AMD64 Setup](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-amd64-setup.exe)
+- [Download Windows ARM64 Setup](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-arm64-setup.exe)
+
 The per-user installer needs no administrator rights, includes the MCP binary and
 the **风暴之眼** Desktop controller, creates application shortcuts, and offers to
 launch the Desktop app when setup completes. Indexes and settings are retained
@@ -138,7 +145,7 @@ The `install` command auto-detects installed coding agents and configures their 
 ### Graph Visualization UI
 
 The UI is included in every `codebase-memory-mcp-ui-*` release archive and in the
-Windows Desktop installer. It supports Chinese and English and provides:
+Windows/macOS Desktop installers. It supports Chinese and English and provides:
 
 - local-folder and Git-remote indexes, with per-index and sequential update-all actions
 - Git polling, index freshness/health status, and cross-repository linking
@@ -154,17 +161,17 @@ codebase-memory-mcp console --port=9749
 The command opens `http://127.0.0.1:9749` automatically and serves only on the
 loopback interface. Add `--no-open` for CI or headless environments.
 
-### Windows Desktop: 风暴之眼
+### Desktop: 风暴之眼
 
-The Windows setup installs **风暴之眼**, a system-tray Desktop controller for the
-local MCP console service. It can:
+Windows Setup and the macOS DMGs install **风暴之眼**, a system-tray Desktop
+controller for the local MCP console service. It can:
 
 - start, stop, and restart the service it manages, while treating externally started services as read-only
 - open **可视化分析** and show service state, PID, port, uptime, memory, and live logs
 - copy an AI connection prompt that assumes MCP is already installed and ready
 - summarize MCP invocation count and frequency at file level
-- check GitHub Releases for updates, download the matching AMD64/ARM64 installer,
-  verify SHA-256, stop the managed service, install, and relaunch the Desktop app
+- on Windows, check GitHub Releases for updates, download the matching AMD64/ARM64
+  installer, verify SHA-256, stop the managed service, install, and relaunch the app
 
 The service listens on loopback only and uses port `9749` by default. Automatic
 Desktop installation updates are currently Windows-only.
@@ -329,24 +336,28 @@ When you open a memory/performance issue, **attach the `.ndjson` trajectory** �
 
 ## Installation
 
-### Published v0.9.0 Release Assets
+### Latest Release Downloads
 
-The [v0.9.0 release](https://github.com/ycsx/codebase-memory-mcp/releases/tag/v0.9.0)
-publishes the following binaries:
+These links always point to the matching asset in the
+[latest release](https://github.com/ycsx/codebase-memory-mcp/releases/latest).
+The DMG links become active after a release built with the updated workflow is
+published; earlier releases, including
+[v0.9.0](https://github.com/ycsx/codebase-memory-mcp/releases/tag/v0.9.0),
+do not contain them.
 
 | Platform | Standard | With Graph UI | Desktop installer |
 |----------|----------|---------------|-------------------|
-| macOS (Apple Silicon) | `codebase-memory-mcp-darwin-arm64.tar.gz` | `codebase-memory-mcp-ui-darwin-arm64.tar.gz` | — |
-| macOS (Intel) | `codebase-memory-mcp-darwin-amd64.tar.gz` | `codebase-memory-mcp-ui-darwin-amd64.tar.gz` | — |
-| Linux (x86_64) | `codebase-memory-mcp-linux-amd64.tar.gz`<br>`codebase-memory-mcp-linux-amd64-portable.tar.gz` | `codebase-memory-mcp-ui-linux-amd64.tar.gz`<br>`codebase-memory-mcp-ui-linux-amd64-portable.tar.gz` | — |
-| Linux (ARM64) | `codebase-memory-mcp-linux-arm64.tar.gz`<br>`codebase-memory-mcp-linux-arm64-portable.tar.gz` | `codebase-memory-mcp-ui-linux-arm64.tar.gz`<br>`codebase-memory-mcp-ui-linux-arm64-portable.tar.gz` | — |
-| Windows (AMD64) | `codebase-memory-mcp-windows-amd64.zip` | `codebase-memory-mcp-ui-windows-amd64.zip` | `codebase-memory-mcp-ui-windows-amd64-setup.exe` |
-| Windows (ARM64) | `codebase-memory-mcp-windows-arm64.zip` | `codebase-memory-mcp-ui-windows-arm64.zip` | `codebase-memory-mcp-ui-windows-arm64-setup.exe` |
+| macOS (Apple Silicon) | [Standard `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-darwin-arm64.tar.gz) | [UI `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-darwin-arm64.tar.gz) | [Desktop `.dmg` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-darwin-arm64.dmg) |
+| macOS (Intel) | [Standard `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-darwin-amd64.tar.gz) | [UI `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-darwin-amd64.tar.gz) | [Desktop `.dmg` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-darwin-amd64.dmg) |
+| Linux (x86_64) | [Portable `.tar.gz` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-amd64-portable.tar.gz)<br>[glibc `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-amd64.tar.gz) | [Portable UI `.tar.gz` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-linux-amd64-portable.tar.gz)<br>[glibc UI `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-linux-amd64.tar.gz) | — |
+| Linux (ARM64) | [Portable `.tar.gz` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-arm64-portable.tar.gz)<br>[glibc `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-arm64.tar.gz) | [Portable UI `.tar.gz` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-linux-arm64-portable.tar.gz)<br>[glibc UI `.tar.gz`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-linux-arm64.tar.gz) | — |
+| Windows (AMD64) | [Standard `.zip`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-windows-amd64.zip) | [UI `.zip`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-amd64.zip) | [Setup `.exe` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-amd64-setup.exe) |
+| Windows (ARM64) | [Standard `.zip`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-windows-arm64.zip) | [UI `.zip`](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-arm64.zip) | [Setup `.exe` (recommended)](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-arm64-setup.exe) |
 
-The release also includes `checksums.txt`, Sigstore `.bundle` files, `sbom.json`,
-`LICENSE`, and `THIRD_PARTY_NOTICES.md`. The shell installer chooses Linux
-`-portable` assets automatically. macOS currently uses archives rather than a
-native `.dmg` or `.pkg` installer.
+The release also includes [checksums.txt](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/checksums.txt),
+Sigstore `.bundle` files, `sbom.json`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`.
+The shell installer chooses Linux `-portable` assets automatically. macOS Desktop
+uses DMG, while command-line installation continues to use the `.tar.gz` archives.
 
 > **Windows note**: SmartScreen may show a warning for unsigned software. Click **"More info"** → **"Run anyway"**. Verify integrity with `checksums.txt`.
 

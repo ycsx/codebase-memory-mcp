@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { callTool } from "../api/rpc";
 import type { Project, SchemaInfo } from "../lib/types";
+import { compareNames } from "../lib/sort";
 
 interface ProjectInfo {
   project: Project;
@@ -40,7 +41,9 @@ export function useProjects(): UseProjectsResult {
         }),
       );
 
-      setProjects(infos);
+      setProjects(infos.sort((left, right) =>
+        compareNames(left.project.name, right.project.name),
+      ));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch projects");
     } finally {
