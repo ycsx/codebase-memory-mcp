@@ -59,10 +59,11 @@ test("macOS packaged binary is discovered inside app resources", () => {
 
 test("configured port validates JSON and valid TCP range", () => {
   const env = { USERPROFILE: "C:\\Users\\test" };
-  assert.equal(configPath({ env }), "C:\\Users\\test\\.cache\\codebase-memory-mcp\\config.json");
-  assert.equal(readConfiguredPort({ env, readFileSync: () => '{"ui_port":61401}' }), 61401);
-  assert.equal(readConfiguredPort({ env, readFileSync: () => '{"ui_port":70000}' }), DEFAULT_PORT);
-  assert.equal(readConfiguredPort({ env, readFileSync: () => "broken" }), DEFAULT_PORT);
+  const options = { env, platform: "win32" };
+  assert.equal(configPath(options), "C:\\Users\\test\\.cache\\codebase-memory-mcp\\config.json");
+  assert.equal(readConfiguredPort({ ...options, readFileSync: () => '{"ui_port":61401}' }), 61401);
+  assert.equal(readConfiguredPort({ ...options, readFileSync: () => '{"ui_port":70000}' }), DEFAULT_PORT);
+  assert.equal(readConfiguredPort({ ...options, readFileSync: () => "broken" }), DEFAULT_PORT);
 });
 
 test("health classification distinguishes owned and external services", () => {

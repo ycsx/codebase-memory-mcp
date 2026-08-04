@@ -156,7 +156,10 @@ class ServiceManager extends EventEmitter {
       env: this.env,
       platform: this.platform,
     }));
-    this.readPort = options.readPort ?? (() => readConfiguredPort({ env: this.env }));
+    this.readPort = options.readPort ?? (() => readConfiguredPort({
+      env: this.env,
+      platform: this.platform,
+    }));
     this.child = null;
     this.binaryPath = this.resolveBinary();
     this.port = this.readPort();

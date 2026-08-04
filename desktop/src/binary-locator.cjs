@@ -8,29 +8,34 @@ function binaryName(platform = process.platform) {
   return platform === "win32" ? "codebase-memory-mcp.exe" : "codebase-memory-mcp";
 }
 
+function pathForPlatform(platform = process.platform) {
+  return platform === "win32" ? path.win32 : path.posix;
+}
+
 function binaryCandidates(options = {}) {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
+  const platformPath = pathForPlatform(platform);
   const appPath = options.appPath ?? path.resolve(__dirname, "..");
   const resourcesPath = options.resourcesPath ?? process.resourcesPath;
   const name = binaryName(platform);
   const candidates = [];
 
   if (env.CBM_BINARY) {
-    candidates.push(path.resolve(env.CBM_BINARY));
+    candidates.push(platformPath.resolve(env.CBM_BINARY));
   }
   if (resourcesPath) {
-    candidates.push(path.resolve(resourcesPath, "..", "..", name));
+    candidates.push(platformPath.resolve(resourcesPath, "..", "..", name));
   }
   if (env.LOCALAPPDATA) {
     candidates.push(
-      path.join(env.LOCALAPPDATA, "Programs", "codebase-memory-mcp", name),
+      platformPath.join(env.LOCALAPPDATA, "Programs", "codebase-memory-mcp", name),
     );
   }
   if (resourcesPath) {
-    candidates.push(path.join(resourcesPath, "bin", name));
+    candidates.push(platformPath.join(resourcesPath, "bin", name));
   }
-  candidates.push(path.resolve(appPath, "..", "build", "c", name));
+  candidates.push(platformPath.resolve(appPath, "..", "build", "c", name));
 
   return [...new Set(candidates)];
 }
@@ -42,12 +47,14 @@ function resolveBinaryPath(options = {}) {
 
 function configPath(options = {}) {
   const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const platformPath = pathForPlatform(platform);
   if (env.CBM_CACHE_DIR) {
-    return path.join(path.resolve(env.CBM_CACHE_DIR), "config.json");
+    return platformPath.join(platformPath.resolve(env.CBM_CACHE_DIR), "config.json");
   }
 
   const home = options.home ?? env.HOME ?? env.USERPROFILE ?? os.homedir();
-  return path.join(home, ".cache", "codebase-memory-mcp", "config.json");
+  return platformPath.join(home, ".cache", "codebase-memory-mcp", "config.json");
 }
 
 function readConfiguredPort(options = {}) {
