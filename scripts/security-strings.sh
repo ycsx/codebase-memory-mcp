@@ -105,13 +105,29 @@ ALLOWED_URLS=(
     "https://github.com/lojjic"
 )
 
+# Exact system metadata identifiers. Keep these separate from prefix rules so
+# a trusted schema URL does not allow arbitrary endpoints on the same host.
+ALLOWED_EXACT_URLS=(
+    # Standard DTD embedded in macOS property lists inside generated DMGs.
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd"
+)
+
 while IFS= read -r url; do
     # Skip short false positives from binary data (e.g. "https://H9")
     if [[ ${#url} -lt 15 ]]; then
         continue
     fi
     allowed=false
+    for exact in "${ALLOWED_EXACT_URLS[@]}"; do
+        if [[ "$url" == "$exact" ]]; then
+            allowed=true
+            break
+        fi
+    done
     for prefix in "${ALLOWED_URLS[@]}"; do
+        if $allowed; then
+            break
+        fi
         if [[ "$url" == "$prefix"* ]]; then
             allowed=true
             break

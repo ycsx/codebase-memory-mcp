@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression guard: scripts/security-strings.sh must allow-list inert URLs
-# embedded by the Windows toolchain and installer generator.
+# embedded by platform toolchains and installer generators.
 #
 # Reproduces the smoke-windows dry-run failure:
 #   BLOCKED: Unauthorized URL in binary: https://github.com/msys2/MINGW-packages
@@ -64,7 +64,33 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Case 3: unauthorized URL must still be blocked.
+# Case 3: Apple's standard property-list DTD embedded in DMGs must pass.
+APPLE_PLIST="$TMP/apple-plist.bin"
+make_fixture "$APPLE_PLIST" \
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd"
+if bash "$SCRIPT" "$APPLE_PLIST" >/dev/null 2>&1; then
+    echo "PASS: Apple property-list DTD is allow-listed"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: security-strings.sh blocked the Apple property-list DTD"
+    bash "$SCRIPT" "$APPLE_PLIST" 2>&1 | grep -i "BLOCKED" || true
+    FAIL=$((FAIL + 1))
+fi
+
+# Case 4: another URL on apple.com must still be blocked. This proves the DTD
+# exception is exact and does not allow the host as a prefix.
+APPLE_OTHER="$TMP/apple-other.bin"
+make_fixture "$APPLE_OTHER" \
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd.evil"
+if bash "$SCRIPT" "$APPLE_OTHER" >/dev/null 2>&1; then
+    echo "FAIL: non-DTD Apple URL was NOT blocked (audit weakened)"
+    FAIL=$((FAIL + 1))
+else
+    echo "PASS: non-DTD Apple URL still blocked"
+    PASS=$((PASS + 1))
+fi
+
+# Case 5: unauthorized URL must still be blocked.
 BAD="$TMP/bad.bin"
 make_fixture "$BAD" "https://evil.example.com/exfil-payload-endpoint"
 if bash "$SCRIPT" "$BAD" >/dev/null 2>&1; then
