@@ -87,4 +87,9 @@ bash "$ROOT/tests/test_worker_watchdog.sh"
 echo "=== Step 6: security-strings allow-list regression ==="
 bash "$ROOT/tests/test_security_strings_allowlist.sh"
 
+# Step 6b: VirusTotal result polling must reuse reports for identical bytes,
+# enforce the engine floor, and stop cleanly when an analysis remains queued.
+echo "=== Step 6b: VirusTotal polling regression ==="
+bash "$ROOT/tests/test_check_virustotal.sh"
+
 echo "=== All tests passed ==="

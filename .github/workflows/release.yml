@@ -297,6 +297,10 @@ jobs:
         with:
           vt_api_key: ${{ secrets.VIRUS_TOTAL_SCANNER_API_KEY }}
           files: binaries/*
+          # Stay within VirusTotal's public API request budget. The action's
+          # default (0) does not throttle uploads, which can leave later files
+          # queued indefinitely after a large multi-platform release.
+          request_rate: 4
 
       - name: Wait for VirusTotal results
         env:
@@ -311,7 +315,7 @@ jobs:
         run: |
           # Hash the extracted binaries (not the archives — VT indexes binary hashes)
           TABLE="\n\n## Security Verification\n\n"
-          TABLE+="All release binaries scanned with 70+ antivirus engines — **0 detections**.\n\n"
+          TABLE+="All release binaries scanned with 60+ antivirus engines — **0 detections**.\n\n"
           TABLE+="| Binary | SHA-256 | VirusTotal |\n"
           TABLE+="|--------|---------|------------|\n"
 
