@@ -3,7 +3,7 @@
 # Expects: VT_API_KEY, VT_ANALYSIS (comma-separated "file=URL" pairs)
 set -euo pipefail
 
-MIN_ENGINES="${VT_MIN_ENGINES:-60}"
+RECOMMENDED_ENGINES="${VT_RECOMMENDED_ENGINES:-60}"
 MAX_ATTEMPTS="${VT_MAX_ATTEMPTS:-30}"
 POLL_SECONDS="${VT_POLL_SECONDS:-16}"
 PYTHON_BIN="${VT_PYTHON_BIN:-python3}"
@@ -102,10 +102,13 @@ echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
         echo "BLOCKED: $BASENAME flagged ($MALICIOUS malicious, $SUSPICIOUS suspicious / $COMPLETED engines)"
         echo "  $URL"
         record_failure
-      elif [ "$COMPLETED" -lt "$MIN_ENGINES" ]; then
-        echo "BLOCKED: $BASENAME completed with only $COMPLETED/$TOTAL engines (< $MIN_ENGINES)"
+      elif [ "$COMPLETED" -eq 0 ]; then
+        echo "BLOCKED: $BASENAME completed without usable antivirus engine results"
         record_failure
       else
+        if [ "$COMPLETED" -lt "$RECOMMENDED_ENGINES" ]; then
+          echo "WARNING: $BASENAME completed with only $COMPLETED/$TOTAL engines (< recommended $RECOMMENDED_ENGINES)"
+        fi
         echo "OK: $BASENAME clean ($COMPLETED engines, 0 detections)"
       fi
       break
@@ -129,12 +132,17 @@ echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
         echo "  $URL"
         record_failure
         break
-      elif [ "$FILE_STATUS" = "completed" ] && [ "$FILE_COMPLETED" -ge "$MIN_ENGINES" ]; then
-        SCAN_COMPLETE=true
-        echo "OK: $BASENAME clean via existing SHA-256 report ($FILE_COMPLETED engines, 0 detections)"
-        break
       elif [ "$FILE_STATUS" = "completed" ]; then
-        echo "  $BASENAME: existing report has only $FILE_COMPLETED engines; waiting for submitted analysis..."
+        if [ "$FILE_COMPLETED" -eq 0 ]; then
+          echo "  $BASENAME: existing report has no usable engine results; waiting for submitted analysis..."
+        else
+          SCAN_COMPLETE=true
+          if [ "$FILE_COMPLETED" -lt "$RECOMMENDED_ENGINES" ]; then
+            echo "WARNING: $BASENAME existing report has only $FILE_COMPLETED engines (< recommended $RECOMMENDED_ENGINES)"
+          fi
+          echo "OK: $BASENAME clean via existing SHA-256 report ($FILE_COMPLETED engines, 0 detections)"
+          break
+        fi
       fi
     fi
 

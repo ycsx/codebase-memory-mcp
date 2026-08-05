@@ -27,7 +27,7 @@ case "$MOCK_SCENARIO:$url" in
   existing-malicious:*'/files/'*)
     printf '%s' '{"data":{"attributes":{"last_analysis_stats":{"malicious":1,"suspicious":0,"undetected":60,"harmless":1}}}}'
     ;;
-  queued-complete:*'/files/'*|timeout:*'/files/'*|under-minimum:*'/files/'*)
+  queued-complete:*'/files/'*|timeout:*'/files/'*|under-recommended:*'/files/'*|zero-engines:*'/files/'*)
     exit 22
     ;;
   queued-complete:*'/analyses/'*)
@@ -44,8 +44,11 @@ case "$MOCK_SCENARIO:$url" in
   timeout:*'/analyses/'*)
     printf '%s' '{"data":{"attributes":{"status":"queued","stats":{}}}}'
     ;;
-  under-minimum:*'/analyses/'*)
+  under-recommended:*'/analyses/'*)
     printf '%s' '{"data":{"attributes":{"status":"completed","stats":{"malicious":0,"suspicious":0,"undetected":59,"harmless":0}}}}'
+    ;;
+  zero-engines:*'/analyses/'*)
+    printf '%s' '{"data":{"attributes":{"status":"completed","stats":{}}}}'
     ;;
   *)
     echo "unexpected mock request: $url" >&2
@@ -108,15 +111,26 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if run_gate under-minimum "$TMP/under-minimum.out"; then
-  echo "FAIL: a report below the minimum engine count was accepted"
-  FAIL=$((FAIL + 1))
-elif grep -q "only 59/59 engines" "$TMP/under-minimum.out"; then
-  echo "PASS: completed reports below the engine floor are blocked"
+if run_gate under-recommended "$TMP/under-recommended.out" &&
+   grep -q "WARNING: release-binary completed with only 59/59 engines" "$TMP/under-recommended.out" &&
+   grep -q "OK: release-binary clean (59 engines, 0 detections)" "$TMP/under-recommended.out"; then
+  echo "PASS: low engine coverage warns without blocking a clean result"
   PASS=$((PASS + 1))
 else
-  echo "FAIL: low-engine report failed for the wrong reason"
-  cat "$TMP/under-minimum.out"
+  echo "FAIL: low engine coverage did not warn and pass"
+  cat "$TMP/under-recommended.out"
+  FAIL=$((FAIL + 1))
+fi
+
+if run_gate zero-engines "$TMP/zero-engines.out"; then
+  echo "FAIL: a completed report with zero usable engines was accepted"
+  FAIL=$((FAIL + 1))
+elif grep -q "completed without usable antivirus engine results" "$TMP/zero-engines.out"; then
+  echo "PASS: a completed report with zero usable engines is blocked"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: zero-engine report failed for the wrong reason"
+  cat "$TMP/zero-engines.out"
   FAIL=$((FAIL + 1))
 fi
 

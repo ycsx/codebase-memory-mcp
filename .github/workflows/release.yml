@@ -315,7 +315,7 @@ jobs:
         run: |
           # Hash the extracted binaries (not the archives — VT indexes binary hashes)
           TABLE="\n\n## Security Verification\n\n"
-          TABLE+="All release binaries scanned with 60+ antivirus engines — **0 detections**.\n\n"
+          TABLE+="All release files passed VirusTotal verification — **0 detections**.\n\n"
           TABLE+="| Binary | SHA-256 | VirusTotal |\n"
           TABLE+="|--------|---------|------------|\n"
 
