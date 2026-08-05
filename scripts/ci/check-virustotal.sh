@@ -108,64 +108,58 @@ echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
       echo "  $BASENAME: API unavailable or rate-limited (attempt $attempt/$MAX_ATTEMPTS)..."
     else
       STATS=$(echo "$RESULT" | parse_stats analysis || echo "queued,0,0,0,0")
-
       STATUS=$(echo "$STATS" | cut -d',' -f1)
       MALICIOUS=$(echo "$STATS" | cut -d',' -f2)
       SUSPICIOUS=$(echo "$STATS" | cut -d',' -f3)
       COMPLETED=$(echo "$STATS" | cut -d',' -f4)
       TOTAL=$(echo "$STATS" | cut -d',' -f5)
 
-    STATUS=$(echo "$STATS" | cut -d',' -f1)
-    MALICIOUS=$(echo "$STATS" | cut -d',' -f2)
-    SUSPICIOUS=$(echo "$STATS" | cut -d',' -f3)
-    COMPLETED=$(echo "$STATS" | cut -d',' -f4)
-    TOTAL=$(echo "$STATS" | cut -d',' -f5)
-
-    if [ "$STATUS" = "completed" ]; then
-      SCAN_COMPLETE=true
-      if [ "$MALICIOUS" -gt 0 ] || [ "$SUSPICIOUS" -gt 0 ]; then
-        echo "BLOCKED: $BASENAME flagged ($MALICIOUS malicious, $SUSPICIOUS suspicious / $COMPLETED engines)"
-        echo "  $URL"
-        record_failure
-      elif [ "$COMPLETED" -eq 0 ]; then
-        echo "BLOCKED: $BASENAME completed without usable antivirus engine results"
-        record_failure
-      else
-        if [ "$COMPLETED" -lt "$RECOMMENDED_ENGINES" ]; then
-          echo "WARNING: $BASENAME completed with only $COMPLETED/$TOTAL engines (< recommended $RECOMMENDED_ENGINES)"
-        fi
-        echo "OK: $BASENAME clean ($COMPLETED engines, 0 detections)"
-      fi
-    fi
-
-    # Check immutable file report by SHA256 once while the analysis is queued
-    if [ "$REPORT_CHECKED" = "false" ] && [ -n "$SHA256" ]; then
-      REPORT_CHECKED=true
-      FILE_RESULT=$(fetch_vt "files/$SHA256")
-      FILE_STATS=$(echo "$FILE_RESULT" | parse_stats file || echo "unknown,0,0,0,0")
-      FILE_STATUS=$(echo "$FILE_STATS" | cut -d',' -f1)
-      FILE_MALICIOUS=$(echo "$FILE_STATS" | cut -d',' -f2)
-      FILE_SUSPICIOUS=$(echo "$FILE_STATS" | cut -d',' -f3)
-      FILE_COMPLETED=$(echo "$FILE_STATS" | cut -d',' -f4)
-
-      FILE_TOTAL_POS=$((FILE_MALICIOUS + FILE_SUSPICIOUS))
-
-      if [ "$FILE_TOTAL_POS" -gt "$VT_MAX_DETECTIONS" ]; then
+      if [ "$STATUS" = "completed" ]; then
         SCAN_COMPLETE=true
-        echo "BLOCKED: $BASENAME existing SHA-256 report flagged ($FILE_MALICIOUS malicious, $FILE_SUSPICIOUS suspicious / $FILE_COMPLETED engines)"
-        echo "  $URL"
-        record_failure
-        break
-      elif [ "$FILE_STATUS" = "completed" ]; then
-        if [ "$FILE_COMPLETED" -eq 0 ]; then
-          echo "  $BASENAME: existing report has no usable engine results; waiting for submitted analysis..."
+        if [ "$MALICIOUS" -gt 0 ] || [ "$SUSPICIOUS" -gt 0 ]; then
+          echo "BLOCKED: $BASENAME flagged ($MALICIOUS malicious, $SUSPICIOUS suspicious / $COMPLETED engines)"
+          echo "  $URL"
+          record_failure
+        elif [ "$COMPLETED" -eq 0 ]; then
+          echo "BLOCKED: $BASENAME completed without usable antivirus engine results"
+          record_failure
         else
-          SCAN_COMPLETE=true
-          if [ "$FILE_COMPLETED" -lt "$RECOMMENDED_ENGINES" ]; then
-            echo "WARNING: $BASENAME existing report has only $FILE_COMPLETED engines (< recommended $RECOMMENDED_ENGINES)"
+          if [ "$COMPLETED" -lt "$RECOMMENDED_ENGINES" ]; then
+            echo "WARNING: $BASENAME completed with only $COMPLETED/$TOTAL engines (< recommended $RECOMMENDED_ENGINES)"
           fi
-          echo "OK: $BASENAME clean via existing SHA-256 report ($FILE_COMPLETED engines, 0 detections)"
+          echo "OK: $BASENAME clean ($COMPLETED engines, 0 detections)"
+        fi
+      fi
+
+      # Check immutable file report by SHA256 once while the analysis is queued
+      if [ "$REPORT_CHECKED" = "false" ] && [ -n "$SHA256" ]; then
+        REPORT_CHECKED=true
+        FILE_RESULT=$(fetch_vt "files/$SHA256")
+        FILE_STATS=$(echo "$FILE_RESULT" | parse_stats file || echo "unknown,0,0,0,0")
+        FILE_STATUS=$(echo "$FILE_STATS" | cut -d',' -f1)
+        FILE_MALICIOUS=$(echo "$FILE_STATS" | cut -d',' -f2)
+        FILE_SUSPICIOUS=$(echo "$FILE_STATS" | cut -d',' -f3)
+        FILE_COMPLETED=$(echo "$FILE_STATS" | cut -d',' -f4)
+
+        FILE_TOTAL_POS=$((FILE_MALICIOUS + FILE_SUSPICIOUS))
+
+        if [ "$FILE_TOTAL_POS" -gt "$VT_MAX_DETECTIONS" ]; then
+          SCAN_COMPLETE=true
+          echo "BLOCKED: $BASENAME existing SHA-256 report flagged ($FILE_MALICIOUS malicious, $FILE_SUSPICIOUS suspicious / $FILE_COMPLETED engines)"
+          echo "  $URL"
+          record_failure
           break
+        elif [ "$FILE_STATUS" = "completed" ]; then
+          if [ "$FILE_COMPLETED" -eq 0 ]; then
+            echo "  $BASENAME: existing report has no usable engine results; waiting for submitted analysis..."
+          else
+            SCAN_COMPLETE=true
+            if [ "$FILE_COMPLETED" -lt "$RECOMMENDED_ENGINES" ]; then
+              echo "WARNING: $BASENAME existing report has only $FILE_COMPLETED engines (< recommended $RECOMMENDED_ENGINES)"
+            fi
+            echo "OK: $BASENAME clean via existing SHA-256 report ($FILE_COMPLETED engines, 0 detections)"
+            break
+          fi
         fi
       fi
     fi
