@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Wait for VirusTotal scans to complete and check results.
-# Expects: VT_API_KEY, VT_ANALYSIS (comma-separated "file=URL" pairs)
+# Expects: VT_API_KEY, VT_ANALYSIS (comma-separated "file=URL" pairs or "file=analysis_id"),
+# Optional: VT_MIN_ENGINES (default 60), VT_MAX_DETECTIONS (default 0), VT_POLL_SECONDS (default 16), VT_MAX_ATTEMPTS (default 30)
 set -euo pipefail
 
 RECOMMENDED_ENGINES="${VT_RECOMMENDED_ENGINES:-60}"
 MAX_ATTEMPTS="${VT_MAX_ATTEMPTS:-30}"
 POLL_SECONDS="${VT_POLL_SECONDS:-16}"
 PYTHON_BIN="${VT_PYTHON_BIN:-python3}"
+VT_MAX_DETECTIONS="${VT_MAX_DETECTIONS:-0}"
 FAIL_FILE=$(mktemp)
 trap 'rm -f "$FAIL_FILE"' EXIT
 
@@ -22,6 +24,7 @@ if kind == "analysis":
     status = attrs.get("status", "queued")
     stats = attrs.get("stats", {})
 else:
+    # file report
     stats = attrs.get("last_analysis_stats", {})
     status = "completed" if stats else "unknown"
 
@@ -30,15 +33,13 @@ suspicious = stats.get("suspicious", 0)
 completed = sum(stats.get(key, 0) for key in (
     "malicious", "suspicious", "undetected", "harmless"
 ))
-total = sum(stats.values())
+total = sum(stats.values()) if isinstance(stats, dict) else 0
 print(f"{status},{malicious},{suspicious},{completed},{total}")
 ' "$kind" 2>/dev/null
 }
 
 fetch_vt() {
   local endpoint="$1"
-  # Throttle every API call, including SHA-256 fallbacks, so the whole script
-  # stays below the four-requests-per-minute public API limit.
   if [ "$POLL_SECONDS" != "0" ]; then
     sleep "$POLL_SECONDS"
   fi
@@ -53,42 +54,66 @@ record_failure() {
 
 echo "=== Waiting for VirusTotal scans to fully complete ==="
 
+# VT_ANALYSIS may be comma-separated entries of the form:
+#  <file>=<url>
+#  <file>=<analysis_id>
+#  <file>=<vt-file-sha256>
+# The old action sometimes uses /file-analysis/<id>/ or /analyses/<id>
+
 echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
   [ -z "$entry" ] && continue
   FILE=$(echo "$entry" | cut -d'=' -f1)
   URL=$(echo "$entry" | cut -d'=' -f2-)
   BASENAME=$(basename "$FILE")
 
-  # Extract base64 analysis ID from URL
-  ANALYSIS_ID=$(echo "$URL" | sed -n 's|.*/file-analysis/\([^/]*\)/.*|\1|p')
+  # Try to extract an analysis ID (base64-like) first
+  ANALYSIS_ID=""
+  if echo "$URL" | grep -qE '/file-analysis/|/analyses/'; then
+    ANALYSIS_ID=$(echo "$URL" | sed -n 's|.*/\(file-analysis\|analyses\)/\([^/?#]*\).*|\2|p')
+  fi
+
+  # If not found, maybe the entry is just the id or a raw sha256
   if [ -z "$ANALYSIS_ID" ]; then
-    ANALYSIS_ID=$(echo "$URL" | grep -oE '[a-f0-9]{64}')
-    if [ -z "$ANALYSIS_ID" ]; then
-      echo "BLOCKED: Cannot parse VirusTotal URL: $URL"
-      record_failure
-      continue
+    # If URL looks like a 64-hex sha256, use that as SHA256 lookup fallback
+    if echo "$URL" | grep -qE '^[A-Fa-f0-9]{64}$'; then
+      POSSIBLE_SHA="$URL"
+    else
+      POSSIBLE_SHA=""
     fi
+  else
+    POSSIBLE_SHA=""
+  fi
+
+  if [ -z "$ANALYSIS_ID" ] && [ -z "$POSSIBLE_SHA" ]; then
+    # Maybe the action returned a short analysis URL that doesn't include the
+    # analysis id. Try to extract any 64-char hex from the URL as fallback.
+    POSSIBLE_SHA=$(echo "$URL" | grep -oE '[A-Fa-f0-9]{64}' || true)
   fi
 
   SCAN_COMPLETE=false
   SHA256=""
   if [ -f "$FILE" ]; then
-    SHA256=$(sha256sum "$FILE" 2>/dev/null | awk '{print $1}')
+    SHA256=$(sha256sum "$FILE" 2>/dev/null | awk '{print $1}' || true)
   fi
   REPORT_CHECKED=false
 
-  # The default interval stays below four API requests per minute. A single
-  # stuck analysis has a bounded eight-minute wait instead of occupying a
-  # runner for hours.
   for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-    RESULT=$(fetch_vt "analyses/$ANALYSIS_ID")
+    if [ -n "$ANALYSIS_ID" ]; then
+      RESULT=$(fetch_vt "analyses/$ANALYSIS_ID")
+    else
+      RESULT=""
+    fi
 
     if [ -z "$RESULT" ]; then
       echo "  $BASENAME: API unavailable or rate-limited (attempt $attempt/$MAX_ATTEMPTS)..."
-      continue
-    fi
+    else
+      STATS=$(echo "$RESULT" | parse_stats analysis || echo "queued,0,0,0,0")
 
-    STATS=$(echo "$RESULT" | parse_stats analysis || echo "queued,0,0,0,0")
+      STATUS=$(echo "$STATS" | cut -d',' -f1)
+      MALICIOUS=$(echo "$STATS" | cut -d',' -f2)
+      SUSPICIOUS=$(echo "$STATS" | cut -d',' -f3)
+      COMPLETED=$(echo "$STATS" | cut -d',' -f4)
+      TOTAL=$(echo "$STATS" | cut -d',' -f5)
 
     STATUS=$(echo "$STATS" | cut -d',' -f1)
     MALICIOUS=$(echo "$STATS" | cut -d',' -f2)
@@ -111,12 +136,9 @@ echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
         fi
         echo "OK: $BASENAME clean ($COMPLETED engines, 0 detections)"
       fi
-      break
     fi
 
-    # A re-upload can remain queued even though VirusTotal already has a full
-    # report for these exact bytes. Check that immutable SHA-256 report once,
-    # only after the submitted analysis proves it is still queued.
+    # Check immutable file report by SHA256 once while the analysis is queued
     if [ "$REPORT_CHECKED" = "false" ] && [ -n "$SHA256" ]; then
       REPORT_CHECKED=true
       FILE_RESULT=$(fetch_vt "files/$SHA256")
@@ -126,7 +148,9 @@ echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
       FILE_SUSPICIOUS=$(echo "$FILE_STATS" | cut -d',' -f3)
       FILE_COMPLETED=$(echo "$FILE_STATS" | cut -d',' -f4)
 
-      if [ "$FILE_MALICIOUS" -gt 0 ] || [ "$FILE_SUSPICIOUS" -gt 0 ]; then
+      FILE_TOTAL_POS=$((FILE_MALICIOUS + FILE_SUSPICIOUS))
+
+      if [ "$FILE_TOTAL_POS" -gt "$VT_MAX_DETECTIONS" ]; then
         SCAN_COMPLETE=true
         echo "BLOCKED: $BASENAME existing SHA-256 report flagged ($FILE_MALICIOUS malicious, $FILE_SUSPICIOUS suspicious / $FILE_COMPLETED engines)"
         echo "  $URL"
@@ -146,7 +170,7 @@ echo "$VT_ANALYSIS" | tr ',' '\n' | while IFS= read -r entry; do
       fi
     fi
 
-    echo "  $BASENAME: $COMPLETED/$TOTAL engines ($STATUS, attempt $attempt/$MAX_ATTEMPTS)..."
+    echo "  $BASENAME: waiting (attempt $attempt/$MAX_ATTEMPTS)..."
   done
 
   if [ "$SCAN_COMPLETE" != "true" ]; then
@@ -159,4 +183,5 @@ if [ -s "$FAIL_FILE" ]; then
   echo "BLOCKED: One or more VirusTotal checks failed"
   exit 1
 fi
+
 echo "=== All VirusTotal scans passed ==="
