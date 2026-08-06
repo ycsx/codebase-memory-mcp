@@ -6,6 +6,7 @@ const {
   ipcMain,
   Menu,
   nativeImage,
+  net,
   session,
   shell,
   Tray,
@@ -248,6 +249,7 @@ if (gotLock) {
       arch: process.arch,
       tempDir: path.join(app.getPath("temp"), "codebase-memory-mcp-updates"),
       enabled: app.isPackaged,
+      fetchImpl: (url, options) => net.fetch(url, options),
       prepareInstall: prepareUpdateInstall,
       recoverInstall: recoverUpdateInstall,
     });

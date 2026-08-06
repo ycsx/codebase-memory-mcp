@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { createRequire } from "node:module";
 
@@ -17,6 +20,7 @@ const {
 const INSTALLER_NAME = "codebase-memory-mcp-ui-windows-amd64-setup.exe";
 const INSTALLER_URL = `https://github.com/ycsx/codebase-memory-mcp/releases/download/v1.2.0/${INSTALLER_NAME}`;
 const CHECKSUM_URL = "https://github.com/ycsx/codebase-memory-mcp/releases/download/v1.2.0/checksums.txt";
+const REDIRECTED_INSTALLER_URL = "https://release-assets.githubusercontent.com/github-production-release-asset/update.exe";
 
 function releaseJson(overrides = {}) {
   return JSON.stringify({
@@ -92,6 +96,80 @@ test("an older Release does not require installer assets", async () => {
   assert.equal(status.state, "up-to-date");
   assert.equal(status.latestVersion, "1.2.0");
   assert.equal(status.error, null);
+});
+
+test("default updater transport uses the injected Electron-compatible fetch implementation", async () => {
+  const payload = Buffer.from("electron-net-update");
+  const checksum = createHash("sha256").update(payload).digest("hex");
+  const tempDir = await mkdtemp(path.join(tmpdir(), "cbm-updater-"));
+  const requestedUrls = [];
+  let launchedPath = null;
+  const manager = new UpdateManager({
+    currentVersion: "1.1.0",
+    platform: "win32",
+    arch: "x64",
+    tempDir,
+    fetchImpl: async (url) => {
+      requestedUrls.push(url);
+      if (url === RELEASE_API_URL) {
+        return new Response(releaseJson({
+          assets: [
+            { name: INSTALLER_NAME, browser_download_url: INSTALLER_URL, size: payload.length },
+            { name: "checksums.txt", browser_download_url: CHECKSUM_URL, size: 96 },
+          ],
+        }));
+      }
+      if (url === CHECKSUM_URL) {
+        return new Response(`${checksum}  ${INSTALLER_NAME}\n`);
+      }
+      if (url === INSTALLER_URL) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: REDIRECTED_INSTALLER_URL },
+        });
+      }
+      assert.equal(url, REDIRECTED_INSTALLER_URL);
+      return new Response(payload, {
+        headers: { "content-length": String(payload.length) },
+      });
+    },
+    launchInstaller: async (installerPath) => {
+      launchedPath = installerPath;
+    },
+  });
+
+  try {
+    assert.equal((await manager.check()).state, "available");
+    assert.equal((await manager.install()).state, "installing");
+    assert.deepEqual(requestedUrls, [
+      RELEASE_API_URL,
+      CHECKSUM_URL,
+      INSTALLER_URL,
+      REDIRECTED_INSTALLER_URL,
+    ]);
+    assert.deepEqual(await readFile(launchedPath), payload);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("fetch failures retain the underlying network error code", async () => {
+  const rootCause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+  const fetchFailure = Object.assign(new TypeError("fetch failed"), { cause: rootCause });
+  const manager = new UpdateManager({
+    currentVersion: "1.1.0",
+    platform: "win32",
+    arch: "x64",
+    tempDir: "C:\\tmp\\unused",
+    fetchImpl: async () => {
+      throw fetchFailure;
+    },
+  });
+
+  const status = await manager.check();
+  assert.equal(status.state, "error");
+  assert.match(status.error, /ECONNRESET/);
+  assert.match(status.error, /网络或代理/);
 });
 
 test("verified update prepares the app before launching the installer", async () => {

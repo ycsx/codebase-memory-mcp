@@ -226,9 +226,9 @@ def add_highlights(doc):
     table.autofit = False
     set_table_geometry(table, [3120, 3120, 3120])
     blocks = [
-        ("关系理解", "不只返回命中文本，还能回答谁调用谁、修改会影响谁、入口在哪里。"),
-        ("上下文效率", "优先返回定义、关系和少量源码证据，减少 Agent 反复读取整文件。"),
-        ("工程落地", "本地 SQLite 持久化，支持 MCP/CLI/HTTP，并强化 Vue 2 / Webpack 场景。"),
+        ("个人开发效率", "减少手工搜索与上下文拼接，让排障、重构和新成员上手更快。"),
+        ("团队交付质量", "把影响面、测试建议和架构风险接入 PR/CI，减少遗漏和返工。"),
+        ("遗留系统治理", "为 Vue 2 / Webpack 提供别名、依赖和迁移评估，缩短现代化改造路径。"),
     ]
     for cell, (title, body) in zip(table.rows[0].cells, blocks):
         set_cell_shading(cell, WHITE)
@@ -357,6 +357,13 @@ def build(output: Path):
     add_flow(doc)
     add_metric_strip(doc)
 
+    value_note = doc.add_paragraph()
+    value_note.paragraph_format.space_before = Pt(3)
+    value_note.paragraph_format.space_after = Pt(0)
+    value_note.paragraph_format.line_spacing = 1.0
+    add_text(value_note, "价值不止是省 Token：", size=8.7, color=TEAL, bold=True)
+    add_text(value_note, "把一次性代码问答沉淀成团队可复用、可审计的技术关系资产。", size=8.7, color=NAVY)
+
     chart_path = Path(__file__).resolve().parents[2] / "build" / "competition-report" / "competition-benchmark.png"
     if chart_path.exists():
         p = doc.add_paragraph()
@@ -369,7 +376,7 @@ def build(output: Path):
     else:
         add_paragraph(doc, "A/B 图表未找到，请先生成 build/competition-report/competition-benchmark.png。", size=8.5, color=MUTED, after=2)
 
-    add_heading(doc, "评审只需记住三点", level=2, before=2, after=2)
+    add_heading(doc, "价值落点", level=2, before=2, after=2)
     add_highlights(doc)
     add_attribution(doc)
     note = doc.add_paragraph()
