@@ -32,7 +32,6 @@ mac:
   hardenedRuntime: false
   extendInfo:
     CFBundleDisplayName: 风暴之眼
-    CFBundleName: 风暴之眼
   target:
     - dmg
   extraResources:

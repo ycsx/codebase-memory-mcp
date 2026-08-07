@@ -480,11 +480,13 @@ static int run_cli(int argc, char **argv) {
         /* Supervised worker: hand the full result string to the parent via the
          * response file before printing (parent reads it back on a clean exit). */
         const char *ro = cbm_index_worker_response_out();
+        bool worker_response_written = false;
         if (ro) {
             FILE *rf = cbm_fopen(ro, "wb");
             if (rf) {
-                (void)fputs(result, rf);
-                (void)fclose(rf);
+                int write_rc = fputs(result, rf);
+                int close_rc = fclose(rf);
+                worker_response_written = write_rc >= 0 && close_rc == 0;
             }
         }
         if (raw_json) {
@@ -500,7 +502,7 @@ static int run_cli(int argc, char **argv) {
              * atexit/LSan by design for this prod worker path. */
             cbm_log_info("index.worker.fast_exit", "action", "_Exit");
             fflush(NULL);
-            _Exit(exit_code);
+            _Exit(worker_response_written ? 0 : SKIP_ONE);
         }
         free(result);
     }

@@ -57,6 +57,10 @@ char **cbm_str_split(CBMArena *a, const char *s, char delim, int *out_count);
  * Returns true if safe, false if the string contains shell metacharacters. */
 bool cbm_validate_shell_arg(const char *s);
 
+/* Validate a filesystem path interpolated into a shell command. On Windows,
+ * cmd.exe expands %, ! and ^ even inside the double quotes used by callers. */
+bool cbm_validate_shell_path_arg(const char *path);
+
 /* Validate a project name is safe for file path construction.
  * Allows: alphanumeric, dash, underscore, dot (but not leading dot or dot-dot).
  * Rejects: path separators (/ \), directory traversal (..), and control chars.

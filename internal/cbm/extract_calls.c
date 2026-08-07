@@ -968,26 +968,27 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
 }
 
 // Haskell/OCaml: extract callee from apply/infix nodes.
+static bool fp_is_apply_kind(const char *kind) {
+    return strcmp(kind, "apply") == 0 || strcmp(kind, "application_expression") == 0 ||
+           strcmp(kind, "exp_apply") == 0;
+}
+
 static char *extract_fp_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
-    if (strcmp(nk, "apply") == 0 || strcmp(nk, "application_expression") == 0 ||
-        strcmp(nk, "exp_apply") == 0) {
-        if (ts_node_child_count(node) > 0) {
-            TSNode callee = ts_node_child(node, 0);
-            const char *ck = ts_node_type(callee);
-            if (strcmp(ck, "identifier") == 0 || strcmp(ck, "variable") == 0 ||
-                strcmp(ck, "constructor") == 0 || strcmp(ck, "value_path") == 0 ||
-                /* PureScript: exp_apply's function head is an `exp_name` whose
-                 * text is the (possibly qualified) function name. */
-                strcmp(ck, "exp_name") == 0) {
-                return cbm_node_text(a, callee, source);
-            }
-            /* Curried application `f a b` nests exp_apply/apply — descend the
-             * function head to recover the leftmost callee. */
-            if (strcmp(ck, "exp_apply") == 0 || strcmp(ck, "apply") == 0 ||
-                strcmp(ck, "application_expression") == 0) {
-                return extract_fp_callee(a, callee, source, ck);
-            }
+    /* Curried applications nest one apply node per argument. Walk the left
+     * spine iteratively so stack use cannot grow with source depth. */
+    while (fp_is_apply_kind(nk) && ts_node_child_count(node) > 0) {
+        TSNode callee = ts_node_child(node, 0);
+        const char *ck = ts_node_type(callee);
+        if (strcmp(ck, "identifier") == 0 || strcmp(ck, "variable") == 0 ||
+            strcmp(ck, "constructor") == 0 || strcmp(ck, "value_path") == 0 ||
+            strcmp(ck, "exp_name") == 0) {
+            return cbm_node_text(a, callee, source);
         }
+        if (!fp_is_apply_kind(ck)) {
+            break;
+        }
+        node = callee;
+        nk = ck;
     }
     if (strcmp(nk, "infix") == 0 || strcmp(nk, "infix_expression") == 0) {
         TSNode op = ts_node_child_by_field_name(node, TS_FIELD("operator"));

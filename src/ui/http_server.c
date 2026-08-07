@@ -30,6 +30,7 @@
 #endif
 /* pipeline.h no longer needed — indexing runs as subprocess */
 #include "foundation/log.h"
+#include "foundation/constants.h"
 #include "foundation/platform.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
@@ -37,6 +38,7 @@
 #include "foundation/compat_thread.h"
 #include "foundation/subprocess.h" /* cbm_build_win_cmdline — shared MS-CRT arg quoting */
 #include "foundation/win_utf8.h"   /* cbm_utf8_to_wide — CreateProcessW wide cmdline (#423/#20) */
+#include "foundation/workspace.h"
 
 #include <sqlite3/sqlite3.h>
 #include <yyjson/yyjson.h>
@@ -470,8 +472,8 @@ static void handle_logs(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     int start = (g_log_head - count + LOG_RING_SIZE) % LOG_RING_SIZE;
     int total = g_log_count;
 
-    /* Copy lines under lock */
-    size_t buf_size = (size_t)count * (LOG_LINE_MAX + 10) + 64;
+    /* JSON escaping can double every stored byte. */
+    size_t buf_size = (size_t)count * (2 * LOG_LINE_MAX + 8) + 64;
     char *buf = malloc(buf_size);
     if (!buf) {
         cbm_mutex_unlock(&g_log_mutex);
@@ -484,9 +486,9 @@ static void handle_logs(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     for (int i = 0; i < count; i++) {
         int idx = (start + i) % LOG_RING_SIZE;
         if (i > 0)
-            buf[pos++] = ',';
+            http_appendf(buf, buf_size, &pos, ",");
         /* Escape quotes in log lines */
-        buf[pos++] = '"';
+        http_appendf(buf, buf_size, &pos, "\"");
         for (int j = 0; g_log_ring[idx][j] && (size_t)pos < buf_size - 10; j++) {
             char ch = g_log_ring[idx][j];
             if (ch == '"') {
@@ -502,10 +504,15 @@ static void handle_logs(cbm_http_conn_t *c, const cbm_http_req_t *req) {
                 buf[pos++] = ch;
             }
         }
-        buf[pos++] = '"';
+        http_appendf(buf, buf_size, &pos, "\"");
     }
     cbm_mutex_unlock(&g_log_mutex);
     http_appendf(buf, buf_size, &pos, "],\"total\":%d}", total);
+
+    if ((size_t)pos >= buf_size) {
+        pos = (int)buf_size - 1;
+    }
+    buf[pos] = '\0';
 
     cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
     free(buf);
@@ -695,7 +702,7 @@ static void append_roots_json(char *buf, size_t bufsz, int *pos) {
             continue;
         }
         if (count++ > 0) {
-            buf[(*pos)++] = ',';
+            http_appendf(buf, bufsz, pos, ",");
         }
         http_appendf(buf, bufsz, pos, "\"%c:/\"", 'A' + i);
     }
@@ -1120,6 +1127,45 @@ static void set_job_error(index_job_t *job, const char *message) {
     }
 }
 
+/* Index workers return an MCP result through --response-out and deliberately
+ * exit with zero once that response is written. Keep tool-level failures
+ * distinguishable from process failures for the UI job status. */
+static bool index_response_has_error(const char *path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    FILE *file = cbm_fopen(path, "rb");
+    if (!file) {
+        return false;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return false;
+    }
+    long size = ftell(file);
+    if (size <= 0 || size > 8L * 1024L * 1024L || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return false;
+    }
+    char *data = malloc((size_t)size + 1U);
+    if (!data) {
+        fclose(file);
+        return false;
+    }
+    size_t read_count = fread(data, 1U, (size_t)size, file);
+    fclose(file);
+    data[read_count] = '\0';
+    yyjson_doc *doc = read_count == (size_t)size ? yyjson_read(data, read_count, 0) : NULL;
+    free(data);
+    if (!doc) {
+        return false;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    bool is_error = root && yyjson_is_true(yyjson_obj_get(root, "isError"));
+    yyjson_doc_free(doc);
+    return is_error;
+}
+
 static void *index_thread_fn(void *arg) {
     index_job_t *job = arg;
     cbm_log_info("ui.index.start", "path", job->root_path);
@@ -1148,6 +1194,7 @@ static void *index_thread_fn(void *arg) {
     }
 
     char log_file[1024];
+    char response_file[1024];
 
     /* JSON-escape root_path and optional project name. */
     char escaped_path[2048];
@@ -1165,17 +1212,27 @@ static void *index_thread_fn(void *arg) {
 #ifdef _WIN32
     wchar_t wide_temp[768];
     wchar_t wide_log[1024];
+    wchar_t wide_response[1024];
     DWORD temp_len = GetTempPathW((DWORD)(sizeof(wide_temp) / sizeof(wide_temp[0])), wide_temp);
     if (temp_len > 0 && temp_len < (sizeof(wide_temp) / sizeof(wide_temp[0]))) {
         int written = swprintf(wide_log, sizeof(wide_log) / sizeof(wide_log[0]),
                                L"%lscbm_index_%d.log", wide_temp, (int)_getpid());
+        int response_written =
+            swprintf(wide_response, sizeof(wide_response) / sizeof(wide_response[0]),
+                     L"%lscbm_index_%d.response", wide_temp, (int)_getpid());
         char *utf8_log = written > 0 ? cbm_wide_to_utf8(wide_log) : NULL;
+        char *utf8_response = response_written > 0 ? cbm_wide_to_utf8(wide_response) : NULL;
         if (!utf8_log || !copy_path(log_file, sizeof(log_file), utf8_log)) {
             snprintf(log_file, sizeof(log_file), "cbm_index_%d.log", (int)_getpid());
         }
+        if (!utf8_response || !copy_path(response_file, sizeof(response_file), utf8_response)) {
+            snprintf(response_file, sizeof(response_file), "cbm_index_%d.response", (int)_getpid());
+        }
         free(utf8_log);
+        free(utf8_response);
     } else {
         snprintf(log_file, sizeof(log_file), "cbm_index_%d.log", (int)_getpid());
+        snprintf(response_file, sizeof(response_file), "cbm_index_%d.response", (int)_getpid());
     }
 
     /* Build command line for CreateProcess through the shared MS-CRT quoter so the
@@ -1185,8 +1242,9 @@ static void *index_thread_fn(void *arg) {
      * so the child runs indexing in-process rather than spawning its own supervisor
      * (avoids redundant process nesting). */
     char cmdline[2048];
-    const char *const idx_argv[] = {bin,      "cli", "--index-worker", "index_repository",
-                                    json_arg, NULL};
+    const char *const idx_argv[] = {
+        bin,           "cli", "--index-worker", "index_repository", json_arg, "--response-out",
+        response_file, NULL};
     if (!cbm_build_win_cmdline(cmdline, sizeof(cmdline), idx_argv)) {
         snprintf(job->error_msg, sizeof(job->error_msg), "index command line too long");
         atomic_store(&job->status, 3);
@@ -1225,6 +1283,7 @@ static void *index_thread_fn(void *arg) {
         atomic_store(&job->status, 3);
         if (hlog != INVALID_HANDLE_VALUE)
             CloseHandle(hlog);
+        (void)cbm_unlink(response_file);
         return NULL;
     }
     if (hlog != INVALID_HANDLE_VALUE)
@@ -1255,11 +1314,16 @@ static void *index_thread_fn(void *arg) {
     DWORD win_exit = 1;
     GetExitCodeProcess(pi.hProcess, &win_exit);
     int exit_code = (int)win_exit;
+    if (exit_code == 0 && index_response_has_error(response_file)) {
+        exit_code = 1;
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     (void)cbm_unlink(log_file);
+    (void)cbm_unlink(response_file);
 #else
     snprintf(log_file, sizeof(log_file), "/tmp/cbm_index_%d.log", (int)getpid());
+    snprintf(response_file, sizeof(response_file), "/tmp/cbm_index_%d.response", (int)getpid());
 
     cbm_log_info("ui.index.fork", "bin", bin, "log", log_file);
 
@@ -1275,7 +1339,8 @@ static void *index_thread_fn(void *arg) {
         FILE *lf = freopen(log_file, "w", stderr);
         (void)lf;
         freopen("/dev/null", "w", stdout);
-        execl(bin, bin, "cli", "--index-worker", "index_repository", json_arg, (char *)NULL);
+        execl(bin, bin, "cli", "--index-worker", "index_repository", json_arg, "--response-out",
+              response_file, (char *)NULL);
         _exit(127);
     }
 
@@ -1310,8 +1375,12 @@ static void *index_thread_fn(void *arg) {
     int wstatus = 0;
     waitpid(child_pid, &wstatus, 0);
     int exit_code = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : -1;
+    if (exit_code == 0 && index_response_has_error(response_file)) {
+        exit_code = 1;
+    }
 
     (void)unlink(log_file);
+    (void)unlink(response_file);
 #endif
 
     if (exit_code != 0) {
@@ -1330,8 +1399,7 @@ static void *index_thread_fn(void *arg) {
 
 enum {
     INDEX_JOB_NO_SLOT = -1,
-    INDEX_JOB_ALREADY_RUNNING = -2,
-    INDEX_JOB_THREAD_FAILED = -3,
+    INDEX_JOB_THREAD_FAILED = -2,
 };
 
 static int start_index_job(cbm_http_server_t *srv, const char *root_path, const char *project_name,
@@ -1340,9 +1408,15 @@ static int start_index_job(cbm_http_server_t *srv, const char *root_path, const 
     int slot = INDEX_JOB_NO_SLOT;
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
         int status = atomic_load(&g_index_jobs[i].status);
-        if (project_name && project_name[0] && status == 1 &&
-            strcmp(g_index_jobs[i].project_name, project_name) == 0) {
-            return INDEX_JOB_ALREADY_RUNNING;
+        bool same_named_project = project_name && project_name[0] &&
+                                  strcmp(g_index_jobs[i].project_name, project_name) == 0;
+        bool same_unnamed_root = (!project_name || !project_name[0]) &&
+                                 g_index_jobs[i].project_name[0] == '\0' && root_path &&
+                                 strcmp(g_index_jobs[i].root_path, root_path) == 0;
+        if (status == 1 && (same_named_project || same_unnamed_root)) {
+            /* Starting the same operation twice is idempotent. Returning the
+             * active slot lets every caller monitor the original job_id. */
+            return i;
         }
         if (slot == INDEX_JOB_NO_SLOT && (status == 0 || status == 2 || status == 3)) {
             slot = i;
@@ -1382,10 +1456,6 @@ static int start_index_job(cbm_http_server_t *srv, const char *root_path, const 
 }
 
 static bool reply_index_job_error(cbm_http_conn_t *c, int result) {
-    if (result == INDEX_JOB_ALREADY_RUNNING) {
-        cbm_http_replyf(c, 409, g_cors_json, "{\"error\":\"repository is already being indexed\"}");
-        return true;
-    }
     if (result == INDEX_JOB_NO_SLOT) {
         cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
         return true;
@@ -1428,7 +1498,25 @@ static void handle_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
-    int slot = start_index_job(srv, rpath, project_name, NULL, NULL, 0);
+    char canonical_root[CBM_SZ_4K];
+    char boundary_err[CBM_SZ_1K];
+    if (!cbm_canonical_path(rpath, canonical_root, sizeof(canonical_root))) {
+        yyjson_doc_free(doc);
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"cannot resolve root_path\"}");
+        return;
+    }
+    cbm_normalize_path_sep(canonical_root);
+    if (!cbm_workspace_root_allowed(canonical_root, cbm_workspace_home_dir(),
+                                    cbm_workspace_cache_dir(), getenv("CBM_ALLOWED_ROOT"),
+                                    boundary_err, sizeof(boundary_err))) {
+        yyjson_doc_free(doc);
+        char escaped[CBM_SZ_2K];
+        cbm_json_escape(escaped, (int)sizeof(escaped), boundary_err);
+        cbm_http_replyf(c, 403, g_cors_json, "{\"error\":\"%s\"}", escaped);
+        return;
+    }
+
+    int slot = start_index_job(srv, canonical_root, project_name, NULL, NULL, 0);
     yyjson_doc_free(doc);
     if (reply_index_job_error(c, slot)) {
         return;
@@ -1632,7 +1720,7 @@ static void handle_index_status(cbm_http_conn_t *c) {
         if (st == 0)
             continue;
         if (pos > 1)
-            buf[pos++] = ',';
+            http_appendf(buf, sizeof(buf), &pos, ",");
         const char *ss = st == 1 ? "indexing" : st == 2 ? "done" : "error";
         char escaped_path[2048];
         char escaped_project[512];
@@ -1648,7 +1736,10 @@ static void handle_index_status(cbm_http_conn_t *c) {
                      g_index_jobs[i].job_id, i, ss, escaped_path, escaped_project,
                      g_index_jobs[i].remote_url[0] ? "remote" : "local", escaped_error);
     }
-    buf[pos++] = ']';
+    http_appendf(buf, sizeof(buf), &pos, "]");
+    if ((size_t)pos >= sizeof(buf)) {
+        pos = (int)sizeof(buf) - 1;
+    }
     buf[pos] = '\0';
     cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
 }
@@ -1660,6 +1751,19 @@ static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
     if (!cbm_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
         cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing name\"}");
         return;
+    }
+    if (!cbm_validate_project_name(name)) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid project name\"}");
+        return;
+    }
+
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        if (atomic_load(&g_index_jobs[i].status) == 1 &&
+            strcmp(g_index_jobs[i].project_name, name) == 0) {
+            cbm_http_replyf(c, 409, g_cors_json,
+                            "{\"error\":\"project is currently being indexed\"}");
+            return;
+        }
     }
 
     char escaped_name[512];
@@ -1704,7 +1808,8 @@ static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
     const char *status =
         status_val && yyjson_is_str(status_val) ? yyjson_get_str(status_val) : NULL;
     if (status && strcmp(status, "not_found") == 0) {
-        http_status = 404;
+        /* DELETE is idempotent: the requested end state already exists. */
+        http_status = 200;
     }
 
     if (http_status == 200) {
@@ -2315,8 +2420,9 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
          * Keep progress/log endpoints available, but do not admit new cached
          * graph readers until every background update has published. */
         if (any_index_job_running()) {
-            cbm_http_replyf(c, 409, g_cors_json,
-                            "{\"error\":\"graph update in progress; retry after indexing completes\"}");
+            cbm_http_replyf(
+                c, 409, g_cors_json,
+                "{\"error\":\"graph update in progress; retry after indexing completes\"}");
             return;
         }
         handle_rpc(c, req, srv->mcp);

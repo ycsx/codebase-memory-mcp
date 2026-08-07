@@ -58,12 +58,14 @@ enum {
 #include "mcp/compact_out.h"
 #include "mcp/usage_stats.h"
 #include "foundation/str_util.h"
+#include "foundation/workspace.h"
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
 #include "pipeline/artifact.h"
 
 #ifdef _WIN32
 #include <direct.h>
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
 #define getpid _getpid
@@ -457,7 +459,10 @@ static const tool_def_t TOOLS[] = {
      "filtered out. When true, test nodes are included with a test column/marker.\"},"
      "\"format\":{\"type\":\"string\",\"enum\":[\"toon\",\"json\"],\"default\":\"toon\","
      "\"description\":\"Response encoding. toon (default): compact header+rows tables. "
-     "json: legacy verbose per-hop objects.\"}},"
+     "json: legacy verbose per-hop objects.\"},"
+     "\"include_evidence\":{\"type\":\"boolean\",\"default\":false,"
+     "\"description\":\"Add how each hop was resolved: a strategy class (lsp | language_rule | "
+     "heuristic | unresolved) and resolver confidence.\"}},"
      "\"required\":[\"function_name\",\"project\"]}"},
 
     {"explain_impact", "Explain impact",
@@ -4473,8 +4478,55 @@ static const char *bfs_edge_args_for_hop(cbm_traverse_result_t *tr, int64_t hop_
     return NULL;
 }
 
+const char *cbm_mcp_edge_strategy_class(const char *strategy) {
+    if (!strategy || !strategy[0]) {
+        return NULL;
+    }
+    if (strcmp(strategy, "lsp_unresolved") == 0 || strcmp(strategy, "unknown") == 0) {
+        return "unresolved";
+    }
+    if (strncmp(strategy, "lsp_", 4) == 0) {
+        return "lsp";
+    }
+    if (strncmp(strategy, "php_", 4) == 0 || strncmp(strategy, "perl_", 5) == 0) {
+        return "language_rule";
+    }
+    return "heuristic";
+}
+
+/* Read resolution evidence from the edge leading to a hop. The class is a
+ * stable public value; raw resolver strategy names remain internal. */
+static bool bfs_edge_evidence_for_hop(cbm_traverse_result_t *tr, int64_t hop_node_id,
+                                      const char **class_out, double *confidence_out) {
+    for (int e = 0; e < tr->edge_count; e++) {
+        if (tr->edges[e].target_id != hop_node_id && tr->edges[e].source_id != hop_node_id) {
+            continue;
+        }
+        const char *props = tr->edges[e].properties_json;
+        yyjson_doc *doc = props ? yyjson_read(props, strlen(props), 0) : NULL;
+        yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+        yyjson_val *strategy = root ? yyjson_obj_get(root, "strategy") : NULL;
+        const char *raw = yyjson_is_str(strategy) ? yyjson_get_str(strategy) : NULL;
+        const char *strategy_class = cbm_mcp_edge_strategy_class(raw);
+        if (!strategy_class) {
+            yyjson_doc_free(doc);
+            continue;
+        }
+        *class_out = strategy_class;
+        *confidence_out = -1.0;
+        yyjson_val *confidence = yyjson_obj_get(root, "confidence");
+        if (yyjson_is_num(confidence)) {
+            *confidence_out = yyjson_get_real(confidence);
+        }
+        yyjson_doc_free(doc);
+        return true;
+    }
+    return false;
+}
+
 static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_result_t *tr,
-                                         bool risk_labels, bool include_tests, bool data_flow) {
+                                         bool risk_labels, bool include_tests, bool data_flow,
+                                         bool include_evidence) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < tr->visited_count; i++) {
         const char *fp = tr->visited[i].node.file_path;
@@ -4508,6 +4560,17 @@ static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_resul
                 }
             }
         }
+        if (include_evidence) {
+            const char *strategy_class = NULL;
+            double confidence = -1.0;
+            if (bfs_edge_evidence_for_hop(tr, tr->visited[i].node.id, &strategy_class,
+                                          &confidence)) {
+                yyjson_mut_obj_add_strcpy(doc, item, "strategy", strategy_class);
+                if (confidence >= 0.0) {
+                    yyjson_mut_obj_add_real(doc, item, "confidence", confidence);
+                }
+            }
+        }
         yyjson_mut_arr_add_val(arr, item);
     }
     return arr;
@@ -4517,7 +4580,8 @@ static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_resul
  * risk / test / args columns. `name` is omitted (it is the qn's last
  * segment); the per-item JSON key envelope was 84% of the legacy payload. */
 static void bfs_to_toon_table(cbm_sb_t *sb, const char *key, cbm_traverse_result_t *tr,
-                              bool risk_labels, bool include_tests, bool data_flow) {
+                              bool risk_labels, bool include_tests, bool data_flow,
+                              bool include_evidence) {
     int visible = 0;
     for (int i = 0; i < tr->visited_count; i++) {
         if (!include_tests && is_test_file(tr->visited[i].node.file_path)) {
@@ -4525,7 +4589,7 @@ static void bfs_to_toon_table(cbm_sb_t *sb, const char *key, cbm_traverse_result
         }
         visible++;
     }
-    const char *cols[5] = {"qn", "hop"};
+    const char *cols[7] = {"qn", "hop"};
     int ncols = 2;
     if (risk_labels) {
         cols[ncols++] = "risk";
@@ -4535,6 +4599,10 @@ static void bfs_to_toon_table(cbm_sb_t *sb, const char *key, cbm_traverse_result
     }
     if (data_flow) {
         cols[ncols++] = "args";
+    }
+    if (include_evidence) {
+        cols[ncols++] = "strategy";
+        cols[ncols++] = "confidence";
     }
     cbm_toon_table_header(sb, key, visible, cols, ncols);
     for (int i = 0; i < tr->visited_count; i++) {
@@ -4561,6 +4629,22 @@ static void bfs_to_toon_table(cbm_sb_t *sb, const char *key, cbm_traverse_result
                 abuf[alen] = '\0';
                 cbm_toon_cell_str(sb, abuf, false);
             } else {
+                cbm_toon_cell_str(sb, "", false);
+            }
+        }
+        if (include_evidence) {
+            const char *strategy_class = NULL;
+            double confidence = -1.0;
+            if (bfs_edge_evidence_for_hop(tr, tr->visited[i].node.id, &strategy_class,
+                                          &confidence)) {
+                cbm_toon_cell_str(sb, strategy_class, false);
+                if (confidence >= 0.0) {
+                    cbm_toon_cell_real(sb, confidence, false);
+                } else {
+                    cbm_toon_cell_str(sb, "", false);
+                }
+            } else {
+                cbm_toon_cell_str(sb, "", false);
                 cbm_toon_cell_str(sb, "", false);
             }
         }
@@ -4732,6 +4816,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     depth = clamp_mcp_depth(depth, "trace_call_path");
     bool risk_labels = cbm_mcp_get_bool_arg(args, "risk_labels");
     bool include_tests = cbm_mcp_get_bool_arg(args, "include_tests");
+    bool include_evidence = cbm_mcp_get_bool_arg(args, "include_evidence");
 
     if (!func_name) {
         free(project);
@@ -4865,10 +4950,12 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             cbm_toon_scalar_str(&sb, "mode", mode);
         }
         if (do_outbound) {
-            bfs_to_toon_table(&sb, "callees", &tr_out, risk_labels, include_tests, data_flow);
+            bfs_to_toon_table(&sb, "callees", &tr_out, risk_labels, include_tests, data_flow,
+                              include_evidence);
         }
         if (do_inbound) {
-            bfs_to_toon_table(&sb, "callers", &tr_in, risk_labels, include_tests, data_flow);
+            bfs_to_toon_table(&sb, "callers", &tr_in, risk_labels, include_tests, data_flow,
+                              include_evidence);
         }
         json = cbm_sb_finish(&sb);
     } else {
@@ -4882,14 +4969,14 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             yyjson_mut_obj_add_str(doc, root, "mode", mode);
         }
         if (do_outbound) {
-            yyjson_mut_obj_add_val(
-                doc, root, "callees",
-                bfs_to_json_array(doc, &tr_out, risk_labels, include_tests, data_flow));
+            yyjson_mut_obj_add_val(doc, root, "callees",
+                                   bfs_to_json_array(doc, &tr_out, risk_labels, include_tests,
+                                                     data_flow, include_evidence));
         }
         if (do_inbound) {
-            yyjson_mut_obj_add_val(
-                doc, root, "callers",
-                bfs_to_json_array(doc, &tr_in, risk_labels, include_tests, data_flow));
+            yyjson_mut_obj_add_val(doc, root, "callers",
+                                   bfs_to_json_array(doc, &tr_in, risk_labels, include_tests,
+                                                     data_flow, include_evidence));
         }
         /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */
         json = yy_doc_to_str(doc);
@@ -6467,8 +6554,6 @@ char *cbm_mcp_index_run_supervised_path(const char *root_path) {
     return index_run_supervised_path(NULL, root_path);
 }
 
-bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
-
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     /* Supervisor gate: run the index in a crash/hang-isolating worker subprocess
      * unless this process IS the worker or the kill switch (CBM_INDEX_SUPERVISOR=0)
@@ -6493,18 +6578,15 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
 
     repo_path = canonicalize_repo_path_if_exists(repo_path);
 
-    /* Optional workspace boundary: when CBM_ALLOWED_ROOT is set (agentic /
-     * multi-tenant deployments where repo_path may be influenced by an
-     * untrusted caller), refuse to index a path that resolves outside it.
-     * Unset by default, so the standard "index the path I gave you" behaviour
-     * is unchanged. */
+    /* Apply the same canonical workspace boundary as the graph UI. */
     const char *allowed_root = getenv("CBM_ALLOWED_ROOT");
-    if (allowed_root && allowed_root[0] && repo_path &&
-        !cbm_path_within_root(allowed_root, repo_path)) {
+    char boundary_err[CBM_SZ_1K];
+    if (!cbm_workspace_root_allowed(repo_path, cbm_workspace_home_dir(), cbm_workspace_cache_dir(),
+                                    allowed_root, boundary_err, sizeof(boundary_err))) {
         free(mode_str);
         free(name_override);
         free(repo_path);
-        return cbm_mcp_text_result("repo_path is outside the allowed root", true);
+        return cbm_mcp_text_result(boundary_err, true);
     }
 
     if (mode_str && strcmp(mode_str, "cross-repo-intelligence") == 0) {
@@ -6728,44 +6810,6 @@ static yyjson_doc *enrich_node_properties(yyjson_mut_doc *doc, yyjson_mut_val *o
  * the search path (attach_result_source) route through it, so a result whose
  * indexed path escapes the project root — via a `..` segment, or a symlink /
  * Windows junction picked up during discovery — is never read back out. */
-/* Canonicalize `path` (resolve symlinks/junctions and `..`) into `out`
- * (>= CBM_SZ_4K bytes); returns true on success. Isolating the per-OS resolver
- * keeps cbm_path_within_root's control flow unconditional: the previous `#ifdef`
- * opened the `if (...) {` brace in one branch and a different one in the other,
- * sharing a single close brace — legal C, but it splits the function's braces
- * across preprocessor branches, which defeats source-level tooling that parses
- * without the preprocessor (and left this function unindexed in the graph). */
-static bool resolve_canonical_path(const char *path, char *out, size_t out_sz) {
-    /* cbm_canonical_path: realpath on POSIX; wide existence check +
-     * GetFullPathNameW on Windows (the old bare _fullpath was ANSI —
-     * CJK-locale corruption, #973 — and, unlike POSIX realpath, resolved
-     * nonexistent paths too; requiring existence aligns the platforms). */
-    if (!cbm_canonical_path(path, out, out_sz)) {
-        return false;
-    }
-#ifdef _WIN32
-    cbm_normalize_path_sep(out);
-#endif
-    return true;
-}
-
-bool cbm_path_within_root(const char *root_path, const char *abs_path) {
-    if (!root_path || !abs_path) {
-        return false;
-    }
-    char real_root[CBM_SZ_4K];
-    char real_file[CBM_SZ_4K];
-    if (resolve_canonical_path(root_path, real_root, sizeof(real_root)) &&
-        resolve_canonical_path(abs_path, real_file, sizeof(real_file))) {
-        size_t root_len = strlen(real_root);
-        if (strncmp(real_file, real_root, root_len) == 0 &&
-            (real_file[root_len] == '/' || real_file[root_len] == '\0')) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static char *resolve_snippet_source(const char *root_path, const char *file_path, int start,
                                     int end, char **out_abs_path) {
     *out_abs_path = NULL;
@@ -8170,15 +8214,125 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── detect_changes ───────────────────────────────────────────── */
 
+bool cbm_detect_node_in_hunks(const cbm_node_t *node, const cbm_changed_hunk_t *hunks,
+                              int hunk_count, const char *file) {
+    if (!node || !hunks || !file) {
+        return false;
+    }
+    for (int h = 0; h < hunk_count; h++) {
+        if (strcmp(hunks[h].path, file) == 0 && node->start_line <= hunks[h].end_line &&
+            node->end_line >= hunks[h].start_line) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool detect_is_symbol_label(const char *label) {
+    return label && strcmp(label, "File") != 0 && strcmp(label, "Folder") != 0 &&
+           strcmp(label, "Project") != 0 && strcmp(label, "Module") != 0 &&
+           strcmp(label, "Package") != 0 && strcmp(label, "Section") != 0;
+}
+
+/* Collect changed-line hunks best-effort. Missing hunks deliberately trigger
+ * whole-file symbol reporting for new files and transient git failures. */
+static cbm_changed_hunk_t *detect_read_changed_hunks(const char *root_path, const char *base_branch,
+                                                     int *out_count) {
+    *out_count = 0;
+    char cmd[CBM_SZ_2K];
+#ifdef _WIN32
+    int cmd_len = snprintf(cmd, sizeof(cmd),
+                           "git -C \"%s\" diff --unified=0 --relative %s...HEAD -- . 2>NUL & "
+                           "git -C \"%s\" diff --unified=0 --relative -- . 2>NUL",
+                           root_path, base_branch, root_path);
+#else
+    int cmd_len = snprintf(cmd, sizeof(cmd),
+                           "{ git -C '%s' diff --unified=0 --relative '%s...HEAD' -- . "
+                           "2>/dev/null; git -C '%s' diff --unified=0 --relative -- . "
+                           "2>/dev/null; }",
+                           root_path, base_branch, root_path);
+#endif
+    if (cmd_len < 0 || (size_t)cmd_len >= sizeof(cmd)) {
+        return NULL;
+    }
+
+    FILE *fp = cbm_popen(cmd, "r");
+    if (!fp) {
+        return NULL;
+    }
+
+    enum { HUNK_COUNT_MAX = 4096, HUNK_TEXT_MAX = 8 * CBM_SZ_1K * CBM_SZ_1K };
+    size_t cap = CBM_SZ_4K;
+    size_t len = 0;
+    char *text = malloc(cap);
+    char chunk[CBM_SZ_4K];
+    size_t got;
+    while ((got = fread(chunk, SKIP_ONE, sizeof(chunk), fp)) > 0) {
+        size_t keep = got;
+        if (len >= HUNK_TEXT_MAX) {
+            keep = 0;
+        } else if (keep > HUNK_TEXT_MAX - len) {
+            keep = HUNK_TEXT_MAX - len;
+        }
+        if (keep > 0) {
+            size_t need = len + keep + SKIP_ONE;
+            while (cap < need) {
+                cap *= PAIR_LEN;
+            }
+            text = safe_realloc(text, cap);
+            memcpy(text + len, chunk, keep);
+            len += keep;
+        }
+    }
+    bool read_failed = ferror(fp) != 0;
+    int status = cbm_pclose(fp);
+    if (!text || read_failed || status != 0 || len == 0) {
+        free(text);
+        return NULL;
+    }
+    text[len] = '\0';
+
+    cbm_changed_hunk_t *hunks = malloc((size_t)HUNK_COUNT_MAX * sizeof(*hunks));
+    if (hunks) {
+        *out_count = cbm_parse_hunks(text, hunks, HUNK_COUNT_MAX);
+    }
+    free(text);
+    if (*out_count == 0) {
+        free(hunks);
+        return NULL;
+    }
+    return hunks;
+}
+
 /* Find symbols defined in a file and add them to the impacted array. */
 static void detect_add_impacted_symbols(cbm_store_t *store, const char *project, const char *file,
+                                        const cbm_changed_hunk_t *hunks, int hunk_count,
                                         yyjson_mut_doc *doc, yyjson_mut_val *impacted) {
     cbm_node_t *nodes = NULL;
     int ncount = 0;
     cbm_store_find_nodes_by_file(store, project, file, &nodes, &ncount);
+
+    bool scope_to_hunks = false;
+    for (int h = 0; h < hunk_count; h++) {
+        if (strcmp(hunks[h].path, file) == 0) {
+            scope_to_hunks = true;
+            break;
+        }
+    }
+    if (scope_to_hunks) {
+        bool any_overlap = false;
+        for (int i = 0; i < ncount && !any_overlap; i++) {
+            any_overlap = detect_is_symbol_label(nodes[i].label) &&
+                          cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file);
+        }
+        scope_to_hunks = any_overlap;
+    }
+
     for (int i = 0; i < ncount; i++) {
-        if (nodes[i].label && strcmp(nodes[i].label, "File") != 0 &&
-            strcmp(nodes[i].label, "Folder") != 0 && strcmp(nodes[i].label, "Project") != 0) {
+        if (detect_is_symbol_label(nodes[i].label)) {
+            if (scope_to_hunks && !cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file)) {
+                continue;
+            }
             yyjson_mut_val *item = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_strcpy(doc, item, "name", nodes[i].name ? nodes[i].name : "");
             yyjson_mut_obj_add_strcpy(doc, item, "label", nodes[i].label);
@@ -8373,6 +8527,10 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     /* resolve_store already called via get_project_root above */
     cbm_store_t *store = srv->store;
 
+    int hunk_count = 0;
+    cbm_changed_hunk_t *hunks =
+        want_symbols ? detect_read_changed_hunks(root_path, base_branch, &hunk_count) : NULL;
+
     char line[CBM_SZ_1K];
     int file_count = 0;
 
@@ -8408,7 +8566,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         file_count++;
 
         if (want_symbols) {
-            detect_add_impacted_symbols(store, project, path_line, doc, impacted);
+            detect_add_impacted_symbols(store, project, path_line, hunks, hunk_count, doc,
+                                        impacted);
         }
     }
     int git_status = cbm_pclose(fp);
@@ -8435,6 +8594,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     free(project);
     free(base_branch);
     free(scope);
+    free(hunks);
 
     char *result = cbm_mcp_text_result(json, is_error);
     free(json);
@@ -9248,6 +9408,13 @@ int cbm_mcp_server_run(cbm_mcp_server_t *srv, FILE *in, FILE *out) {
     char *line = NULL;
     size_t cap = 0;
     int fd = cbm_fileno(in);
+
+#ifdef _WIN32
+    /* Content-Length counts bytes; text-mode CRLF translation corrupts the
+     * framing and can leave fread waiting for bytes that will never arrive. */
+    _setmode(cbm_fileno(in), _O_BINARY);
+    _setmode(cbm_fileno(out), _O_BINARY);
+#endif
 
     for (;;) {
         /* Poll with idle timeout so we can evict unused stores between requests.

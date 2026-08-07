@@ -262,15 +262,18 @@ typedef struct {
     int arg_count;
 } cbm_return_item_t;
 
+#define CBM_CYPHER_ORDER_KEYS_MAX 8
+
 typedef struct {
     cbm_return_item_t *items;
     int count;
     bool distinct;
-    bool star;             /* RETURN * */
-    const char *order_by;  /* "variable.property" or "COUNT(var)" or alias */
-    const char *order_dir; /* "ASC" or "DESC", NULL = default */
-    int skip;              /* SKIP N, 0 = none */
-    int limit;             /* 0 = default */
+    bool star; /* RETURN * */
+    const char *order_keys[CBM_CYPHER_ORDER_KEYS_MAX];
+    bool order_descs[CBM_CYPHER_ORDER_KEYS_MAX];
+    int order_key_count;
+    int skip;
+    int limit;
 } cbm_return_clause_t;
 
 /* Full query AST */

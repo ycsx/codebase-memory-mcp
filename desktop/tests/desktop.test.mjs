@@ -186,6 +186,7 @@ test("desktop exposes branding, AI routing, usage stats, and verified updates", 
   assert.match(builderConfig, /THIRD_PARTY_NOTICES\.md/);
   assert.match(builderConfig, /hardenedRuntime: false/);
   assert.match(builderConfig, /CFBundleDisplayName: 风暴之眼/);
+  assert.doesNotMatch(builderConfig, /^[ \t]+CFBundleName:/m);
   assert.match(builderConfig, /^dmg:/m);
   assert.match(packageJson, /dist:mac:x64/);
   assert.match(packageJson, /dist:mac:arm64/);

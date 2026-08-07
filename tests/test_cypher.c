@@ -375,11 +375,41 @@ TEST(cypher_parse_return_order_limit) {
     int rc =
         cbm_cypher_parse("MATCH (f:Function) RETURN f.name ORDER BY f.name DESC LIMIT 5", &q, &err);
     ASSERT_EQ(rc, 0);
-    ASSERT_NOT_NULL(q->ret->order_by);
-    ASSERT_STR_EQ(q->ret->order_dir, "DESC");
+    ASSERT_EQ(q->ret->order_key_count, 1);
+    ASSERT_STR_EQ(q->ret->order_keys[0], "f.name");
+    ASSERT(q->ret->order_descs[0]);
     ASSERT_EQ(q->ret->limit, 5);
 
     cbm_query_free(q);
+    PASS();
+}
+
+TEST(cypher_parse_multikey_order_by) {
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse(
+        "MATCH (f:Function) RETURN f.name ORDER BY f.complexity DESC, f.name ASC LIMIT 5", &q,
+        &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(q->ret->order_key_count, 2);
+    ASSERT_STR_EQ(q->ret->order_keys[0], "f.complexity");
+    ASSERT(q->ret->order_descs[0]);
+    ASSERT_STR_EQ(q->ret->order_keys[1], "f.name");
+    ASSERT_FALSE(q->ret->order_descs[1]);
+    ASSERT_EQ(q->ret->limit, 5);
+    cbm_query_free(q);
+    PASS();
+}
+
+TEST(cypher_parse_order_by_over_cap_rejected) {
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse("MATCH (f:Function) RETURN f.name ORDER BY "
+                              "f.a, f.b, f.c, f.d, f.e, f.f, f.g, f.h, f.i LIMIT 5",
+                              &q, &err);
+    ASSERT_NEQ(rc, 0);
+    cbm_query_free(q);
+    free(err);
     PASS();
 }
 
@@ -475,6 +505,32 @@ static cbm_store_t *setup_cypher_store(void) {
     return s;
 }
 
+TEST(cypher_deep_nesting_rejected) {
+    enum { NEST = 300 };
+    char *query = malloc((size_t)NEST * 2 + 96);
+    ASSERT_NOT_NULL(query);
+    int used = snprintf(query, (size_t)NEST * 2 + 96, "MATCH (f:Function) WHERE ");
+    for (int i = 0; i < NEST; i++) {
+        query[used++] = '(';
+    }
+    used += snprintf(query + used, 32, "f.name = \"x\"");
+    for (int i = 0; i < NEST; i++) {
+        query[used++] = ')';
+    }
+    query[used] = '\0';
+
+    cbm_query_t *parsed = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse(query, &parsed, &err);
+    ASSERT_NEQ(rc, 0);
+    ASSERT_NOT_NULL(err);
+    ASSERT_NOT_NULL(strstr(err, "depth"));
+    cbm_query_free(parsed);
+    free(err);
+    free(query);
+    PASS();
+}
+
 TEST(cypher_exec_match_all_functions) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -545,6 +601,66 @@ TEST(cypher_exec_optional_rel_saturated_no_overflow) {
     ASSERT_TRUE(r.row_count <= 5);
 
     cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_optional_saturated_does_not_fabricate_no_match) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t a = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t b = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t c = {
+        .project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    int64_t a_id = cbm_store_upsert_node(s, &a);
+    (void)cbm_store_upsert_node(s, &b);
+    int64_t c_id = cbm_store_upsert_node(s, &c);
+    ASSERT_GT(a_id, 0);
+    ASSERT_GT(c_id, 0);
+
+    for (int i = 0; i < 40; i++) {
+        char name[32];
+        char qn[48];
+        snprintf(name, sizeof(name), "acallee%d", i);
+        snprintf(qn, sizeof(qn), "test.acallee%d", i);
+        cbm_node_t target = {
+            .project = "test", .label = "Var", .name = name, .qualified_name = qn};
+        int64_t target_id = cbm_store_upsert_node(s, &target);
+        cbm_edge_t edge = {
+            .project = "test", .source_id = a_id, .target_id = target_id, .type = "CALLS"};
+        cbm_store_insert_edge(s, &edge);
+    }
+    for (int i = 0; i < 5; i++) {
+        char name[32];
+        char qn[48];
+        snprintf(name, sizeof(name), "ccallee%d", i);
+        snprintf(qn, sizeof(qn), "test.ccallee%d", i);
+        cbm_node_t target = {
+            .project = "test", .label = "Var", .name = name, .qualified_name = qn};
+        int64_t target_id = cbm_store_upsert_node(s, &target);
+        cbm_edge_t edge = {
+            .project = "test", .source_id = c_id, .target_id = target_id, .type = "CALLS"};
+        cbm_store_insert_edge(s, &edge);
+    }
+
+    cbm_cypher_result_t result = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (f:Function) OPTIONAL MATCH (f)-[:CALLS]->(g) WHERE g IS NULL RETURN f.name",
+        "test", 3, &result);
+    ASSERT_EQ(rc, 0);
+    bool saw_b = false;
+    bool saw_c = false;
+    for (int i = 0; i < result.row_count; i++) {
+        saw_b = saw_b || strcmp(result.rows[i][0], "B") == 0;
+        saw_c = saw_c || strcmp(result.rows[i][0], "C") == 0;
+    }
+    ASSERT_TRUE(saw_b);
+    ASSERT_FALSE(saw_c);
+
+    cbm_cypher_result_free(&result);
     cbm_store_close(s);
     PASS();
 }
@@ -2402,6 +2518,56 @@ TEST(cypher_exec_skip_limit) {
     PASS();
 }
 
+TEST(cypher_exec_multikey_order_by_keeps_limit) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s,
+        "MATCH (f:Function) RETURN f.name, f.start_line "
+        "ORDER BY f.start_line DESC, f.name ASC LIMIT 2",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    ASSERT_STR_EQ(r.rows[1][0], "ValidateOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_multikey_order_by_tiebreak) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s,
+        "MATCH (f:Function) RETURN f.name, f.start_line "
+        "ORDER BY f.start_line ASC, f.name DESC LIMIT 2",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "SubmitOrder");
+    ASSERT_STR_EQ(r.rows[1][0], "LogError");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_with_multikey_order_by_keeps_limit) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WITH f.name AS n, f.start_line AS sl "
+                                "ORDER BY sl DESC, n ASC LIMIT 2 RETURN n",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    ASSERT_STR_EQ(r.rows[1][0], "ValidateOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_exec_sum) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -2483,6 +2649,22 @@ TEST(cypher_exec_count_star) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r.row_count, 1);
     ASSERT_STR_EQ(r.rows[0][0], "4");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_return_type_grouped_with_count) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS n ORDER BY n DESC", "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "CALLS");
+    ASSERT_STR_EQ(r.rows[0][1], "3");
+    ASSERT_STR_EQ(r.rows[1][0], "DEFINES");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
     PASS();
@@ -2646,6 +2828,42 @@ TEST(cypher_exec_with_count) {
     /* HandleOrder calls 2 (ValidateOrder, LogError), ValidateOrder calls 1 (SubmitOrder) */
     ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
     ASSERT_STR_EQ(r.rows[0][1], "2");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_with_type_grouped_with_count) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s,
+        "MATCH (a)-[r]->(b) WITH type(r) AS t, count(*) AS n RETURN t, n ORDER BY n DESC",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "CALLS");
+    ASSERT_STR_EQ(r.rows[0][1], "3");
+    ASSERT_STR_EQ(r.rows[1][0], "DEFINES");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_with_scalar_func_alias_has_no_node_identity) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE f.name = \"HandleOrder\" "
+                                "WITH labels(f) AS l, COUNT(*) AS c "
+                                "RETURN l, l.file_path, c",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "[\"Function\"]");
+    ASSERT_STR_EQ(r.rows[0][1], "");
+    ASSERT_STR_EQ(r.rows[0][2], "1");
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
     PASS();
@@ -3244,16 +3462,20 @@ SUITE(cypher) {
     RUN_TEST(cypher_parse_return_simple);
     RUN_TEST(cypher_parse_return_count);
     RUN_TEST(cypher_parse_return_order_limit);
+    RUN_TEST(cypher_parse_multikey_order_by);
+    RUN_TEST(cypher_parse_order_by_over_cap_rejected);
     RUN_TEST(cypher_parse_return_distinct);
     RUN_TEST(cypher_parse_inline_props);
     RUN_TEST(cypher_parse_error);
     /* Execution */
     RUN_TEST(cypher_exec_deadline_aborts_runaway_query_issue601);
     RUN_TEST(cypher_exec_deadline_allows_normal_query_issue601);
+    RUN_TEST(cypher_deep_nesting_rejected);
     RUN_TEST(cypher_exec_match_all_functions);
     RUN_TEST(cypher_exec_optional_empty_label_no_overflow);
     RUN_TEST(cypher_cross_join_alloc_rejects_overflow);
     RUN_TEST(cypher_exec_optional_rel_saturated_no_overflow);
+    RUN_TEST(cypher_exec_optional_saturated_does_not_fabricate_no_match);
     RUN_TEST(cypher_exec_optional_rel_leaf_fallback_survives);
     RUN_TEST(cypher_issue240_labels_function);
     RUN_TEST(cypher_issue237_distinct_order_limit);
@@ -3356,12 +3578,16 @@ SUITE(cypher) {
     /* Phase 4: SKIP + aggregation */
     RUN_TEST(cypher_exec_skip);
     RUN_TEST(cypher_exec_skip_limit);
+    RUN_TEST(cypher_exec_multikey_order_by_keeps_limit);
+    RUN_TEST(cypher_exec_multikey_order_by_tiebreak);
+    RUN_TEST(cypher_exec_with_multikey_order_by_keeps_limit);
     RUN_TEST(cypher_exec_sum);
     RUN_TEST(cypher_exec_avg);
     RUN_TEST(cypher_exec_min);
     RUN_TEST(cypher_exec_max);
     RUN_TEST(cypher_exec_collect);
     RUN_TEST(cypher_exec_count_star);
+    RUN_TEST(cypher_return_type_grouped_with_count);
     RUN_TEST(cypher_parse_skip);
     RUN_TEST(cypher_parse_sum_avg);
     RUN_TEST(cypher_parse_collect);
@@ -3375,6 +3601,8 @@ SUITE(cypher) {
     /* Phase 6: WITH clause */
     RUN_TEST(cypher_exec_with_rename);
     RUN_TEST(cypher_exec_with_count);
+    RUN_TEST(cypher_with_type_grouped_with_count);
+    RUN_TEST(cypher_with_scalar_func_alias_has_no_node_identity);
     RUN_TEST(cypher_exec_with_node_groupvar_prop);
     RUN_TEST(cypher_exec_with_where);
     RUN_TEST(cypher_exec_with_orderby_limit);

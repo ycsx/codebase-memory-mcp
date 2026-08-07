@@ -1064,6 +1064,7 @@ TEST(ui_server_delete_project_removes_managed_clone) {
 }
 
 TEST(ui_server_delete_project_unwatches_missing_db) {
+    /* A missing database already satisfies DELETE and is therefore successful. */
     ui_delete_fixture_t fx;
     ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
     cbm_watcher_watch(fx.watcher, "ui-delete-missing", fx.root_dir);
@@ -1074,7 +1075,7 @@ TEST(ui_server_delete_project_unwatches_missing_db) {
     char resp[4096];
     int n = ui_delete_request(&ts, "/api/project?name=ui-delete-missing", resp, sizeof(resp));
     ASSERT_GT(n, 0);
-    ASSERT_EQ(th_status(resp), 404);
+    ASSERT_EQ(th_status(resp), 200);
     ASSERT_NOT_NULL(strstr(resp, "\"status\":\"not_found\""));
     ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 0);
 
@@ -1135,8 +1136,8 @@ TEST(ui_server_delete_project_invalid_name_keeps_watch) {
     char resp[4096];
     int n = ui_delete_request(&ts, "/api/project?name=bad%2Fname", resp, sizeof(resp));
     ASSERT_GT(n, 0);
-    ASSERT_EQ(th_status(resp), 404);
-    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"not_found\""));
+    ASSERT_EQ(th_status(resp), 400);
+    ASSERT_NOT_NULL(strstr(resp, "{\"error\":\"invalid project name\"}"));
     ASSERT_EQ(cbm_watcher_watch_count(fx.watcher), 1);
 
     th_server_stop(&ts);
@@ -1553,8 +1554,49 @@ TEST(ui_server_browse_wide_dir_no_overflow) {
 
 /* ── Suite ────────────────────────────────────────────────────── */
 
+TEST(ui_server_logs_escape_dense_no_overflow) {
+#ifdef _WIN32
+    SKIP_PLATFORM("fork crash-isolation is POSIX-only; the clamp is platform-agnostic");
+#else
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char dense[512];
+        for (size_t i = 0; i < sizeof(dense) - 1; i++) {
+            dense[i] = (i % 2 == 0) ? '"' : '\\';
+        }
+        dense[sizeof(dense) - 1] = '\0';
+        for (int i = 0; i < 500; i++) {
+            cbm_ui_log_append(dense);
+        }
+        th_server_t ts;
+        if (th_server_start(&ts) != 0) {
+            _exit(2);
+        }
+        char request[256];
+        int port = cbm_http_server_port(ts.srv);
+        snprintf(request, sizeof(request),
+                 "GET /api/logs?lines=500 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n", port);
+        size_t cap = 4u * 1024u * 1024u;
+        char *response = malloc(cap);
+        int received = response ? th_http(port, request, response, (int)cap) : 0;
+        int ok = received > 0 && strstr(response, "HTTP/1.1 200") != NULL;
+        free(response);
+        th_server_stop(&ts);
+        _exit(ok ? 0 : 3);
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    PASS();
+#endif
+}
+
 SUITE(httpd) {
     RUN_TEST(ui_server_browse_wide_dir_no_overflow);
+    RUN_TEST(ui_server_logs_escape_dense_no_overflow);
     /* Parser / helpers */
     RUN_TEST(httpd_parse_simple_get);
     RUN_TEST(httpd_parse_post_with_body_offset);

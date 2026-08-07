@@ -7,6 +7,10 @@
 #include "test_framework.h"
 #include "discover/discover.h"
 #include <string.h> /* strdup (test seam) */
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* ── Basic pattern matching ────────────────────────────────────── */
 
@@ -276,7 +280,42 @@ TEST(gi_merge_atomic_on_alloc_failure) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+TEST(gi_doublestar_backtracking_terminates) {
+#ifdef _WIN32
+    SKIP_PLATFORM("fork/alarm liveness guard is POSIX-only");
+#else
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char pattern[256];
+        int used = 0;
+        for (int i = 0; i < 20; i++) {
+            used += snprintf(pattern + used, sizeof(pattern) - (size_t)used, "a**");
+        }
+        (void)snprintf(pattern + used, sizeof(pattern) - (size_t)used, "X\n");
+        char path[64];
+        memset(path, 'a', sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+        alarm(20);
+        cbm_gitignore_t *gi = cbm_gitignore_parse(pattern);
+        if (!gi) {
+            _exit(2);
+        }
+        (void)cbm_gitignore_matches(gi, path, false);
+        cbm_gitignore_free(gi);
+        _exit(0);
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    PASS();
+#endif
+}
+
 SUITE(gitignore) {
+    RUN_TEST(gi_doublestar_backtracking_terminates);
     RUN_TEST(gi_empty_pattern);
     RUN_TEST(gi_exact_file);
     RUN_TEST(gi_wildcard_star);

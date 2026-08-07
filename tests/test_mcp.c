@@ -13,6 +13,7 @@
 #include <cli/cli.h>
 #include <mcp/index_supervisor.h> /* spawn-count hook — #845 in-process guard */
 #include <mcp/mcp.h>
+#include <mcp/mcp_internal.h>
 #include <mcp/usage_stats.h>
 #include <pipeline/pipeline.h>
 #include <store/store.h>
@@ -2001,6 +2002,100 @@ TEST(tool_trace_call_path_prefers_definition) {
     PASS();
 }
 
+TEST(trace_evidence_strategy_class_vocabulary_is_closed) {
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("lsp_trait_dispatch"), "lsp");
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("lsp_unresolved"), "unresolved");
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("unknown"), "unresolved");
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("php_self_static"), "language_rule");
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("perl_method_typed"), "language_rule");
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("callee_suffix"), "heuristic");
+    ASSERT_STR_EQ(cbm_mcp_edge_strategy_class("some_future_resolver"), "heuristic");
+    ASSERT_NULL(cbm_mcp_edge_strategy_class(NULL));
+    ASSERT_NULL(cbm_mcp_edge_strategy_class(""));
+    PASS();
+}
+
+TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "ev-proj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/ev");
+
+    cbm_node_t caller = {.project = proj,
+                         .label = "Function",
+                         .name = "caller",
+                         .qualified_name = "ev-proj.src.caller",
+                         .file_path = "src/a.c",
+                         .start_line = 1,
+                         .end_line = 5};
+    cbm_node_t callee = {.project = proj,
+                         .label = "Function",
+                         .name = "target",
+                         .qualified_name = "ev-proj.src.target",
+                         .file_path = "src/a.c",
+                         .start_line = 10,
+                         .end_line = 20};
+    int64_t caller_id = cbm_store_upsert_node(st, &caller);
+    int64_t callee_id = cbm_store_upsert_node(st, &callee);
+    ASSERT_GT(caller_id, 0);
+    ASSERT_GT(callee_id, 0);
+    cbm_edge_t edge = {
+        .project = proj,
+        .source_id = caller_id,
+        .target_id = callee_id,
+        .type = "CALLS",
+        .properties_json = "{\"callee\":\"target\",\"confidence\":0.95,"
+                           "\"strategy\":\"lsp_trait_dispatch\",\"candidates\":1}"};
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+
+    char *plain = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"caller\","
+             "\"project\":\"ev-proj\",\"direction\":\"outbound\"}}}");
+    ASSERT_NOT_NULL(plain);
+    char *plain_text = extract_text_content(plain);
+    ASSERT_NOT_NULL(plain_text);
+    ASSERT_NOT_NULL(strstr(plain_text, "target"));
+    ASSERT_NULL(strstr(plain_text, "strategy"));
+    ASSERT_NULL(strstr(plain_text, "lsp_trait_dispatch"));
+    free(plain_text);
+    free(plain);
+
+    char *toon = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"caller\","
+             "\"project\":\"ev-proj\",\"direction\":\"outbound\","
+             "\"include_evidence\":true}}}");
+    ASSERT_NOT_NULL(toon);
+    char *toon_text = extract_text_content(toon);
+    ASSERT_NOT_NULL(toon_text);
+    ASSERT_NOT_NULL(strstr(toon_text, "strategy"));
+    ASSERT_NOT_NULL(strstr(toon_text, "confidence"));
+    ASSERT_NOT_NULL(strstr(toon_text, "lsp"));
+    ASSERT_NOT_NULL(strstr(toon_text, "0.95"));
+    ASSERT_NULL(strstr(toon_text, "lsp_trait_dispatch"));
+    free(toon_text);
+    free(toon);
+
+    char *json = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{\"function_name\":\"caller\","
+             "\"project\":\"ev-proj\",\"direction\":\"outbound\","
+             "\"include_evidence\":true,\"format\":\"json\"}}}");
+    ASSERT_NOT_NULL(json);
+    char *json_text = extract_text_content(json);
+    ASSERT_NOT_NULL(json_text);
+    ASSERT_NOT_NULL(strstr(json_text, "\"strategy\":\"lsp\""));
+    ASSERT_NOT_NULL(strstr(json_text, "\"confidence\":0.95"));
+    ASSERT_NULL(strstr(json_text, "lsp_trait_dispatch"));
+    free(json_text);
+    free(json);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* Reproduce-first (#887): the client-supplied `depth` on trace_call_path must be
  * clamped to the MCP ceiling (cbm_mcp_max_depth(), default 15). On origin/main
  * an MCP_MAX_DEPTH=15 constant was defined but never applied — `depth` flowed
@@ -3682,6 +3777,136 @@ TEST(tool_detect_changes_not_found_rich_error) {
     restore_cache_dir(saved_copy);
     free(saved_copy);
     cbm_rmdir(cache);
+    PASS();
+}
+
+TEST(detect_changes_node_in_hunks_overlap) {
+    cbm_changed_hunk_t hunks[2] = {
+        {.path = "pkg/mod.py", .start_line = 10, .end_line = 12},
+        {.path = "pkg/other.py", .start_line = 1, .end_line = 1},
+    };
+    cbm_node_t inside = {.start_line = 8, .end_line = 15};
+    cbm_node_t before = {.start_line = 1, .end_line = 9};
+    cbm_node_t after = {.start_line = 13, .end_line = 20};
+    ASSERT(cbm_detect_node_in_hunks(&inside, hunks, 2, "pkg/mod.py"));
+    ASSERT_FALSE(cbm_detect_node_in_hunks(&before, hunks, 2, "pkg/mod.py"));
+    ASSERT_FALSE(cbm_detect_node_in_hunks(&after, hunks, 2, "pkg/mod.py"));
+    ASSERT_FALSE(cbm_detect_node_in_hunks(&inside, hunks, 2, "pkg/unrelated.py"));
+    PASS();
+}
+
+static bool detect_changes_git_step(const char *repo, const char *step) {
+    char cmd[1200];
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" -c user.name=t -c user.email=t@t.io "
+             "-c init.defaultBranch=main -c commit.gpgsign=false %s",
+             repo, step);
+    return system(cmd) == 0;
+}
+
+TEST(detect_changes_scopes_symbols_to_changed_lines) {
+    char repo[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-detect-scope-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(repo)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+
+    char source[640];
+    snprintf(source, sizeof(source), "%s/mod.py", repo);
+    ASSERT_EQ(th_write_file(source, "SETTING = 1\n\n"
+                                        "def foo():\n"
+                                        "    value = 1\n"
+                                        "    return value\n"
+                                        "\n\n"
+                                        "def bar():\n"
+                                        "    value = 2\n"
+                                        "    return value\n"),
+              0);
+    if (!detect_changes_git_step(repo, "init -q") ||
+        !detect_changes_git_step(repo, "add -A") ||
+        !detect_changes_git_step(repo, "commit -q -m init")) {
+        th_rmtree(repo);
+        FAIL("git fixture setup failed");
+    }
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *project = "detect-scope";
+    cbm_mcp_server_set_project(srv, project);
+    cbm_store_upsert_project(st, project, repo);
+    cbm_node_t module = {.project = project,
+                         .label = "Module",
+                         .name = "mod",
+                         .qualified_name = "detect-scope.mod",
+                         .file_path = "mod.py",
+                         .start_line = 1,
+                         .end_line = 10};
+    cbm_node_t foo = {.project = project,
+                      .label = "Function",
+                      .name = "foo",
+                      .qualified_name = "detect-scope.mod.foo",
+                      .file_path = "mod.py",
+                      .start_line = 3,
+                      .end_line = 5};
+    cbm_node_t bar = {.project = project,
+                      .label = "Function",
+                      .name = "bar",
+                      .qualified_name = "detect-scope.mod.bar",
+                      .file_path = "mod.py",
+                      .start_line = 8,
+                      .end_line = 10};
+    ASSERT_GT(cbm_store_upsert_node(st, &module), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &foo), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &bar), 0);
+
+    ASSERT_EQ(th_write_file(source, "SETTING = 1\n\n"
+                                        "def foo():\n"
+                                        "    value = 11\n"
+                                        "    return value\n"
+                                        "\n\n"
+                                        "def bar():\n"
+                                        "    value = 2\n"
+                                        "    return value\n"),
+              0);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "detect_changes",
+        "{\"project\":\"detect-scope\",\"base_branch\":\"main\",\"depth\":1}");
+    ASSERT_NOT_NULL(response);
+    char *text = extract_text_content(response);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"foo\""));
+    ASSERT_NULL(strstr(text, "\"name\":\"bar\""));
+    ASSERT_NULL(strstr(text, "\"name\":\"mod\""));
+
+    free(text);
+    free(response);
+
+    /* A module-level-only change overlaps no callable. Fall back to the old
+     * whole-file behavior so precision never reduces recall. */
+    ASSERT_EQ(th_write_file(source, "SETTING = 2\n\n"
+                                        "def foo():\n"
+                                        "    value = 1\n"
+                                        "    return value\n"
+                                        "\n\n"
+                                        "def bar():\n"
+                                        "    value = 2\n"
+                                        "    return value\n"),
+              0);
+    response = cbm_mcp_handle_tool(
+        srv, "detect_changes",
+        "{\"project\":\"detect-scope\",\"base_branch\":\"main\",\"depth\":1}");
+    ASSERT_NOT_NULL(response);
+    text = extract_text_content(response);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"foo\""));
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"bar\""));
+    ASSERT_NULL(strstr(text, "\"name\":\"mod\""));
+
+    free(text);
+    free(response);
+    cbm_mcp_server_free(srv);
+    th_rmtree(repo);
     PASS();
 }
 
@@ -6746,6 +6971,8 @@ SUITE(mcp) {
     RUN_TEST(tool_explain_impact_filters_docs_and_merges_module_file_candidates);
     RUN_TEST(tool_trace_call_path_ambiguous);
     RUN_TEST(tool_trace_call_path_prefers_definition);
+    RUN_TEST(trace_evidence_strategy_class_vocabulary_is_closed);
+    RUN_TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped);
     RUN_TEST(tool_trace_call_path_depth_clamped);
     RUN_TEST(tool_trace_call_path_distinct_defs_not_over_unioned);
     RUN_TEST(tool_trace_call_path_dts_stub_unions_with_impl);
@@ -6792,6 +7019,8 @@ SUITE(mcp) {
     RUN_TEST(tool_manage_adr_get_accepts_abs_path);
     RUN_TEST(tool_manage_adr_get_accepts_symlink_path);
     RUN_TEST(tool_detect_changes_not_found_rich_error);
+    RUN_TEST(detect_changes_node_in_hunks_overlap);
+    RUN_TEST(detect_changes_scopes_symbols_to_changed_lines);
     RUN_TEST(tool_ingest_traces_basic);
     RUN_TEST(tool_ingest_traces_empty);
 

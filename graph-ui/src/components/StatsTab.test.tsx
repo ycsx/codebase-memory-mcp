@@ -400,6 +400,31 @@ describe("StatsTab project updates", () => {
     expect(updateRequests).toEqual(["alpha", "beta"]);
   });
 
+  it("disables conflicting actions while a project is being indexed", async () => {
+    mockIndexedProjects(["active-project"]);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/index-status") {
+        return new Response(JSON.stringify([{
+          job_id: 42,
+          slot: 0,
+          status: "indexing",
+          path: "C:/repo/active-project",
+          project: "active-project",
+          source: "local",
+        }]), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return originalFetch(input, init);
+    }));
+
+    render(<StatsTab onSelectProject={() => {}} />);
+
+    const updateButton = await screen.findByRole("button", { name: messages.en.projects.updating });
+    expect(updateButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: messages.en.projects.updateAll })).toBeDisabled();
+    expect(screen.getByTitle(messages.en.projects.deleteTitle)).toBeDisabled();
+  });
+
   it("sorts projects case-insensitively and shows project and latest reindex times", async () => {
     const older = "2026-08-01T02:03:00Z";
     const newer = "2026-08-02T03:04:00Z";

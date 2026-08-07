@@ -18,7 +18,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "discover/discover.h" /* cbm_ignored_file_t (#963) */
+#include "discover/discover.h"    /* cbm_ignored_file_t (#963) */
+#include "foundation/constants.h" /* CBM_SZ_512 */
 
 /* Forward declarations */
 typedef struct cbm_store cbm_store_t;
@@ -158,6 +159,17 @@ char *cbm_pipeline_fqn_module_dir(const char *project, const char *rel_path, boo
 
 /* Folder QN: project.dir.parts. Caller must free(). */
 char *cbm_pipeline_fqn_folder(const char *project, const char *rel_dir);
+
+/* Git diff hunks are also consumed by MCP detect_changes so it can scope
+ * impacted symbols to the lines that actually changed. */
+typedef struct {
+    char path[CBM_SZ_512];
+    int start_line;
+    int end_line;
+} cbm_changed_hunk_t;
+
+/* Parse `git diff --unified=0` output. Returns count written to out. */
+int cbm_parse_hunks(const char *output, cbm_changed_hunk_t *out, int max_out);
 
 /* Resolve an import specifier that uses a relative path (./foo, ../bar, .foo,
  * or an unqualified local name like "foo.h") against the importing file's

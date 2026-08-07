@@ -39,17 +39,20 @@ struct cbm_gitignore {
 
 /* ── Pattern matching engine ─────────────────────────────────────── */
 
+enum { GI_MATCH_MAX_STEPS = 20000 };
+
 /* Forward declaration for recursive calls. */
-static bool glob_match(const char *pat, const char *str); // NOLINT(misc-no-recursion)
+static bool glob_match(const char *pat, const char *str,
+                       int *budget); // NOLINT(misc-no-recursion)
 
 /* Match a ** (doublestar-slash) pattern: try rest at every / boundary. */
 static bool glob_match_doublestar_slash(const char *pat, // NOLINT(misc-no-recursion)
-                                        const char *str) {
-    if (glob_match(pat, str)) {
+                                        const char *str, int *budget) {
+    if (glob_match(pat, str, budget)) {
         return true;
     }
     for (const char *s = str; *s; s++) {
-        if (*s == '/' && glob_match(pat, s + SKIP_ONE)) {
+        if (*s == '/' && glob_match(pat, s + SKIP_ONE, budget)) {
             return true;
         }
     }
@@ -58,9 +61,9 @@ static bool glob_match_doublestar_slash(const char *pat, // NOLINT(misc-no-recur
 
 /* Match a ** (doublestar) followed by non-slash: try at every position. */
 static bool glob_match_doublestar_any(const char *pat, // NOLINT(misc-no-recursion)
-                                      const char *str) {
+                                      const char *str, int *budget) {
     for (const char *s = str;; s++) {
-        if (glob_match(pat, s)) {
+        if (glob_match(pat, s, budget)) {
             return true;
         }
         if (!*s) {
@@ -70,9 +73,10 @@ static bool glob_match_doublestar_any(const char *pat, // NOLINT(misc-no-recursi
 }
 
 /* Match a * (single star): match any sequence not containing /. */
-static bool glob_match_star(const char *pat, const char *str) { // NOLINT(misc-no-recursion)
+static bool glob_match_star(const char *pat, const char *str,
+                            int *budget) { // NOLINT(misc-no-recursion)
     for (const char *s = str;; s++) {
-        if (glob_match(pat, s)) {
+        if (glob_match(pat, s, budget)) {
             return true;
         }
         if (!*s || *s == '/') {
@@ -119,24 +123,29 @@ static bool glob_match_charclass(const char *pat, char ch, const char **pat_out)
  * Handles: * (non-slash), ** (any path), ? (single non-slash), [class]
  */
 /* Handle ** at current position. Returns match result. */
-static bool glob_match_doublestar(const char *pat, const char *str) { // NOLINT(misc-no-recursion)
+static bool glob_match_doublestar(const char *pat, const char *str,
+                                  int *budget) { // NOLINT(misc-no-recursion)
     if (pat[GI_CHAR_IDX2] == '/') {
-        return glob_match_doublestar_slash(pat + GI_SKIP3, str);
+        return glob_match_doublestar_slash(pat + GI_SKIP3, str, budget);
     }
     if (pat[GI_CHAR_IDX2] == '\0') {
         return true;
     }
-    return glob_match_doublestar_any(pat + GI_CHAR_IDX2, str);
+    return glob_match_doublestar_any(pat + GI_CHAR_IDX2, str, budget);
 }
 
-static bool glob_match(const char *pat, const char *str) { // NOLINT(misc-no-recursion)
+static bool glob_match(const char *pat, const char *str,
+                       int *budget) { // NOLINT(misc-no-recursion)
+    if (--*budget <= 0) {
+        return false;
+    }
     while (*pat && *str) {
         if (pat[0] == '*' && pat[GI_CHAR_IDX1] == '*') {
-            return glob_match_doublestar(pat, str);
+            return glob_match_doublestar(pat, str, budget);
         }
 
         if (*pat == '*') {
-            return glob_match_star(pat + SKIP_ONE, str);
+            return glob_match_star(pat + SKIP_ONE, str, budget);
         }
 
         if (*pat == '?') {
@@ -169,6 +178,11 @@ static bool glob_match(const char *pat, const char *str) { // NOLINT(misc-no-rec
         pat++;
     }
     return *pat == '\0' && *str == '\0';
+}
+
+static bool glob_match_bounded(const char *pat, const char *str) {
+    int budget = GI_MATCH_MAX_STEPS;
+    return glob_match(pat, str, &budget);
 }
 
 /* ── Pattern parsing ─────────────────────────────────────────────── */
@@ -320,7 +334,7 @@ cbm_gitignore_t *cbm_gitignore_load(const char *path) {
 
 /* Match a non-rooted pattern against basename and path suffixes. */
 static bool match_unrooted(const char *pattern, const char *rel_path, const char *basename) {
-    if (glob_match(pattern, basename)) {
+    if (glob_match_bounded(pattern, basename)) {
         return true;
     }
     if (!strchr(rel_path, '/')) {
@@ -329,7 +343,7 @@ static bool match_unrooted(const char *pattern, const char *rel_path, const char
     /* Try matching at every / boundary */
     const char *s = rel_path;
     while (*s) {
-        if (glob_match(pattern, s)) {
+        if (glob_match_bounded(pattern, s)) {
             return true;
         }
         const char *next = strchr(s, '/');
@@ -359,7 +373,7 @@ int cbm_gitignore_match_result(const cbm_gitignore_t *gi, const char *rel_path, 
             continue;
         }
 
-        bool this_match = p->rooted ? glob_match(p->pattern, rel_path)
+        bool this_match = p->rooted ? glob_match_bounded(p->pattern, rel_path)
                                     : match_unrooted(p->pattern, rel_path, basename);
 
         if (this_match) {

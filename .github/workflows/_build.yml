@@ -175,37 +175,9 @@ jobs:
         env:
           RELEASE_ARCH: ${{ matrix.goarch }}
         run: |
-          DMG="codebase-memory-mcp-ui-darwin-${RELEASE_ARCH}.dmg"
-          MOUNT_DIR=$(mktemp -d)
-          cleanup() {
-            hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true
-            rmdir "$MOUNT_DIR" 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT_DIR" -quiet
-          APP=$(find "$MOUNT_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)
-          if [ -z "$APP" ]; then
-            echo "DMG does not contain an application bundle" >&2
-            exit 1
-          fi
-
-          codesign --verify --deep --strict "$APP"
-          DESKTOP_BINARY="$APP/Contents/MacOS/Codebase Memory"
-          MCP_BINARY="$APP/Contents/Resources/bin/codebase-memory-mcp"
-          test -x "$DESKTOP_BINARY"
-          test -x "$MCP_BINARY"
-          test -f "$APP/Contents/Resources/LICENSE"
-          test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
-          "$MCP_BINARY" --version
-
-          if [ "$RELEASE_ARCH" = "arm64" ]; then
-            file "$DESKTOP_BINARY" | grep -q 'arm64'
-            file "$MCP_BINARY" | grep -q 'arm64'
-          else
-            file "$DESKTOP_BINARY" | grep -q 'x86_64'
-            file "$MCP_BINARY" | grep -q 'x86_64'
-          fi
+          bash scripts/ci/verify-macos-desktop-dmg.sh \
+            "codebase-memory-mcp-ui-darwin-${RELEASE_ARCH}.dmg" \
+            "$RELEASE_ARCH"
 
       - name: Attest macOS Desktop DMG provenance
         if: ${{ inputs.attest && startsWith(matrix.os, 'macos') }}

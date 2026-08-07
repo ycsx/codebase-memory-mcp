@@ -81,6 +81,11 @@ bash "$ROOT/tests/test_parent_watchdog.sh"
 echo "=== Step 5b: worker-mode watchdog regression (#845) ==="
 bash "$ROOT/tests/test_worker_watchdog.sh"
 
+# A valid MCP error is a healthy worker response. The supervisor must preserve
+# it instead of classifying the worker process as crashed.
+echo "=== Step 5c: worker MCP error transport regression ==="
+bash "$ROOT/tests/test_worker_error_response.sh"
+
 # Step 6: security-strings URL allow-list regression. The MSYS2 CLANG64 toolchain
 # bakes its package-tracker URL into the static Windows .exe; the binary string
 # audit must allow-list it (Windows-only — Linux smoke never saw it).

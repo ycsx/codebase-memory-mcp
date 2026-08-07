@@ -271,6 +271,20 @@ bool cbm_validate_shell_arg(const char *s) {
     return true;
 }
 
+bool cbm_validate_shell_path_arg(const char *path) {
+    if (!cbm_validate_shell_arg(path)) {
+        return false;
+    }
+#ifdef _WIN32
+    for (const char *p = path; *p; p++) {
+        if (*p == '%' || *p == '!' || *p == '^') {
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
 bool cbm_validate_project_name(const char *name) {
     if (!name || !*name)
         return false;

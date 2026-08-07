@@ -220,6 +220,23 @@ TEST(shell_rejects_newline) {
     PASS();
 }
 
+TEST(shell_path_arg_rejects_cmd_expansion) {
+    ASSERT_FALSE(cbm_validate_shell_path_arg("foo'bar"));
+    ASSERT_FALSE(cbm_validate_shell_path_arg("$(whoami)"));
+    ASSERT_FALSE(cbm_validate_shell_path_arg("foo;rm -rf /"));
+    ASSERT_FALSE(cbm_validate_shell_path_arg(NULL));
+#ifdef _WIN32
+    ASSERT_FALSE(cbm_validate_shell_path_arg("C:/repo/%USERPROFILE%"));
+    ASSERT_FALSE(cbm_validate_shell_path_arg("C:/repo/!PATH!"));
+    ASSERT_FALSE(cbm_validate_shell_path_arg("C:/repo/a^b"));
+    ASSERT_TRUE(cbm_validate_shell_path_arg("C:/Users/dev/my repo"));
+#else
+    ASSERT_TRUE(cbm_validate_shell_path_arg("/tmp/repo/100%"));
+    ASSERT_TRUE(cbm_validate_shell_path_arg("/tmp/my repo"));
+#endif
+    PASS();
+}
+
 TEST(shell_rejects_carriage_return) {
     ASSERT_FALSE(cbm_validate_shell_arg("foo\rbar"));
     PASS();
@@ -739,14 +756,20 @@ TEST(popen_isolates_listening_socket) {
      * regression is guaranteed to leak it (and this test to go RED). */
     ASSERT(SetHandleInformation((HANDLE)ls, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT));
 
-    char self[MAX_PATH];
-    ASSERT(GetModuleFileNameA(NULL, self, sizeof(self)) > 0);
+    wchar_t self_w[MAX_PATH];
+    ASSERT(GetModuleFileNameW(NULL, self_w, MAX_PATH) > 0);
+    char *self = cbm_wide_to_utf8(self_w);
+    ASSERT_NOT_NULL(self);
 
-    char cmd[MAX_PATH + 64];
-    snprintf(cmd, sizeof(cmd), "\"%s\" __cbm_sockprobe %llu", self,
+    size_t cmd_size = strlen(self) + 64;
+    char *cmd = (char *)malloc(cmd_size);
+    ASSERT_NOT_NULL(cmd);
+    snprintf(cmd, cmd_size, "\"%s\" __cbm_sockprobe %llu", self,
              (unsigned long long)(uintptr_t)ls);
 
     FILE *fp = cbm_popen(cmd, "r");
+    free(cmd);
+    free(self);
     ASSERT_NOT_NULL(fp);
     ASSERT_EQ(cbm_popen_last_was_isolated(), 1);
     char drain[128];
@@ -782,6 +805,7 @@ SUITE(security) {
     RUN_TEST(shell_rejects_ampersand);
     RUN_TEST(shell_rejects_backslash);
     RUN_TEST(shell_rejects_newline);
+    RUN_TEST(shell_path_arg_rejects_cmd_expansion);
     RUN_TEST(shell_rejects_carriage_return);
     RUN_TEST(shell_rejects_null);
     RUN_TEST(shell_rejects_double_quote);

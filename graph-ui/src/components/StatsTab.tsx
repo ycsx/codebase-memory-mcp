@@ -1003,11 +1003,40 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   const [updatingProjects, setUpdatingProjects] = useState<Set<string>>(() => new Set());
+  const [activeIndexProjects, setActiveIndexProjects] = useState<Set<string>>(() => new Set());
+  const [hasActiveIndexJobs, setHasActiveIndexJobs] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{
     current: number;
     total: number;
     project: string;
   } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/index-status");
+        if (!res.ok) return;
+        const payload: unknown = await res.json();
+        if (!Array.isArray(payload) || cancelled) return;
+        const activeJobs = (payload as IndexJobStatus[]).filter((job) => job.status === "indexing");
+        setHasActiveIndexJobs(activeJobs.length > 0);
+        setActiveIndexProjects(new Set(
+          activeJobs
+            .map((job) => job.project)
+            .filter((project): project is string => Boolean(project)),
+        ));
+      } catch {
+        /* Keep the last known state during a transient status failure. */
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const aggregate = useMemo(() => {
     let totalNodes = 0, totalEdges = 0;
@@ -1187,7 +1216,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
             )}
             <button
               onClick={() => void updateAllProjects()}
-              disabled={projects.length === 0 || Boolean(batchProgress) || updatingProjects.size > 0}
+              disabled={projects.length === 0 || Boolean(batchProgress) || updatingProjects.size > 0 || hasActiveIndexJobs}
               className="inline-flex h-9 items-center gap-2 rounded-lg border border-amber-300/20 bg-amber-300/[0.08] px-3.5 text-[13px] font-semibold text-amber-200 transition-colors hover:bg-amber-300/[0.14] disabled:opacity-35"
             >
               <RefreshCw className={`h-4 w-4 ${batchProgress ? "animate-spin" : ""}`} aria-hidden="true" />
@@ -1225,7 +1254,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
           {projects.map((p) => {
             const totalNodes = p.schema?.node_labels?.reduce((s, l) => s + l.count, 0) ?? 0;
             const totalEdges = p.schema?.edge_types?.reduce((s, t) => s + t.count, 0) ?? 0;
-            const isUpdating = updatingProjects.has(p.project.name);
+            const isUpdating = updatingProjects.has(p.project.name) || activeIndexProjects.has(p.project.name);
             return (
               <article key={p.project.name} className="rounded-lg border border-white/[0.08] bg-card/70 p-4 shadow-sm transition-colors hover:border-white/[0.14] hover:bg-card sm:p-5">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -1260,7 +1289,8 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
                     </button>
                     <button
                       onClick={() => deleteProject(p.project.name)}
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-foreground/35 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      disabled={isUpdating || Boolean(batchProgress)}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-foreground/35 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-foreground/35"
                       title={t.projects.deleteTitle}
                       aria-label={t.projects.deleteTitle}
                     >

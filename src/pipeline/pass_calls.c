@@ -329,7 +329,7 @@ static void calls_append_args(char *props, size_t cap, const CBMCall *call) {
             n = snprintf(one, sizeof(one), "%s{\"i\":%d,\"e\":\"%s\"}", i > 0 ? "," : "", a->index,
                          esc_e);
         }
-        if (n <= 0 || (size_t)n >= cap - pos - PAIR_LEN) {
+        if (n <= 0 || pos + (size_t)n + PAIR_LEN >= cap) {
             break; /* not enough room — close the array with what fits */
         }
         memcpy(props + pos, one, (size_t)n);
