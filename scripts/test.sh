@@ -91,6 +91,7 @@ bash "$ROOT/tests/test_worker_error_response.sh"
 # audit must allow-list it (Windows-only — Linux smoke never saw it).
 echo "=== Step 6: security-strings allow-list regression ==="
 bash "$ROOT/tests/test_security_strings_allowlist.sh"
+bash "$ROOT/tests/test_security_strings_commands.sh"
 
 # Step 6b: VirusTotal polling must reuse reports for identical bytes, warn on
 # low engine coverage, and stop cleanly when an analysis remains queued.

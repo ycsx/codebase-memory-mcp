@@ -170,14 +170,20 @@ if $IS_SCRIPT; then
 else
 echo "--- Dangerous command detection ---"
 
-DANGEROUS_CMDS='wget|netcat|ncat|/dev/tcp|telnet'
+DANGEROUS_CMD_NAMES='wget|netcat|ncat|telnet'
+# Treat '-', '_', and '.' as part of an opaque binary string token. `grep -w`
+# considers '-' a word boundary, so random installer data such as `X-ncat`
+# was incorrectly classified as an embedded command. Real command forms still
+# match at shell/path boundaries, including `ncat`, `ncat.exe`, `/usr/bin/ncat`,
+# and `/dev/tcp/host/port`.
+DANGEROUS_CMDS="(^|[^[:alnum:]_.-])((${DANGEROUS_CMD_NAMES})(\\.exe)?|/dev/tcp)([^[:alnum:]_.-]|$)"
 # Known-benign matches (vendored grammar URI scheme tables, etc.). Each entry
 # is a regex matched against the full line; matches are stripped before
 # evaluation. Document the source so reviewers can verify the false positive.
 ALLOWED_DANGEROUS=(
     '^telnet$'  # rst tree-sitter grammar: valid_schemas[] in vendored/grammars/rst/tree_sitter_rst/chars.c
 )
-if grep -wE "$DANGEROUS_CMDS" "$STRINGS_FILE" > "$SEC_CMDS" 2>/dev/null && [ -s "$SEC_CMDS" ]; then
+if grep -E "$DANGEROUS_CMDS" "$STRINGS_FILE" > "$SEC_CMDS" 2>/dev/null && [ -s "$SEC_CMDS" ]; then
     for allow in "${ALLOWED_DANGEROUS[@]}"; do
         grep -vE "$allow" "$SEC_CMDS" > "${SEC_CMDS}.tmp" || true
         mv "${SEC_CMDS}.tmp" "$SEC_CMDS"
