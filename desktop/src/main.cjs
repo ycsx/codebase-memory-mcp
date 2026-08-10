@@ -242,6 +242,7 @@ if (gotLock) {
     service = new ServiceManager({
       appPath: app.getAppPath(),
       resourcesPath: process.resourcesPath,
+      statePath: path.join(app.getPath("userData"), "service-state.json"),
     });
     updateManager = new UpdateManager({
       currentVersion: app.getVersion(),

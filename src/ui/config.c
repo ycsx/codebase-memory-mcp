@@ -6,7 +6,6 @@
  */
 #include "foundation/constants.h"
 #include "ui/config.h"
-#include "ui/embedded_assets.h"
 #include "foundation/log.h"
 #include "foundation/platform.h"
 #include "foundation/compat_fs.h"
@@ -39,10 +38,8 @@ void cbm_ui_config_load(cbm_ui_config_t *cfg) {
 
     FILE *f = cbm_fopen(path, "rb");
     if (!f) {
-        /* No config file — auto-enable UI if binary has embedded assets */
-        if (CBM_EMBEDDED_FILE_COUNT > 0) {
-            cfg->ui_enabled = true;
-        }
+        /* The stdio MCP process must stay headless by default. The Desktop
+         * controller starts the explicit `console` service when UI is needed. */
         return;
     }
 

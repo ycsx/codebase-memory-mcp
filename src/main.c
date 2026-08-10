@@ -991,6 +991,12 @@ int main(int argc, char **argv) {
     if (!restricted_tool_profile && parse_ui_flags(argc, argv, &ui_cfg, &explicit_ui_enable)) {
         cbm_ui_config_save(&ui_cfg);
     }
+    if (!explicit_ui_enable) {
+        /* A persisted UI preference must not make every stdio MCP session
+         * start another watcher and HTTP listener. The Desktop owns the
+         * explicit `console` process; stdio UI remains an opt-in legacy mode. */
+        ui_cfg.ui_enabled = false;
+    }
     /* If the user explicitly asked for the UI but this binary has no embedded
      * frontend, the HTTP server can never start (see below). The warning that
      * covers this goes to the log sink, which a user running `--ui=true` on a

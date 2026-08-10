@@ -166,12 +166,16 @@ loopback interface. Add `--no-open` for CI or headless environments.
 Windows Setup and the macOS DMGs install **风暴之眼**, a system-tray Desktop
 controller for the local MCP console service. It can:
 
-- start, stop, and restart the service it manages, while treating externally started services as read-only
+- start, stop, and restart the service it manages, reclaiming it after Desktop restarts; unrelated externally started services remain read-only
 - open **可视化分析** and show service state, PID, port, uptime, memory, and live logs
 - copy an AI connection prompt that assumes MCP is already installed and ready
 - summarize MCP invocation count and frequency at file level
 - on Windows, check GitHub Releases for updates, download the matching AMD64/ARM64
   installer, verify SHA-256, stop the managed service, install, and relaunch the app
+
+The UI-enabled binary stays headless when used as a normal stdio MCP server. The
+Desktop controller owns the separate `console` process so one visual service is
+not created for every AI session.
 
 The service listens on loopback only and uses port `9749` by default. Automatic
 Desktop installation updates are currently Windows-only.

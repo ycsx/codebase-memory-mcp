@@ -63,6 +63,19 @@
 #include <mach-o/dyld.h>
 #endif
 
+static const char *desktop_service_token(void) {
+    const char *token = getenv("CBM_DESKTOP_SERVICE_TOKEN");
+    if (!token || strlen(token) < 48U || strlen(token) > 128U) {
+        return "";
+    }
+    for (const char *p = token; *p; p++) {
+        if (!(('0' <= *p && *p <= '9') || ('a' <= *p && *p <= 'f') || ('A' <= *p && *p <= 'F'))) {
+            return "";
+        }
+    }
+    return token;
+}
+
 /* ── Constants ────────────────────────────────────────────────── */
 
 /* Max JSON-RPC request body size (1 MB) — transport enforces the same cap. */
@@ -567,10 +580,13 @@ static void handle_processes(cbm_http_conn_t *c) {
         user_s = (double)u.QuadPart / 1e7;
         sys_s = (double)k.QuadPart / 1e7;
     }
+    const char *service_token = desktop_service_token();
     http_appendf(buf, sizeof(buf), &pos,
                  "{\"self_pid\":%d,\"self_rss_mb\":%.1f,"
-                 "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,\"processes\":[]}",
-                 (int)_getpid(), (double)rss_bytes / (1024.0 * 1024.0), user_s, sys_s);
+                 "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,"
+                 "\"service_token\":\"%s\",\"processes\":[]}",
+                 (int)_getpid(), (double)rss_bytes / (1024.0 * 1024.0), user_s, sys_s,
+                 service_token);
 #else
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
@@ -580,10 +596,12 @@ static void handle_processes(cbm_http_conn_t *c) {
 #endif
     http_appendf(buf, sizeof(buf), &pos,
                  "{\"self_pid\":%d,\"self_rss_mb\":%.1f,"
-                 "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,\"processes\":[",
+                 "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,"
+                 "\"service_token\":\"%s\",\"processes\":[",
                  (int)getpid(), (double)rss_kb / 1024.0,
                  (double)ru.ru_utime.tv_sec + (double)ru.ru_utime.tv_usec / 1e6,
-                 (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6);
+                 (double)ru.ru_stime.tv_sec + (double)ru.ru_stime.tv_usec / 1e6,
+                 desktop_service_token());
 
     FILE *fp = popen("LC_ALL=C ps -eo pid,pcpu,rss,etime,comm 2>/dev/null"
                      " | grep '[c]odebase-memory-mcp'",

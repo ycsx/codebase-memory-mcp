@@ -1,4 +1,6 @@
 const { EventEmitter, once } = require("node:events");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { execFile: nodeExecFile, spawn: nodeSpawn } = require("node:child_process");
 const { readConfiguredPort, resolveBinaryPath } = require("./binary-locator.cjs");
@@ -9,6 +11,58 @@ const MAX_LOG_ENTRIES = 600;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function validServiceToken(token) {
+  return typeof token === "string" && /^[a-f0-9]{48,128}$/i.test(token);
+}
+
+function readServiceState(statePath) {
+  if (!statePath) {
+    return null;
+  }
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (!validServiceToken(state?.token) || !Number.isInteger(state?.pid) || state.pid <= 0) {
+      return null;
+    }
+    if (!Number.isInteger(state?.port) || state.port <= 0 || state.port >= 65536) {
+      return null;
+    }
+    return {
+      pid: state.pid,
+      port: state.port,
+      token: state.token,
+      startedAt: Number.isFinite(state.startedAt) ? state.startedAt : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeServiceState(statePath, state) {
+  if (!statePath || !state) {
+    return;
+  }
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(statePath, `${JSON.stringify(state)}\n`, "utf8");
+  } catch {
+    // Persistence is best effort; the current Desktop process still owns the child.
+  }
+}
+
+function removeServiceState(statePath) {
+  if (!statePath) {
+    return;
+  }
+  try {
+    fs.unlinkSync(statePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      return;
+    }
+  }
 }
 
 function execFileText(file, args, options = {}) {
@@ -91,6 +145,7 @@ async function probeConsole(port, options = {}) {
       reachable: true,
       pid: Number.isInteger(pid) && pid > 0 ? pid : null,
       rssMb: Number.isFinite(Number(body.self_rss_mb)) ? Number(body.self_rss_mb) : null,
+      serviceToken: validServiceToken(body.service_token) ? body.service_token : null,
     };
   } catch {
     return { reachable: false, pid: null };
@@ -147,6 +202,9 @@ class ServiceManager extends EventEmitter {
     this.spawn = options.spawn ?? nodeSpawn;
     this.probe = options.probe ?? probeConsole;
     this.fetchUsage = options.fetchUsage ?? fetchUsageStats;
+    this.statePath = options.statePath ?? null;
+    this.killProcess = options.killProcess ?? ((pid) => process.kill(pid));
+    this.tokenFactory = options.tokenFactory ?? (() => crypto.randomBytes(32).toString("hex"));
     this.discoverPorts = options.discoverPorts ?? (this.platform === "win32"
       ? discoverWindowsConsolePorts
       : async () => []);
@@ -161,6 +219,9 @@ class ServiceManager extends EventEmitter {
       platform: this.platform,
     }));
     this.child = null;
+    this.adoptedPid = null;
+    this.persistedState = readServiceState(this.statePath);
+    this.serviceToken = this.persistedState?.token ?? null;
     this.binaryPath = this.resolveBinary();
     this.port = this.readPort();
     this.state = "stopped";
@@ -174,7 +235,7 @@ class ServiceManager extends EventEmitter {
   }
 
   snapshot() {
-    const managed = isOwnedProcess(this.child, this.lastProbe);
+    const managed = this.isManagedProcess();
     const pid = this.lastProbe.reachable
       ? this.lastProbe.pid
       : isChildAlive(this.child)
@@ -191,6 +252,36 @@ class ServiceManager extends EventEmitter {
       rssMb: this.lastProbe.rssMb ?? null,
       lastError: this.lastError,
     };
+  }
+
+  isManagedProcess(probe = this.lastProbe) {
+    if (isOwnedProcess(this.child, probe)) {
+      return true;
+    }
+    return Boolean(this.adoptedPid && this.serviceToken && probe?.reachable &&
+      probe.pid === this.adoptedPid && probe.serviceToken === this.serviceToken);
+  }
+
+  isPersistedService(probe) {
+    return Boolean(this.persistedState && this.serviceToken && probe?.reachable &&
+      probe.pid === this.persistedState.pid && probe.serviceToken === this.serviceToken);
+  }
+
+  saveServiceState(pid) {
+    this.persistedState = {
+      pid,
+      port: this.port,
+      token: this.serviceToken,
+      startedAt: this.startedAt,
+    };
+    writeServiceState(this.statePath, this.persistedState);
+  }
+
+  clearServiceState() {
+    this.persistedState = null;
+    this.serviceToken = null;
+    this.adoptedPid = null;
+    removeServiceState(this.statePath);
   }
 
   getLogs() {
@@ -225,6 +316,15 @@ class ServiceManager extends EventEmitter {
     this.binaryPath = this.resolveBinary();
     this.lastProbe = await this.probe(this.port);
 
+    if (this.persistedState?.port && this.persistedState.port !== configuredPort &&
+        !this.isPersistedService(this.lastProbe)) {
+      const persistedProbe = await this.probe(this.persistedState.port);
+      if (this.isPersistedService(persistedProbe)) {
+        this.port = this.persistedState.port;
+        this.lastProbe = persistedProbe;
+      }
+    }
+
     if (!this.lastProbe.reachable && !isChildAlive(this.child)) {
       const discovered = await this.findExternalConsole(configuredPort);
       if (discovered) {
@@ -234,12 +334,24 @@ class ServiceManager extends EventEmitter {
     }
 
     if (this.lastProbe.reachable) {
-      this.setState(isOwnedProcess(this.child, this.lastProbe) ? "running" : "external");
+      if (isOwnedProcess(this.child, this.lastProbe)) {
+        this.adoptedPid = null;
+        this.setState("running");
+      } else if (this.isPersistedService(this.lastProbe)) {
+        this.adoptedPid = this.lastProbe.pid;
+        this.startedAt = this.persistedState.startedAt;
+        this.setState("running");
+      } else {
+        this.setState("external");
+      }
     } else if (isChildAlive(this.child)) {
       if (this.state !== "stopping") {
         this.setState("starting", this.lastError);
       }
     } else if (this.state !== "error") {
+      if (!isChildAlive(this.child)) {
+        this.clearServiceState();
+      }
       this.setState("stopped");
     }
     return this.snapshot();
@@ -305,6 +417,8 @@ class ServiceManager extends EventEmitter {
 
     this.logs = [];
     this.startedAt = Date.now();
+    this.adoptedPid = null;
+    this.serviceToken = this.tokenFactory();
     this.lastProbe = { reachable: false, pid: null };
     this.setState("starting");
     this.appendLog("desktop", `正在启动 127.0.0.1:${this.port}`);
@@ -316,7 +430,7 @@ class ServiceManager extends EventEmitter {
         ["console", "--no-open", `--port=${this.port}`],
         {
           cwd: path.dirname(this.binaryPath),
-          env: this.env,
+          env: { ...this.env, CBM_DESKTOP_SERVICE_TOKEN: this.serviceToken },
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
         },
@@ -330,6 +444,7 @@ class ServiceManager extends EventEmitter {
     }
 
     this.child = child;
+    this.saveServiceState(child.pid);
     this.attachChild(child);
 
     const deadline = Date.now() + START_TIMEOUT_MS;
@@ -398,6 +513,7 @@ class ServiceManager extends EventEmitter {
       }
       this.child = null;
       this.startedAt = null;
+      this.clearServiceState();
       this.lastProbe = { reachable: false, pid: null };
       this.appendLog("desktop", `服务已退出（退出码 ${code ?? "无"}，信号 ${signal ?? "无"}）`);
       if (this.state !== "stopping" && this.state !== "external") {
@@ -414,7 +530,8 @@ class ServiceManager extends EventEmitter {
   async stopInternal() {
     await this.refresh();
     const child = this.child;
-    if (!child || !isOwnedProcess(child, this.lastProbe)) {
+    const adoptedPid = this.adoptedPid;
+    if ((!child || !isOwnedProcess(child, this.lastProbe)) && !adoptedPid) {
       if (this.lastProbe.reachable) {
         throw new Error("当前服务由其他程序启动，桌面端不会终止该进程");
       }
@@ -423,28 +540,53 @@ class ServiceManager extends EventEmitter {
     }
 
     this.setState("stopping");
-    this.appendLog("desktop", `正在停止 PID ${child.pid}`);
-    const exited = once(child, "exit");
-    child.kill();
-    await Promise.race([exited, delay(STOP_TIMEOUT_MS)]);
+    const pid = child?.pid ?? adoptedPid;
+    this.appendLog("desktop", `正在停止 PID ${pid}`);
+    if (child && isOwnedProcess(child, this.lastProbe)) {
+      const exited = once(child, "exit");
+      child.kill();
+      await Promise.race([exited, delay(STOP_TIMEOUT_MS)]);
 
-    if (isChildAlive(child)) {
-      const message = "服务未能在规定时间内停止";
-      this.setState("error", message);
-      throw new Error(message);
+      if (isChildAlive(child)) {
+        const message = "服务未能在规定时间内停止";
+        this.setState("error", message);
+        throw new Error(message);
+      }
+    } else {
+      try {
+        this.killProcess(pid);
+      } catch (error) {
+        if (error?.code !== "ESRCH") {
+          throw error;
+        }
+      }
+      const deadline = Date.now() + STOP_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        this.lastProbe = await this.probe(this.port);
+        if (!this.lastProbe.reachable || this.lastProbe.pid !== pid) {
+          break;
+        }
+        await delay(100);
+      }
+      if (this.lastProbe.reachable && this.lastProbe.pid === pid) {
+        const message = "接管的服务未能在规定时间内停止";
+        this.setState("error", message);
+        throw new Error(message);
+      }
     }
 
     this.child = null;
     this.startedAt = null;
     this.lastProbe = await this.probe(this.port);
-    this.setState(this.lastProbe.reachable ? "external" : "stopped");
+    this.clearServiceState();
+    this.setState("stopped");
     return this.snapshot();
   }
 
   restart() {
     return this.runExclusive(async () => {
       await this.refresh();
-      if (!isOwnedProcess(this.child, this.lastProbe)) {
+      if (!this.isManagedProcess()) {
         throw new Error("只能重启由桌面端启动的服务");
       }
       await this.stopInternal();

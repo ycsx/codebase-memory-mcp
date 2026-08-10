@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
 
 const require = createRequire(import.meta.url);
 const {
@@ -19,6 +22,7 @@ const {
   isOwnedProcess,
   parseListeningPorts,
   parseProcessIds,
+  probeConsole,
 } = require("../src/service-manager.cjs");
 
 test("binary locator preserves the documented priority", () => {
@@ -129,6 +133,101 @@ test("service manager refuses to stop a process it did not start", async () => {
   assert.equal(manager.snapshot().managed, false);
 });
 
+test("Desktop adopts its persisted console after the app restarts", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "cbm-desktop-service-"));
+  const statePath = path.join(directory, "service-state.json");
+  const token = "a".repeat(64);
+  let alive = true;
+  let killedPid = null;
+  writeFileSync(statePath, JSON.stringify({
+    pid: 9012,
+    port: 9749,
+    token,
+    startedAt: Date.now() - 5000,
+  }));
+
+  try {
+    const manager = new ServiceManager({
+      appPath: "C:\\repo\\desktop",
+      resourcesPath: "C:\\app\\resources",
+      env: {},
+      platform: "win32",
+      statePath,
+      readPort: () => 9749,
+      resolveBinary: () => "C:\\app\\codebase-memory-mcp.exe",
+      discoverPorts: async () => [],
+      probe: async () => alive
+        ? { reachable: true, pid: 9012, serviceToken: token, rssMb: 42 }
+        : { reachable: false, pid: null },
+      killProcess: (pid) => {
+        killedPid = pid;
+        alive = false;
+      },
+    });
+
+    const adopted = await manager.refresh();
+    assert.equal(adopted.state, "running");
+    assert.equal(adopted.managed, true);
+    assert.equal(adopted.pid, 9012);
+
+    const stopped = await manager.stop();
+    assert.equal(killedPid, 9012);
+    assert.equal(stopped.state, "stopped");
+    assert.equal(stopped.managed, false);
+    assert.equal(existsSync(statePath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Desktop passes and persists an ownership token when starting the console", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "cbm-desktop-service-"));
+  const statePath = path.join(directory, "service-state.json");
+  const child = new EventEmitter();
+  child.pid = 9013;
+  child.exitCode = 1;
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+  };
+  let spawnOptions = null;
+  let probeToken = null;
+
+  try {
+    const manager = new ServiceManager({
+      appPath: "C:\\repo\\desktop",
+      resourcesPath: "C:\\app\\resources",
+      env: { USERPROFILE: "C:\\Users\\test" },
+      platform: "win32",
+      statePath,
+      readPort: () => 9749,
+      resolveBinary: () => "C:\\app\\codebase-memory-mcp.exe",
+      discoverPorts: async () => [],
+      spawn: (_binary, _args, options) => {
+        spawnOptions = options;
+        probeToken = options.env.CBM_DESKTOP_SERVICE_TOKEN;
+        child.exitCode = null;
+        return child;
+      },
+      probe: async () => child.exitCode === null
+        ? { reachable: true, pid: child.pid, serviceToken: probeToken }
+        : { reachable: false, pid: null },
+    });
+
+    const started = await manager.start();
+    assert.equal(started.state, "running");
+    assert.equal(started.managed, true);
+    assert.match(spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN, /^[a-f0-9]{64}$/);
+    const saved = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.equal(saved.pid, child.pid);
+    assert.equal(saved.token, spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("usage stats are read from the local console endpoint", async () => {
   let requestedUrl = "";
   const stats = await fetchUsageStats(61401, {
@@ -143,6 +242,17 @@ test("usage stats are read from the local console endpoint", async () => {
   assert.equal(requestedUrl, "http://127.0.0.1:61401/api/usage-stats?limit=12");
   assert.equal(stats.available, true);
   assert.equal(stats.total_calls, 7);
+});
+
+test("console probe reads the Desktop ownership token", async () => {
+  const probe = await probeConsole(9749, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ self_pid: 9014, self_rss_mb: 12.5, service_token: "b".repeat(64) }),
+    }),
+  });
+  assert.equal(probe.pid, 9014);
+  assert.equal(probe.serviceToken, "b".repeat(64));
 });
 
 test("desktop exposes branding, AI routing, usage stats, and verified updates", async () => {
