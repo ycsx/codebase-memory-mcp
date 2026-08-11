@@ -3598,7 +3598,7 @@ static const char *eval_split_func(binding_t *b, const cbm_return_item_t *item, 
     if (item->has_list_index) {
         if (delimiter_len == 0) {
             size_t value_len = strlen(value);
-            if ((size_t)item->list_index >= value_len || bufsz < PAIR_LEN) {
+            if ((size_t)item->list_index >= value_len) {
                 return "";
             }
             buf[0] = value[item->list_index];
