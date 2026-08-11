@@ -5293,23 +5293,13 @@ static int arch_packages(cbm_store_t *s, const char *project, const char *path,
     char sqlbuf[ST_SQL_BUF];
     const char *base = "SELECT n.name, COUNT(*) as cnt FROM nodes n "
                        "WHERE n.project=?1 AND n.label='Package'";
-    if (scoped) {
-        snprintf(sqlbuf, sizeof(sqlbuf),
-                 "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3) "
-                 "GROUP BY n.name ORDER BY cnt DESC LIMIT 15",
-                 base);
-    } else {
-        snprintf(sqlbuf, sizeof(sqlbuf), "%s GROUP BY n.name ORDER BY cnt DESC LIMIT 15", base);
-    }
+    snprintf(sqlbuf, sizeof(sqlbuf), "%s GROUP BY n.name ORDER BY cnt DESC LIMIT 15", base);
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
         store_set_error_sqlite(s, "arch_packages");
         return CBM_STORE_ERR;
     }
     bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
-    }
 
     int cap = ST_INIT_CAP_16;
     int n = 0;

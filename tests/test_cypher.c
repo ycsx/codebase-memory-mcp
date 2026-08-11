@@ -989,6 +989,21 @@ TEST(cypher_func_type) {
     PASS();
 }
 
+TEST(cypher_where_type_function) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, "MATCH (a)-[r]->(b) WHERE type(r) = \"CALLS\" RETURN type(r)",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 3);
+    for (int i = 0; i < r.row_count; i++) {
+        ASSERT_STR_EQ(r.rows[i][0], "CALLS");
+    }
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_func_id) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -1570,22 +1585,40 @@ TEST(cypher_exec_count_distinct_issue239) {
     PASS();
 }
 
-/* issue #373: an unsupported computed expression in WITH/RETURN (an unknown
- * function like split(...) or list indexing [..]) must FAIL LOUDLY with a clear
- * "unsupported function" error rather than silently projecting an empty column
- * (which looks like a valid-but-blank result and hides the real problem). */
-TEST(cypher_exec_unsupported_func_errors_issue373) {
+/* split(...)[index] can be projected through WITH and used as a grouping key. */
+TEST(cypher_exec_split_index) {
     cbm_store_t *s = setup_cypher_store();
 
     cbm_cypher_result_t r = {0};
     int rc = cbm_cypher_execute(
-        s, "MATCH (f:Function) WITH split(f.name)[0] AS top, count(*) AS c RETURN top, c", "test",
-        0, &r);
-    ASSERT_TRUE(rc != 0); /* unsupported function now fails loudly */
-    ASSERT_NOT_NULL(r.error);
-    ASSERT_TRUE(strstr(r.error, "unsupported") != NULL);
-    ASSERT_TRUE(strstr(r.error, "split") != NULL);
+        s,
+        "MATCH (f:Function) WITH split(f.qualified_name, \".\")[0] AS root, count(*) AS c "
+        "RETURN root, c",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "test");
+    ASSERT_STR_EQ(r.rows[0][1], "4");
     cbm_cypher_result_free(&r);
+
+    cbm_cypher_result_t unindexed = {0};
+    rc = cbm_cypher_execute(
+        s, "MATCH (f:Function) WHERE f.name = \"HandleOrder\" RETURN split(f.name, \"Order\")",
+        "test", 0, &unindexed);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(unindexed.row_count, 1);
+    ASSERT_STR_EQ(unindexed.rows[0][0], "[\"Handle\",\"\"]");
+    cbm_cypher_result_free(&unindexed);
+
+    cbm_cypher_result_t filtered = {0};
+    rc = cbm_cypher_execute(s,
+                            "MATCH (f:Function) WHERE split(f.qualified_name, \".\")[0] = \"test\" "
+                            "RETURN count(f)",
+                            "test", 0, &filtered);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(filtered.row_count, 1);
+    ASSERT_STR_EQ(filtered.rows[0][0], "4");
+    cbm_cypher_result_free(&filtered);
 
     cbm_store_close(s);
     PASS();
@@ -2771,6 +2804,25 @@ TEST(cypher_exec_case) {
     PASS();
 }
 
+TEST(cypher_exec_sum_case) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s,
+        "MATCH (f:Function) RETURN count(f) AS total, "
+        "sum(CASE WHEN f.file_path STARTS WITH \"h\" THEN 1 ELSE 0 END) AS handlers, "
+        "sum(CASE WHEN f.file_path ENDS WITH \".go\" THEN 1 ELSE 0 END) AS go_files",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "4");
+    ASSERT_STR_EQ(r.rows[0][1], "1");
+    ASSERT_STR_EQ(r.rows[0][2], "4");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_parse_tolower) {
     cbm_query_t *q = NULL;
     char *err = NULL;
@@ -3068,6 +3120,52 @@ TEST(cypher_exec_union_all) {
     ASSERT_EQ(rc, 0);
     /* UNION ALL keeps duplicates → 2 rows */
     ASSERT_EQ(r.row_count, 2);
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_architecture_union_all_literals) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t views = {.project = "test",
+                        .label = "File",
+                        .name = "view.ts",
+                        .qualified_name = "src.views.view.ts",
+                        .file_path = "src/views/view.ts"};
+    cbm_node_t components = {.project = "test",
+                             .label = "File",
+                             .name = "button.ts",
+                             .qualified_name = "src.components.button.ts",
+                             .file_path = "src/components/button.ts"};
+    cbm_node_t services = {.project = "test",
+                           .label = "File",
+                           .name = "api.ts",
+                           .qualified_name = "src.services.api.ts",
+                           .file_path = "src/services/api.ts"};
+    cbm_store_upsert_node(s, &views);
+    cbm_store_upsert_node(s, &components);
+    cbm_store_upsert_node(s, &services);
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:File) WHERE f.file_path STARTS WITH \"src/views/\" "
+                                "RETURN \"views\" AS module, count(f) AS files "
+                                "UNION ALL "
+                                "MATCH (f:File) WHERE f.file_path STARTS WITH \"src/components/\" "
+                                "RETURN \"components\" AS module, count(f) AS files "
+                                "UNION ALL "
+                                "MATCH (f:File) WHERE f.file_path STARTS WITH \"src/services/\" "
+                                "RETURN \"services\" AS module, count(f) AS files",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 3);
+    ASSERT_STR_EQ(r.rows[0][0], "views");
+    ASSERT_STR_EQ(r.rows[0][1], "1");
+    ASSERT_STR_EQ(r.rows[1][0], "components");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
+    ASSERT_STR_EQ(r.rows[2][0], "services");
+    ASSERT_STR_EQ(r.rows[2][1], "1");
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
     PASS();
@@ -3493,6 +3591,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_return_properties);
     RUN_TEST(cypher_func_labels);
     RUN_TEST(cypher_func_type);
+    RUN_TEST(cypher_where_type_function);
     RUN_TEST(cypher_func_id);
     RUN_TEST(cypher_func_keys);
     RUN_TEST(cypher_func_properties);
@@ -3524,7 +3623,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_where_label_test_issue241);
     RUN_TEST(cypher_exec_label_alternation_issue242);
     RUN_TEST(cypher_exec_count_distinct_issue239);
-    RUN_TEST(cypher_exec_unsupported_func_errors_issue373);
+    RUN_TEST(cypher_exec_split_index);
     RUN_TEST(cypher_exec_unknown_func_return_errors);
     RUN_TEST(cypher_exec_inline_props);
     RUN_TEST(cypher_parse_where_starts_with);
@@ -3596,6 +3695,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_toupper);
     RUN_TEST(cypher_exec_tostring);
     RUN_TEST(cypher_exec_case);
+    RUN_TEST(cypher_exec_sum_case);
     RUN_TEST(cypher_parse_tolower);
     RUN_TEST(cypher_parse_case);
     /* Phase 6: WITH clause */
@@ -3617,6 +3717,7 @@ SUITE(cypher) {
     /* Phase 8: UNION */
     RUN_TEST(cypher_exec_union);
     RUN_TEST(cypher_exec_union_all);
+    RUN_TEST(cypher_exec_architecture_union_all_literals);
     RUN_TEST(cypher_parse_union);
     /* Phase 9: UNWIND */
     RUN_TEST(cypher_parse_unwind);

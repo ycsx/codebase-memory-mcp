@@ -868,6 +868,8 @@ static cbm_expr_t *parse_or_expr(parser_t *p);
 /* Multi-arg scalar function support, shared with the RETURN-item parser (#874) */
 static bool is_multiarg_func_call(parser_t *p);
 static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item);
+static bool is_named_func_call(parser_t *p);
+static int parse_named_func_item(parser_t *p, cbm_return_item_t *item);
 
 /* Free a multi-arg function argument array. */
 static void func_args_free(cbm_func_arg_t *args, int count) {
@@ -1132,12 +1134,14 @@ enum { COND_LHS_COMPLETE = 1 };
  * Returns CBM_NOT_FOUND on error, 0 when an operator/value should follow, and
  * COND_LHS_COMPLETE when the condition is already complete (label test). */
 static int parse_condition_lhs(parser_t *p, cbm_condition_t *c) {
-    if (is_multiarg_func_call(p)) {
-        /* Multi-arg scalar function LHS: coalesce(f.depth, 0) >= 2 (#874).
-         * Reuse the RETURN-item parser, then move ownership into the condition. */
+    if (is_multiarg_func_call(p) || is_named_func_call(p)) {
+        /* Scalar function LHS: coalesce(f.depth, 0) >= 2 or type(r) = "CALLS".
+         * Reuse the RETURN-item parsers, then move ownership into the condition. */
         cbm_return_item_t fitem;
         memset(&fitem, 0, sizeof(fitem));
-        if (parse_multiarg_func_item(p, &fitem) < 0) {
+        int rc = is_multiarg_func_call(p) ? parse_multiarg_func_item(p, &fitem)
+                                          : parse_named_func_item(p, &fitem);
+        if (rc < 0) {
             func_item_fields_free(&fitem);
             return CBM_NOT_FOUND;
         }
@@ -1146,6 +1150,8 @@ static int parse_condition_lhs(parser_t *p, cbm_condition_t *c) {
         c->func = fitem.func;
         c->args = fitem.args;
         c->arg_count = fitem.arg_count;
+        c->list_index = fitem.list_index;
+        c->has_list_index = fitem.has_list_index;
         return 0;
     }
 
@@ -1155,7 +1161,8 @@ static int parse_condition_lhs(parser_t *p, cbm_condition_t *c) {
          * set instead of the misleading "unexpected operator" (#874). */
         snprintf(p->error, sizeof(p->error),
                  "unsupported function '%s' in WHERE (supported: coalesce, substring, replace, "
-                 "left, right)",
+                 "left, right, split, labels, type, id, keys, properties, casts and string "
+                 "functions)",
                  peek(p)->text);
         return CBM_NOT_FOUND;
     }
@@ -1522,7 +1529,8 @@ static int parse_named_func_item(parser_t *p, cbm_return_item_t *item) {
 
 /* Canonical name for a multi-argument scalar function, or NULL. */
 static const char *multiarg_func_canonical(const char *s) {
-    static const char *const names[] = {"coalesce", "substring", "replace", "left", "right", NULL};
+    static const char *const names[] = {"coalesce", "substring", "replace", "left",
+                                        "right",    "split",     NULL};
     for (int i = 0; names[i]; i++) {
         if (cyp_ci_eq(s, names[i])) {
             return names[i];
@@ -1564,7 +1572,7 @@ static int parse_func_arg(parser_t *p, cbm_func_arg_t *arg) {
 }
 
 /* Parse a multi-argument scalar call: coalesce(a, b, ...), substring(s, i[, n]),
- * replace(s, from, to), left(s, n), right(s, n). */
+ * replace(s, from, to), left(s, n), right(s, n), split(s, delimiter)[index]. */
 static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
     const char *canon = multiarg_func_canonical(peek(p)->text);
     advance(p); /* function name */
@@ -1587,6 +1595,23 @@ static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
     }
     expect(p, TOK_RPAREN);
     item->func = heap_strdup(canon);
+    if (canon && strcmp(canon, "split") == 0 && match(p, TOK_LBRACKET)) {
+        const cbm_token_t *index = expect(p, TOK_NUMBER);
+        if (!index) {
+            return CBM_NOT_FOUND;
+        }
+        char *end = NULL;
+        long parsed = strtol(index->text, &end, CBM_DECIMAL_BASE);
+        if (end == index->text || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
+            snprintf(p->error, sizeof(p->error), "split list index must be a non-negative integer");
+            return CBM_NOT_FOUND;
+        }
+        if (!expect(p, TOK_RBRACKET)) {
+            return CBM_NOT_FOUND;
+        }
+        item->list_index = (int)parsed;
+        item->has_list_index = true;
+    }
     /* Surface the first variable arg as variable/property for column naming. */
     if (item->arg_count > 0 && item->args[0].variable) {
         item->variable = heap_strdup(item->args[0].variable);
@@ -1597,7 +1622,7 @@ static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
     return 0;
 }
 
-/* Parse aggregate function call: COUNT(var.prop) */
+/* Parse aggregate function call: COUNT(var.prop), SUM(CASE ... END), etc. */
 static int parse_aggregate_item(parser_t *p, cbm_return_item_t *item) {
     cbm_token_type_t ft = peek(p)->type;
     advance(p);
@@ -1606,6 +1631,12 @@ static int parse_aggregate_item(parser_t *p, cbm_return_item_t *item) {
     item->distinct = match(p, TOK_DISTINCT);
     if (match(p, TOK_STAR)) {
         item->variable = heap_strdup("*");
+    } else if (match(p, TOK_CASE)) {
+        item->kase = parse_case_expr(p);
+        if (!item->kase) {
+            return CBM_NOT_FOUND;
+        }
+        item->variable = heap_strdup("CASE");
     } else {
         if (parse_var_dot_prop(p, item) < 0) {
             return CBM_NOT_FOUND;
@@ -1636,6 +1667,9 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
         advance(p);
         item->kase = parse_case_expr(p);
         item->variable = heap_strdup("CASE");
+    } else if (check(p, TOK_STRING) || check(p, TOK_NUMBER) || check(p, TOK_TRUE) ||
+               check(p, TOK_FALSE)) {
+        item->literal = heap_strdup(advance(p)->text);
     } else if (is_aggregate_tok(peek(p)->type)) {
         rc = parse_aggregate_item(p, item);
     } else if (is_string_func_tok(peek(p)->type)) {
@@ -1648,6 +1682,8 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
         rc = parse_var_dot_prop(p, item);
     }
     if (rc < 0) {
+        func_item_fields_free(item);
+        safe_str_free(&item->literal);
         return CBM_NOT_FOUND;
     }
     /* A bare identifier followed by '(' is a function we don't recognise
@@ -1656,12 +1692,13 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
      * silently projecting an empty column — which looks like a valid but blank
      * result and hides the real problem — fail loudly with a clear message so
      * the caller knows the query used an unsupported feature (#373). */
-    if (!item->func && !item->kase && (check(p, TOK_LPAREN) || check(p, TOK_LBRACKET))) {
+    if ((!item->func && !item->kase && !item->literal && check(p, TOK_LPAREN)) ||
+        check(p, TOK_LBRACKET)) {
         if (check(p, TOK_LPAREN)) {
             snprintf(p->error, sizeof(p->error),
                      "unsupported function '%s' (supported: count, sum, avg, min, max, collect, "
                      "toLower, toUpper, toString, toInteger, toFloat, toBoolean, size, length, "
-                     "trim, ltrim, rtrim, reverse, labels, type, id, keys, properties)",
+                     "trim, ltrim, rtrim, reverse, split, labels, type, id, keys, properties)",
                      item->variable ? item->variable : "?");
         } else {
             snprintf(p->error, sizeof(p->error),
@@ -1669,6 +1706,7 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
         }
         safe_str_free(&item->variable);
         safe_str_free(&item->property);
+        safe_str_free(&item->literal);
         return CBM_NOT_FOUND;
     }
     /* Optional AS alias */
@@ -2127,6 +2165,7 @@ static void free_return_clause(cbm_return_clause_t *r) {
     for (int i = 0; i < r->count; i++) {
         safe_str_free(&r->items[i].variable);
         safe_str_free(&r->items[i].property);
+        safe_str_free(&r->items[i].literal);
         safe_str_free(&r->items[i].alias);
         safe_str_free(&r->items[i].func);
         free_case_expr(r->items[i].kase);
@@ -2527,14 +2566,20 @@ static void binding_set(binding_t *b, const char *var, const cbm_node_t *node) {
 
 static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *item, char *buf,
                                       size_t bufsz);
+static const char *project_item(binding_t *b, cbm_return_item_t *item, char *func_buf,
+                                size_t buf_sz);
 
 /* Resolve the actual property value for a condition from a binding */
 static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *b) {
-    /* Multi-arg scalar function LHS: coalesce(f.depth, 0) >= 2 (#874).
-     * Evaluated through the same code path as RETURN projections. The value is
-     * consumed by eval_condition before any other condition is resolved, so a
-     * single thread-local buffer per call is safe. */
+    /* Scalar function LHS values use the same evaluator as RETURN projections.
+     * The value is consumed before another condition is resolved, so a single
+     * thread-local buffer per call is safe. */
     if (c->func) {
+        /* WHERE is evaluated once before relationship expansion and again after
+         * it. Defer predicates such as type(r) until their subject is bound. */
+        if (c->variable && !binding_get(b, c->variable) && !binding_get_edge(b, c->variable)) {
+            return NULL;
+        }
         static _Thread_local char func_buf[CBM_SZ_512];
         cbm_return_item_t item = {0};
         item.variable = c->variable;
@@ -2542,7 +2587,9 @@ static const char *resolve_condition_value(const cbm_condition_t *c, binding_t *
         item.func = c->func;
         item.args = c->args;
         item.arg_count = c->arg_count;
-        return eval_multiarg_func(b, &item, func_buf, sizeof(func_buf));
+        item.list_index = c->list_index;
+        item.has_list_index = c->has_list_index;
+        return project_item(b, &item, func_buf, sizeof(func_buf));
     }
 
     cbm_edge_t *e = binding_get_edge(b, c->variable);
@@ -3539,6 +3586,91 @@ static const char *eval_func_arg(binding_t *b, const cbm_func_arg_t *a) {
     return binding_get_virtual(b, a->variable, a->property);
 }
 
+static const char *eval_split_func(binding_t *b, const cbm_return_item_t *item, char *buf,
+                                   size_t bufsz) {
+    if (!buf || bufsz < PAIR_LEN) {
+        return "";
+    }
+    const char *value = eval_func_arg(b, &item->args[0]);
+    const char *delimiter = eval_func_arg(b, &item->args[1]);
+    size_t delimiter_len = strlen(delimiter);
+
+    if (item->has_list_index) {
+        if (delimiter_len == 0) {
+            size_t value_len = strlen(value);
+            if ((size_t)item->list_index >= value_len || bufsz < PAIR_LEN) {
+                return "";
+            }
+            buf[0] = value[item->list_index];
+            buf[1] = '\0';
+            return buf;
+        }
+        const char *start = value;
+        for (int index = 0;; index++) {
+            const char *end = strstr(start, delimiter);
+            if (index == item->list_index) {
+                size_t len = end ? (size_t)(end - start) : strlen(start);
+                if (len >= bufsz) {
+                    len = bufsz - SKIP_ONE;
+                }
+                memcpy(buf, start, len);
+                buf[len] = '\0';
+                return buf;
+            }
+            if (!end) {
+                return "";
+            }
+            start = end + delimiter_len;
+        }
+    }
+
+    /* An unindexed split is exposed as a compact JSON list. */
+    size_t pos = 0;
+    buf[pos++] = '[';
+    const char *start = value;
+    int index = 0;
+    for (;;) {
+        const char *end = delimiter_len > 0 ? strstr(start, delimiter) : NULL;
+        size_t len = delimiter_len > 0 ? (end ? (size_t)(end - start) : strlen(start))
+                                       : (*start ? SKIP_ONE : 0);
+        if (index > 0 && pos < bufsz - SKIP_ONE) {
+            buf[pos++] = ',';
+        }
+        if (pos < bufsz - SKIP_ONE) {
+            buf[pos++] = '"';
+        }
+        for (size_t i = 0; i < len && pos < bufsz - PAIR_LEN; i++) {
+            if (start[i] == '"' || start[i] == '\\') {
+                buf[pos++] = '\\';
+            }
+            buf[pos++] = start[i];
+        }
+        if (pos < bufsz - SKIP_ONE) {
+            buf[pos++] = '"';
+        }
+        index++;
+        if (delimiter_len == 0) {
+            if (!*start) {
+                break;
+            }
+            start++;
+            if (!*start) {
+                break;
+            }
+        } else {
+            if (!end) {
+                break;
+            }
+            start = end + delimiter_len;
+        }
+    }
+    if (pos < bufsz - SKIP_ONE) {
+        buf[pos++] = ']';
+    }
+    buf[pos < bufsz ? pos : bufsz - SKIP_ONE] = '\0';
+    return buf;
+}
+
 /* Evaluate a multi-argument scalar function into func_buf (or a direct value). */
 static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *item, char *buf,
                                       size_t bufsz) {
@@ -3552,6 +3684,9 @@ static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *ite
             }
         }
         return "";
+    }
+    if (strcmp(f, "split") == 0 && n == PAIR_LEN) {
+        return eval_split_func(b, item, buf, bufsz);
     }
     if (strcmp(f, "substring") == 0 && n >= 2) {
         const char *s = eval_func_arg(b, &item->args[0]);
@@ -3625,6 +3760,9 @@ static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *ite
 
 static const char *project_item(binding_t *b, cbm_return_item_t *item, char *func_buf,
                                 size_t buf_sz) {
+    if (item->literal) {
+        return item->literal;
+    }
     if (item->kase) {
         return eval_case_expr(item->kase, b);
     }
@@ -3780,8 +3918,10 @@ static const char *resolve_item_alias(const cbm_return_item_t *item, char *name_
     }
     if (item->property) {
         snprintf(name_buf, buf_sz, "%s.%s", item->variable, item->property);
+    } else if (item->literal) {
+        snprintf(name_buf, buf_sz, "%s", item->literal);
     } else {
-        snprintf(name_buf, buf_sz, "%s", item->variable);
+        snprintf(name_buf, buf_sz, "%s", item->variable ? item->variable : "");
     }
     return name_buf;
 }
@@ -3871,7 +4011,9 @@ static void with_agg_accumulate(with_agg_t *agg, cbm_return_clause_t *wc, bindin
             continue;
         }
         agg->counts[ci]++;
-        const char *raw = binding_get_virtual(b, wc->items[ci].variable, wc->items[ci].property);
+        const char *raw = wc->items[ci].kase ? eval_case_expr(wc->items[ci].kase, b)
+                                             : binding_get_virtual(b, wc->items[ci].variable,
+                                                                   wc->items[ci].property);
         if (wc->items[ci].distinct && strcmp(wc->items[ci].func, "COUNT") == 0) {
             distinct_list_add(&agg->distinct_lists[ci], &agg->distinct_n[ci], raw);
         }
@@ -4265,7 +4407,9 @@ static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret,
             continue;
         }
         entry->counts[ci]++;
-        const char *raw = binding_get_virtual(b, ret->items[ci].variable, ret->items[ci].property);
+        const char *raw = ret->items[ci].kase ? eval_case_expr(ret->items[ci].kase, b)
+                                              : binding_get_virtual(b, ret->items[ci].variable,
+                                                                    ret->items[ci].property);
         double dv = strtod(raw, NULL);
         entry->sums[ci] += dv;
         if (dv < entry->mins[ci]) {

@@ -210,6 +210,8 @@ typedef struct {
     const char *func;
     cbm_func_arg_t *args;
     int arg_count;
+    int list_index;
+    bool has_list_index;
 } cbm_condition_t;
 
 /* Expression tree for WHERE clause */
@@ -253,6 +255,7 @@ typedef struct {
 typedef struct {
     const char *variable;
     const char *property;  /* NULL for whole node */
+    const char *literal;   /* literal projection value, NULL for expressions */
     const char *alias;     /* NULL if no alias */
     const char *func;      /* "COUNT", "SUM", "AVG", "MIN", "MAX", "COLLECT",
                               "toLower", "toUpper", "toString" or NULL */
@@ -260,6 +263,8 @@ typedef struct {
     cbm_case_expr_t *kase; /* CASE expression (NULL if not CASE) */
     cbm_func_arg_t *args;  /* args for a multi-argument function (NULL if none) */
     int arg_count;
+    int list_index; /* constant index for split(...)[n] */
+    bool has_list_index;
 } cbm_return_item_t;
 
 #define CBM_CYPHER_ORDER_KEYS_MAX 8
