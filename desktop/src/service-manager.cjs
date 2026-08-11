@@ -431,8 +431,9 @@ class ServiceManager extends EventEmitter {
         {
           cwd: path.dirname(this.binaryPath),
           env: { ...this.env, CBM_DESKTOP_SERVICE_TOKEN: this.serviceToken },
+          detached: true,
           windowsHide: true,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: "ignore",
         },
       );
     } catch (error) {
@@ -446,6 +447,7 @@ class ServiceManager extends EventEmitter {
     this.child = child;
     this.saveServiceState(child.pid);
     this.attachChild(child);
+    child.unref?.();
 
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {

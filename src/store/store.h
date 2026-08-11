@@ -564,6 +564,9 @@ typedef struct {
     const char *name;
     const char *qualified_name;
     const char *file;
+    const char *kind;
+    const char *evidence;
+    double confidence;
 } cbm_entry_point_t;
 
 typedef struct {

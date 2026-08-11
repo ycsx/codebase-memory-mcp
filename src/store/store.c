@@ -4481,6 +4481,99 @@ const char *cbm_qn_to_top_package(const char *qn) {
     return "";
 }
 
+static bool arch_path_sep(char c) {
+    return c == '/' || c == '\\';
+}
+
+static bool arch_segment_eq(const char *segment, size_t len, const char *expected) {
+    return strlen(expected) == len && strncmp(segment, expected, len) == 0;
+}
+
+static void arch_scope_basename(const char *scope, char *buf, size_t size) {
+    const char *start = scope;
+    if (!scope || !scope[0] || size == 0) {
+        if (size > 0) {
+            buf[0] = '\0';
+        }
+        return;
+    }
+    for (const char *p = scope; *p; p++) {
+        if (arch_path_sep(*p) && p[1]) {
+            start = p + 1;
+        }
+    }
+    snprintf(buf, size, "%s", start);
+}
+
+/* Scoped architecture is most useful at the directory-module level. Strip
+ * the requested scope and common source roots so an app query yields modules
+ * such as views/components/services instead of a single workspace package. */
+static const char *arch_group_from_file_path(const char *file_path, const char *scope, char *buf,
+                                             size_t size) {
+    if (size == 0) {
+        return "";
+    }
+    buf[0] = '\0';
+    if (!file_path || !file_path[0]) {
+        arch_scope_basename(scope, buf, size);
+        return buf;
+    }
+
+    const char *rel = file_path;
+    if (scope && scope[0]) {
+        size_t scope_len = strlen(scope);
+        if (strncmp(file_path, scope, scope_len) == 0 &&
+            (file_path[scope_len] == '\0' || arch_path_sep(file_path[scope_len]))) {
+            rel = file_path + scope_len;
+        }
+    }
+    while (arch_path_sep(*rel)) {
+        rel++;
+    }
+
+    const char *first_end = rel;
+    while (*first_end && !arch_path_sep(*first_end)) {
+        first_end++;
+    }
+    size_t first_len = (size_t)(first_end - rel);
+    if (first_len == 0 || *first_end == '\0') {
+        arch_scope_basename(scope, buf, size);
+        return buf;
+    }
+
+    bool source_root = arch_segment_eq(rel, first_len, "src") ||
+                       arch_segment_eq(rel, first_len, "source") ||
+                       arch_segment_eq(rel, first_len, "app");
+    if (source_root) {
+        const char *next = first_end + 1;
+        while (arch_path_sep(*next)) {
+            next++;
+        }
+        const char *next_end = next;
+        while (*next_end && !arch_path_sep(*next_end)) {
+            next_end++;
+        }
+        if (*next_end != '\0') {
+            size_t next_len = (size_t)(next_end - next);
+            if (next_len >= size) {
+                next_len = size - 1;
+            }
+            memcpy(buf, next, next_len);
+            buf[next_len] = '\0';
+            return buf;
+        }
+        arch_scope_basename(scope, buf, size);
+        return buf;
+    }
+
+    if (first_len >= size) {
+        first_len = size - 1;
+    }
+    memcpy(buf, rel, first_len);
+    buf[first_len] = '\0';
+    return buf;
+}
+
 bool cbm_is_test_file_path(const char *fp) {
     if (!fp || fp[0] == '\0') {
         return false;
@@ -4639,9 +4732,9 @@ static int arch_entry_points(cbm_store_t *s, const char *project, const char *pa
                        "json_extract(properties, '$.is_test') != 1) "
                        "AND file_path NOT LIKE '%test%'";
     if (scoped) {
-        snprintf(sqlbuf, sizeof(sqlbuf), "%s%s LIMIT 20", base, arch_path_scope_sql());
+        snprintf(sqlbuf, sizeof(sqlbuf), "%s%s LIMIT 100", base, arch_path_scope_sql());
     } else {
-        snprintf(sqlbuf, sizeof(sqlbuf), "%s LIMIT 20", base);
+        snprintf(sqlbuf, sizeof(sqlbuf), "%s LIMIT 100", base);
     }
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
@@ -4658,13 +4751,46 @@ static int arch_entry_points(cbm_store_t *s, const char *project, const char *pa
     cbm_entry_point_t *arr = calloc(cap, sizeof(cbm_entry_point_t));
     int scan_rc21;
     while ((scan_rc21 = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 0);
+        const char *qn = (const char *)sqlite3_column_text(stmt, SKIP_ONE);
+        const char *file = (const char *)sqlite3_column_text(stmt, CBM_SZ_2);
+        const char *base_name = file ? strrchr(file, '/') : NULL;
+        base_name = base_name ? base_name + 1 : file;
+        const char *ext = file ? strrchr(file, '.') : NULL;
+
+        /* Vue component lifecycle and method nodes are not application entry
+         * points. Preserve only the root App.vue bootstrap lifecycle. */
+        if (ext && strcmp(ext, ".vue") == 0) {
+            if (!base_name || strcmp(base_name, "App.vue") != 0 || !name ||
+                strcmp(name, "created") != 0) {
+                continue;
+            }
+        }
+        if (n >= 20) {
+            continue;
+        }
         if (n >= cap) {
             cap *= ST_GROWTH;
             arr = safe_realloc(arr, cap * sizeof(cbm_entry_point_t));
         }
-        arr[n].name = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
-        arr[n].qualified_name = heap_strdup((const char *)sqlite3_column_text(stmt, SKIP_ONE));
-        arr[n].file = heap_strdup((const char *)sqlite3_column_text(stmt, CBM_SZ_2));
+        arr[n].name = heap_strdup(name);
+        arr[n].qualified_name = heap_strdup(qn);
+        arr[n].file = heap_strdup(file);
+        if (ext && strcmp(ext, ".vue") == 0) {
+            arr[n].kind = heap_strdup("framework_root");
+            arr[n].evidence = heap_strdup("root App.vue lifecycle");
+            arr[n].confidence = 0.90;
+        } else if ((name && (strcmp(name, "main") == 0 || strcmp(name, "render") == 0 ||
+                             strcmp(name, "bootstrap") == 0 || strcmp(name, "start") == 0)) ||
+                   (base_name && strncmp(base_name, "main.", 5) == 0)) {
+            arr[n].kind = heap_strdup("runtime");
+            arr[n].evidence = heap_strdup("bootstrap file or symbol");
+            arr[n].confidence = 0.98;
+        } else {
+            arr[n].kind = heap_strdup("declared");
+            arr[n].evidence = heap_strdup("indexer entry-point marker");
+            arr[n].confidence = 0.80;
+        }
         n++;
     }
     if (scan_rc21 != SQLITE_DONE) { /* SCANCHK:21:stmt */
@@ -4786,12 +4912,18 @@ static int arch_hotspots(cbm_store_t *s, const char *project, const char *path,
     char like[CBM_SZ_512];
     bool scoped = arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like));
     char sqlbuf[ST_SQL_BUF];
-    const char *base = "SELECT n.name, n.qualified_name, COUNT(*) as fan_in "
-                       "FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                       "WHERE n.project=?1 AND n.label IN ('Function', 'Method') "
-                       "AND (json_extract(n.properties, '$.is_test') IS NULL OR "
-                       "json_extract(n.properties, '$.is_test') != 1) "
-                       "AND n.file_path NOT LIKE '%test%'";
+    const char *base =
+        "SELECT n.name, n.qualified_name, COUNT(DISTINCT e.source_id) as fan_in "
+        "FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+        "JOIN nodes caller ON caller.id = e.source_id AND caller.project = n.project "
+        "WHERE n.project=?1 AND n.label IN ('Function', 'Method') "
+        "AND COALESCE(json_extract(e.properties, '$.confidence'), 1.0) >= 0.90 "
+        "AND (json_extract(n.properties, '$.is_test') IS NULL OR "
+        "json_extract(n.properties, '$.is_test') != 1) "
+        "AND n.file_path NOT LIKE '%test%' "
+        "AND (json_extract(caller.properties, '$.is_test') IS NULL OR "
+        "json_extract(caller.properties, '$.is_test') != 1) "
+        "AND caller.file_path NOT LIKE '%test%'";
     if (scoped) {
         snprintf(sqlbuf, sizeof(sqlbuf),
                  "%s AND (n.file_path = ?2 OR n.file_path LIKE ?3) "
@@ -4917,7 +5049,11 @@ static int arch_boundaries(cbm_store_t *s, const char *project, const char *path
         int64_t nid = sqlite3_column_int64(nstmt, 0);
         nids[nn] = nid;
         const char *qn = (const char *)sqlite3_column_text(nstmt, SKIP_ONE);
-        npkgs[nn] = heap_strdup(cbm_qn_to_package(qn));
+        const char *file_path = (const char *)sqlite3_column_text(nstmt, CBM_SZ_2);
+        char group[CBM_SZ_256];
+        const char *pkg = scoped ? arch_group_from_file_path(file_path, norm, group, sizeof(group))
+                                 : cbm_qn_to_package(qn);
+        npkgs[nn] = heap_strdup(pkg);
         nn++;
     }
     if (scan_rc24 != SQLITE_DONE) { /* SCANCHK:24:nstmt */
@@ -4933,7 +5069,8 @@ static int arch_boundaries(cbm_store_t *s, const char *project, const char *path
     sqlite3_finalize(nstmt);
 
     /* Scan edges, count cross-package calls */
-    const char *esql = "SELECT source_id, target_id FROM edges WHERE project=?1 AND type='CALLS'";
+    const char *esql = "SELECT source_id, target_id FROM edges WHERE project=?1 AND type='CALLS' "
+                       "AND COALESCE(json_extract(properties, '$.confidence'), 1.0) >= 0.90";
     sqlite3_stmt *estmt = NULL;
     if (sqlite3_prepare_v2(s->db, esql, CBM_NOT_FOUND, &estmt, NULL) != SQLITE_OK) {
         for (int i = 0; i < nn; i++) {
@@ -5021,6 +5158,20 @@ static int arch_boundaries(cbm_store_t *s, const char *project, const char *path
 
 #define MAX_PREVIEW_NAMES 15
 
+static void arch_count_package(char **names, int *counts, int *count, const char *pkg) {
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(names[i], pkg) == 0) {
+            counts[i]++;
+            return;
+        }
+    }
+    if (*count < CBM_SZ_64) {
+        names[*count] = heap_strdup(pkg);
+        counts[*count] = SKIP_ONE;
+        (*count)++;
+    }
+}
+
 /* Fallback: derive packages from QN segments when no Package nodes exist. */
 static int arch_packages_from_qn(cbm_store_t *s, const char *project, const char *path,
                                  cbm_package_summary_t **out_arr, int *out_count) {
@@ -5028,8 +5179,8 @@ static int arch_packages_from_qn(cbm_store_t *s, const char *project, const char
     char like[CBM_SZ_512];
     bool scoped = arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like));
     char qsqlbuf[ST_SQL_BUF];
-    const char *qbase = "SELECT qualified_name FROM nodes WHERE project=?1 AND label IN "
-                        "('Function','Method','Class')";
+    const char *qbase = "SELECT qualified_name, file_path, label FROM nodes WHERE project=?1 AND "
+                        "label IN ('Function','Method','Class','File')";
     if (scoped) {
         snprintf(qsqlbuf, sizeof(qsqlbuf), "%s%s", qbase, arch_path_scope_sql());
     } else {
@@ -5048,26 +5199,24 @@ static int arch_packages_from_qn(cbm_store_t *s, const char *project, const char
     char *pnames[CBM_SZ_64];
     int pcounts[CBM_SZ_64];
     int np = 0;
+    char *file_pnames[CBM_SZ_64];
+    int file_pcounts[CBM_SZ_64];
+    int file_np = 0;
     int scan_rc26;
     while ((scan_rc26 = sqlite3_step(stmt)) == SQLITE_ROW) {
         const char *qn = (const char *)sqlite3_column_text(stmt, 0);
-        const char *pkg = cbm_qn_to_package(qn);
+        const char *file_path = (const char *)sqlite3_column_text(stmt, SKIP_ONE);
+        const char *label = (const char *)sqlite3_column_text(stmt, CBM_SZ_2);
+        char group[CBM_SZ_256];
+        const char *pkg = scoped ? arch_group_from_file_path(file_path, norm, group, sizeof(group))
+                                 : cbm_qn_to_package(qn);
         if (!pkg[0]) {
             continue;
         }
-        int found = ST_FOUND;
-        for (int i = 0; i < np; i++) {
-            if (strcmp(pnames[i], pkg) == 0) {
-                found = i;
-                break;
-            }
-        }
-        if (found >= 0) {
-            pcounts[found]++;
-        } else if (np < CBM_SZ_64) {
-            pnames[np] = heap_strdup(pkg);
-            pcounts[np] = SKIP_ONE;
-            np++;
+        if (label && strcmp(label, "File") == 0) {
+            arch_count_package(file_pnames, file_pcounts, &file_np, pkg);
+        } else {
+            arch_count_package(pnames, pcounts, &np, pkg);
         }
     }
     if (scan_rc26 != SQLITE_DONE) { /* SCANCHK:26:stmt */
@@ -5076,9 +5225,24 @@ static int arch_packages_from_qn(cbm_store_t *s, const char *project, const char
         for (int pi = 0; pi < np; pi++) {
             free(pnames[pi]);
         }
+        for (int pi = 0; pi < file_np; pi++) {
+            free(file_pnames[pi]);
+        }
         return CBM_STORE_ERR;
     }
     sqlite3_finalize(stmt);
+
+    if (np == 0) {
+        for (int i = 0; i < file_np; i++) {
+            pnames[i] = file_pnames[i];
+            pcounts[i] = file_pcounts[i];
+        }
+        np = file_np;
+        file_np = 0;
+    }
+    for (int i = 0; i < file_np; i++) {
+        free(file_pnames[i]);
+    }
 
     /* Sort by count desc */
     for (int i = SKIP_ONE; i < np; i++) {
@@ -5115,6 +5279,17 @@ static int arch_packages(cbm_store_t *s, const char *project, const char *path,
     char norm[CBM_SZ_512];
     char like[CBM_SZ_512];
     bool scoped = arch_path_prepare(path, norm, sizeof(norm), like, sizeof(like));
+    if (scoped) {
+        cbm_package_summary_t *modules = NULL;
+        int module_count = 0;
+        int rc = arch_packages_from_qn(s, project, path, &modules, &module_count);
+        if (rc != CBM_STORE_OK) {
+            return rc;
+        }
+        out->packages = modules;
+        out->package_count = module_count;
+        return CBM_STORE_OK;
+    }
     char sqlbuf[ST_SQL_BUF];
     const char *base = "SELECT n.name, COUNT(*) as cnt FROM nodes n "
                        "WHERE n.project=?1 AND n.label='Package'";
@@ -5259,7 +5434,23 @@ static int collect_pkg_names(cbm_store_t *s, const char *sql, const char *projec
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < max_pkgs) {
         const char *qn = (const char *)sqlite3_column_text(stmt, 0);
-        pkgs[count++] = heap_strdup(cbm_qn_to_package(qn));
+        const char *file_path = (const char *)sqlite3_column_text(stmt, SKIP_ONE);
+        char group[CBM_SZ_256];
+        const char *pkg = scoped ? arch_group_from_file_path(file_path, norm, group, sizeof(group))
+                                 : cbm_qn_to_package(qn);
+        if (!pkg[0]) {
+            continue;
+        }
+        bool exists = false;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(pkgs[i], pkg) == 0) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            pkgs[count++] = heap_strdup(pkg);
+        }
     }
     sqlite3_finalize(stmt);
     return count;
@@ -5277,15 +5468,16 @@ static int arch_layers(cbm_store_t *s, const char *project, const char *path,
 
     /* Collect route and entry point packages */
     char *route_pkgs[CBM_SZ_32];
-    int nrpkgs =
-        collect_pkg_names(s, "SELECT qualified_name FROM nodes WHERE project=?1 AND label='Route'",
-                          project, path, route_pkgs, CBM_SZ_32);
+    int nrpkgs = collect_pkg_names(
+        s, "SELECT qualified_name, file_path FROM nodes WHERE project=?1 AND label='Route'",
+        project, path, route_pkgs, CBM_SZ_32);
 
     char *entry_pkgs[CBM_SZ_32];
-    int nepkgs = collect_pkg_names(s,
-                                   "SELECT qualified_name FROM nodes WHERE project=?1 AND "
-                                   "json_extract(properties, '$.is_entry_point') = 1",
-                                   project, path, entry_pkgs, CBM_SZ_32);
+    int nepkgs =
+        collect_pkg_names(s,
+                          "SELECT qualified_name, file_path FROM nodes WHERE project=?1 AND "
+                          "json_extract(properties, '$.is_entry_point') = 1",
+                          project, path, entry_pkgs, CBM_SZ_32);
 
     /* Compute fan-in/out per package */
     char *all_pkgs[CBM_SZ_64];
@@ -6201,9 +6393,25 @@ static void cluster_add_pkg(const char **pkgs, int *counts, int *count, int cap,
     }
 }
 
+static bool arch_is_generic_symbol(const char *name) {
+    static const char *const generic[] = {"error",   "log",     "get",      "set",     "find",
+                                          "filter",  "read",    "write",    "show",    "init",
+                                          "created", "success", "callback", "getList", NULL};
+    if (!name) {
+        return true;
+    }
+    for (int i = 0; generic[i]; i++) {
+        if (strcmp(name, generic[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Build the cluster_info for one community c into *ci. */
 static void cluster_build_one(cbm_cluster_info_t *ci, int c, int n, const int *comm,
-                              const int *degree, const char **names, const char **qns, int members,
+                              const int *degree, const char **names, const char **qns,
+                              const char **file_paths, const char *scope, int members,
                               double cohesion) {
     memset(ci, 0, sizeof(*ci));
     ci->id = c;
@@ -6215,7 +6423,7 @@ static void cluster_build_one(cbm_cluster_info_t *ci, int c, int n, const int *c
     int top_deg[CBM_CLUSTER_MAX_TOPNODES];
     int tn = 0;
     for (int i = 0; i < n; i++) {
-        if (comm[i] != c) {
+        if (comm[i] != c || arch_is_generic_symbol(names[i])) {
             continue;
         }
         int d = degree[i];
@@ -6250,8 +6458,11 @@ static void cluster_build_one(cbm_cluster_info_t *ci, int c, int n, const int *c
     int pc = 0;
     for (int i = 0; i < n; i++) {
         if (comm[i] == c) {
-            cluster_add_pkg(pkgs, pkg_counts, &pc, CBM_CLUSTER_MAX_PKGS,
-                            cbm_qn_to_top_package(qns[i]));
+            char group[CBM_SZ_256];
+            const char *pkg =
+                scope ? arch_group_from_file_path(file_paths[i], scope, group, sizeof(group))
+                      : cbm_qn_to_top_package(qns[i]);
+            cluster_add_pkg(pkgs, pkg_counts, &pc, CBM_CLUSTER_MAX_PKGS, pkg);
         }
     }
     if (pc > 0) {
@@ -6319,6 +6530,7 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
     int64_t *ids = malloc((size_t)cap * sizeof(int64_t));
     const char **names = malloc((size_t)cap * sizeof(char *));
     const char **qns = malloc((size_t)cap * sizeof(char *));
+    const char **file_paths = malloc((size_t)cap * sizeof(char *));
     int scan_rc29;
     while ((scan_rc29 = sqlite3_step(st)) == SQLITE_ROW) {
         if (n >= cap) {
@@ -6326,10 +6538,12 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
             ids = safe_realloc(ids, (size_t)cap * sizeof(int64_t));
             names = safe_realloc(names, (size_t)cap * sizeof(char *));
             qns = safe_realloc(qns, (size_t)cap * sizeof(char *));
+            file_paths = safe_realloc(file_paths, (size_t)cap * sizeof(char *));
         }
         ids[n] = sqlite3_column_int64(st, 0);
         names[n] = heap_strdup((const char *)sqlite3_column_text(st, SKIP_ONE));
         qns[n] = heap_strdup((const char *)sqlite3_column_text(st, CBM_SZ_2));
+        file_paths[n] = heap_strdup((const char *)sqlite3_column_text(st, CBM_SZ_3));
         n++;
     }
     if (scan_rc29 != SQLITE_DONE) { /* SCANCHK:29:st */
@@ -6338,10 +6552,12 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
         for (int ci = 0; ci < n; ci++) {
             safe_str_free(&names[ci]);
             safe_str_free(&qns[ci]);
+            safe_str_free(&file_paths[ci]);
         }
         free(ids);
         free((void *)names);
         free((void *)qns);
+        free((void *)file_paths);
         return CBM_STORE_ERR;
     }
     sqlite3_finalize(st);
@@ -6349,10 +6565,12 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
         for (int i = 0; i < n; i++) {
             safe_str_free(&names[i]);
             safe_str_free(&qns[i]);
+            safe_str_free(&file_paths[i]);
         }
         free(ids);
         free(names);
         free(qns);
+        free(file_paths);
         return CBM_STORE_OK;
     }
 
@@ -6362,7 +6580,8 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
     int *edst = malloc((size_t)n * sizeof(int));
     int *degree = calloc((size_t)n, sizeof(int));
     int ne = 0;
-    const char *esql = "SELECT source_id, target_id FROM edges WHERE project=?1 AND type='CALLS'";
+    const char *esql = "SELECT source_id, target_id FROM edges WHERE project=?1 AND type='CALLS' "
+                       "AND COALESCE(json_extract(properties, '$.confidence'), 1.0) >= 0.90";
     if (sqlite3_prepare_v2(s->db, esql, CBM_NOT_FOUND, &st, NULL) == SQLITE_OK) {
         int ecap = n;
         bind_text(st, SKIP_ONE, project);
@@ -6448,7 +6667,8 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
             }
             double denom = internal[c] + boundary[c];
             double cohesion = denom > 0 ? (double)internal[c] / denom : 0.0;
-            cluster_build_one(&clusters[cc], c, n, comm, degree, names, qns, members[c], cohesion);
+            cluster_build_one(&clusters[cc], c, n, comm, degree, names, qns, file_paths,
+                              scoped ? norm : NULL, members[c], cohesion);
             cc++;
         }
         out->clusters = clusters;
@@ -6464,10 +6684,12 @@ static int arch_clusters(cbm_store_t *s, const char *project, const char *path,
     for (int i = 0; i < n; i++) {
         safe_str_free(&names[i]);
         safe_str_free(&qns[i]);
+        safe_str_free(&file_paths[i]);
     }
     free(ids);
     free(names);
     free(qns);
+    free(file_paths);
     free(edges);
     free(esrc);
     free(edst);
@@ -6588,6 +6810,8 @@ void cbm_store_architecture_free(cbm_architecture_info_t *out) {
         safe_str_free(&out->entry_points[i].name);
         safe_str_free(&out->entry_points[i].qualified_name);
         safe_str_free(&out->entry_points[i].file);
+        safe_str_free(&out->entry_points[i].kind);
+        safe_str_free(&out->entry_points[i].evidence);
     }
     free(out->entry_points);
     for (int i = 0; i < out->route_count; i++) {

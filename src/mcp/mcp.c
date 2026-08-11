@@ -503,7 +503,11 @@ static const tool_def_t TOOLS[] = {
      "Get high-level architecture overview. DEFAULT (no aspects) is a compact summary — "
      "overview counts, languages, packages, entry_points; request more via aspects:[...] "
      "(structure, dependencies, routes, hotspots, boundaries, layers, clusters, file_tree) or "
-     "[\"all\"]. 'clusters' runs Leiden community detection over the call/import graph, "
+     "[\"all\"]. For an architecture overview, call this once and optionally once more with a "
+     "narrow path. When stop_recommended is true, synthesize the result; do not issue raw "
+     "query_graph calls unless the user explicitly asks for deeper evidence. section_status "
+     "distinguishes an authoritative empty result from missing data. 'clusters' runs Leiden "
+     "community detection over the call/import graph, "
      "surfacing the de-facto modules (label, member count, cohesion score, representative "
      "top_nodes, binding packages/edge_types) — the real architectural seams, which often cut "
      "across the folder layout. Optional path scopes analysis to nodes under that directory "
@@ -516,7 +520,9 @@ static const tool_def_t TOOLS[] = {
      "\"overview\",\"structure\",\"dependencies\",\"routes\",\"languages\",\"packages\","
      "\"entry_points\",\"hotspots\",\"boundaries\",\"layers\",\"file_tree\",\"clusters\"]},"
      "\"description\":\"Aspects to include. 'all' = everything; 'overview' = compact summary "
-     "(all except file_tree); omit = all.\"}},\"required\":[\"project\"]}"},
+     "(all except file_tree); omit = languages, packages, and entry_points.\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"toon\",\"json\"],\"default\":\"toon\","
+     "\"description\":\"Response encoding.\"}},\"required\":[\"project\"]}"},
 
     {"search_code", "Search code",
      "Graph-augmented code search. Finds text patterns via grep, then enriches results with "
@@ -3816,6 +3822,145 @@ static void arch_join_list(char *buf, size_t sz, const char **items, int n) {
     }
 }
 
+static bool arch_aspect_selected(const char **aspects, int aspect_count, const char *name) {
+    for (int i = 0; i < aspect_count; i++) {
+        if (strcmp(aspects[i], "all") == 0 || strcmp(aspects[i], name) == 0) {
+            return true;
+        }
+        if (strcmp(aspects[i], "overview") == 0 && cbm_store_arch_aspect_in_overview(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int arch_section_count(const char *name, const cbm_architecture_info_t *arch,
+                              const cbm_schema_info_t *schema) {
+    if (strcmp(name, "structure") == 0) {
+        return schema->node_label_count;
+    }
+    if (strcmp(name, "dependencies") == 0) {
+        return schema->edge_type_count;
+    }
+    if (strcmp(name, "routes") == 0) {
+        return arch->route_count + schema->rel_pattern_count;
+    }
+    if (strcmp(name, "languages") == 0) {
+        return arch->language_count;
+    }
+    if (strcmp(name, "packages") == 0) {
+        return arch->package_count;
+    }
+    if (strcmp(name, "entry_points") == 0) {
+        return arch->entry_point_count;
+    }
+    if (strcmp(name, "hotspots") == 0) {
+        return arch->hotspot_count;
+    }
+    if (strcmp(name, "boundaries") == 0) {
+        return arch->boundary_count;
+    }
+    if (strcmp(name, "layers") == 0) {
+        return arch->layer_count;
+    }
+    if (strcmp(name, "file_tree") == 0) {
+        return arch->file_tree_count;
+    }
+    if (strcmp(name, "clusters") == 0) {
+        return arch->cluster_count;
+    }
+    return 0;
+}
+
+static const char *arch_section_reason(const char *name, int count, bool path_scoped) {
+    if (count == 0) {
+        if (strcmp(name, "routes") == 0) {
+            return "no route definitions detected in scope";
+        }
+        if (strcmp(name, "boundaries") == 0) {
+            return "no reliable cross-module calls detected";
+        }
+        return "no indexed records detected for this section";
+    }
+    if (strcmp(name, "packages") == 0 && path_scoped) {
+        return "directory modules derived from scoped file paths";
+    }
+    if (strcmp(name, "hotspots") == 0) {
+        return "distinct callers using CALLS confidence >= 0.90";
+    }
+    if (strcmp(name, "entry_points") == 0) {
+        return "entry markers filtered to application bootstrap candidates";
+    }
+    if (strcmp(name, "boundaries") == 0) {
+        return "cross-module CALLS using confidence >= 0.90";
+    }
+    return "indexed architecture evidence available";
+}
+
+static double arch_section_confidence(const char *name, int count, bool path_scoped) {
+    if (count == 0) {
+        return 0.90;
+    }
+    if (strcmp(name, "hotspots") == 0 || strcmp(name, "boundaries") == 0) {
+        return 0.95;
+    }
+    if (strcmp(name, "entry_points") == 0 || (strcmp(name, "packages") == 0 && path_scoped)) {
+        return 0.90;
+    }
+    return 0.85;
+}
+
+static void arch_append_toon_status(cbm_sb_t *sb, const char **aspects, int aspect_count,
+                                    const cbm_architecture_info_t *arch,
+                                    const cbm_schema_info_t *schema, bool path_scoped) {
+    static const char *const sections[] = {"structure", "dependencies", "routes",   "languages",
+                                           "packages",  "entry_points", "hotspots", "boundaries",
+                                           "layers",    "file_tree",    "clusters", NULL};
+    int selected = 0;
+    for (int i = 0; sections[i]; i++) {
+        if (arch_aspect_selected(aspects, aspect_count, sections[i])) {
+            selected++;
+        }
+    }
+    static const char *const cols[] = {"section", "status", "confidence", "reason"};
+    cbm_toon_table_header(sb, "section_status", selected, cols, 4);
+    for (int i = 0; sections[i]; i++) {
+        if (!arch_aspect_selected(aspects, aspect_count, sections[i])) {
+            continue;
+        }
+        int count = arch_section_count(sections[i], arch, schema);
+        cbm_toon_row_begin(sb);
+        cbm_toon_cell_str(sb, sections[i], true);
+        cbm_toon_cell_str(sb, count > 0 ? "ok" : "empty", false);
+        cbm_toon_cell_real(sb, arch_section_confidence(sections[i], count, path_scoped), false);
+        cbm_toon_cell_str(sb, arch_section_reason(sections[i], count, path_scoped), false);
+        cbm_toon_row_end(sb);
+    }
+}
+
+static void arch_append_json_status(yyjson_mut_doc *doc, yyjson_mut_val *root, const char **aspects,
+                                    int aspect_count, const cbm_architecture_info_t *arch,
+                                    const cbm_schema_info_t *schema, bool path_scoped) {
+    static const char *const sections[] = {"structure", "dependencies", "routes",   "languages",
+                                           "packages",  "entry_points", "hotspots", "boundaries",
+                                           "layers",    "file_tree",    "clusters", NULL};
+    yyjson_mut_val *status = yyjson_mut_obj(doc);
+    for (int i = 0; sections[i]; i++) {
+        if (!arch_aspect_selected(aspects, aspect_count, sections[i])) {
+            continue;
+        }
+        int count = arch_section_count(sections[i], arch, schema);
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, item, "status", count > 0 ? "ok" : "empty");
+        yyjson_mut_obj_add_real(doc, item, "confidence",
+                                arch_section_confidence(sections[i], count, path_scoped));
+        yyjson_mut_obj_add_str(doc, item, "reason",
+                               arch_section_reason(sections[i], count, path_scoped));
+        yyjson_mut_obj_add_val(doc, status, sections[i], item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "section_status", status);
+}
+
 static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     char *scope_path = cbm_mcp_get_string_arg(args, "path");
@@ -3945,6 +4090,13 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         cbm_toon_scalar_int(&sb, "total_nodes", node_count);
         cbm_toon_scalar_int(&sb, "total_edges", edge_count);
+        cbm_toon_scalar_str(&sb, "module_granularity", path_scoped ? "directory" : "package");
+        arch_append_toon_status(&sb, aspects_strs, aspects_strs_count, &arch, &schema, path_scoped);
+        cbm_toon_scalar_bool(&sb, "stop_recommended", node_count > 0);
+        cbm_toon_scalar_str(
+            &sb, "next_action",
+            "Synthesize the requested architecture sections; use raw graph queries only when "
+            "the user asks for deeper evidence.");
 
         if (aspect_wanted(aspects_doc, aspects_arr, "structure") && schema.node_label_count > 0) {
             static const char *const lcols[] = {"label", "count"};
@@ -3998,13 +4150,15 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
             }
         }
         if (arch.entry_point_count > 0) {
-            /* qn only — `name` is its last segment. */
-            static const char *const ecols[] = {"qn", "file"};
-            cbm_toon_table_header(&sb, "entry_points", arch.entry_point_count, ecols, 2);
+            static const char *const ecols[] = {"qn", "file", "kind", "confidence", "evidence"};
+            cbm_toon_table_header(&sb, "entry_points", arch.entry_point_count, ecols, 5);
             for (int i = 0; i < arch.entry_point_count; i++) {
                 cbm_toon_row_begin(&sb);
                 cbm_toon_cell_str(&sb, arch.entry_points[i].qualified_name, true);
                 cbm_toon_cell_str(&sb, arch.entry_points[i].file, false);
+                cbm_toon_cell_str(&sb, arch.entry_points[i].kind, false);
+                cbm_toon_cell_real(&sb, arch.entry_points[i].confidence, false);
+                cbm_toon_cell_str(&sb, arch.entry_points[i].evidence, false);
                 cbm_toon_row_end(&sb);
             }
         }
@@ -4152,6 +4306,14 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     }
     yyjson_mut_obj_add_int(doc, root, "total_nodes", node_count);
     yyjson_mut_obj_add_int(doc, root, "total_edges", edge_count);
+    yyjson_mut_obj_add_str(doc, root, "module_granularity", path_scoped ? "directory" : "package");
+    arch_append_json_status(doc, root, aspects_strs, aspects_strs_count, &arch, &schema,
+                            path_scoped);
+    yyjson_mut_obj_add_bool(doc, root, "stop_recommended", node_count > 0);
+    yyjson_mut_obj_add_str(
+        doc, root, "next_action",
+        "Synthesize the requested architecture sections; use raw graph queries only when the "
+        "user asks for deeper evidence.");
 
     /* Node label summary */
     if (aspect_wanted(aspects_doc, aspects_arr, "structure")) {
@@ -4226,6 +4388,12 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
                 arch.entry_points[i].qualified_name ? arch.entry_points[i].qualified_name : "");
             yyjson_mut_obj_add_str(doc, item, "file",
                                    arch.entry_points[i].file ? arch.entry_points[i].file : "");
+            yyjson_mut_obj_add_str(doc, item, "kind",
+                                   arch.entry_points[i].kind ? arch.entry_points[i].kind : "");
+            yyjson_mut_obj_add_real(doc, item, "confidence", arch.entry_points[i].confidence);
+            yyjson_mut_obj_add_str(doc, item, "evidence",
+                                   arch.entry_points[i].evidence ? arch.entry_points[i].evidence
+                                                                 : "");
             yyjson_mut_arr_add_val(eps, item);
         }
         yyjson_mut_obj_add_val(doc, root, "entry_points", eps);

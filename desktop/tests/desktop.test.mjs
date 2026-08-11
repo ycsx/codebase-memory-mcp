@@ -180,13 +180,17 @@ test("Desktop adopts its persisted console after the app restarts", async () => 
   }
 });
 
-test("Desktop passes and persists an ownership token when starting the console", async () => {
+test("Desktop starts a detached console and persists its ownership token", async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "cbm-desktop-service-"));
   const statePath = path.join(directory, "service-state.json");
   const child = new EventEmitter();
   child.pid = 9013;
   child.exitCode = 1;
   child.killed = false;
+  child.unrefCalled = false;
+  child.unref = () => {
+    child.unrefCalled = true;
+  };
   child.kill = () => {
     child.killed = true;
     child.exitCode = 0;
@@ -219,10 +223,74 @@ test("Desktop passes and persists an ownership token when starting the console",
     const started = await manager.start();
     assert.equal(started.state, "running");
     assert.equal(started.managed, true);
+    assert.equal(spawnOptions.detached, true);
+    assert.equal(spawnOptions.stdio, "ignore");
+    assert.equal(child.unrefCalled, true);
     assert.match(spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN, /^[a-f0-9]{64}$/);
     const saved = JSON.parse(readFileSync(statePath, "utf8"));
     assert.equal(saved.pid, child.pid);
     assert.equal(saved.token, spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a new Desktop manager reuses the detached console PID without spawning", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "cbm-desktop-service-"));
+  const statePath = path.join(directory, "service-state.json");
+  const token = "c".repeat(64);
+  const child = new EventEmitter();
+  child.pid = 9015;
+  child.exitCode = null;
+  child.killed = false;
+  child.unref = () => {};
+  child.kill = () => {};
+  let spawnCount = 0;
+  let alive = false;
+
+  const commonOptions = {
+    appPath: "C:\\repo\\desktop",
+    resourcesPath: "C:\\app\\resources",
+    env: {},
+    platform: "win32",
+    statePath,
+    readPort: () => 9749,
+    resolveBinary: () => "C:\\app\\codebase-memory-mcp.exe",
+    discoverPorts: async () => [],
+    tokenFactory: () => token,
+    probe: async () => alive
+      ? { reachable: true, pid: child.pid, serviceToken: token }
+      : { reachable: false, pid: null },
+  };
+
+  try {
+    const firstManager = new ServiceManager({
+      ...commonOptions,
+      spawn: () => {
+        spawnCount += 1;
+        alive = true;
+        return child;
+      },
+    });
+    const firstStatus = await firstManager.start();
+    assert.equal(firstStatus.pid, child.pid);
+    assert.equal(spawnCount, 1);
+
+    const reopenedManager = new ServiceManager({
+      ...commonOptions,
+      spawn: () => {
+        spawnCount += 1;
+        throw new Error("must not spawn a second console");
+      },
+      killProcess: () => {
+        alive = false;
+      },
+    });
+    const reopenedStatus = await reopenedManager.start();
+    assert.equal(reopenedStatus.state, "running");
+    assert.equal(reopenedStatus.managed, true);
+    assert.equal(reopenedStatus.pid, firstStatus.pid);
+    assert.equal(spawnCount, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -294,6 +362,10 @@ test("desktop exposes branding, AI routing, usage stats, and verified updates", 
   assert.match(mainSource, /createElectronUpdaterFetch/);
   assert.match(mainSource, /net\.request/);
   assert.doesNotMatch(mainSource, /net\.fetch/);
+  assert.match(
+    mainSource,
+    /async function requestQuit\(\) \{[\s\S]*?clearInterval\(statusTimer\);\s*app\.quit\(\);\s*\}/,
+  );
   assert.match(mainSource, /title: "风暴之眼"/);
   assert.match(updaterSource, /checksums\.txt/);
   assert.match(updaterSource, /SHA-256/);

@@ -599,6 +599,13 @@ TEST(mcp_get_architecture_aspects_schema_enum_pr560) {
         ASSERT_TRUE(found);
     }
 
+    yyjson_val *format = yyjson_obj_get(properties, "format");
+    ASSERT_NOT_NULL(format);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(format, "type")), "string");
+    yyjson_val *format_enum = yyjson_obj_get(format, "enum");
+    ASSERT_NOT_NULL(format_enum);
+    ASSERT_EQ(yyjson_arr_size(format_enum), 2);
+
     yyjson_doc_free(doc);
     free(json);
     PASS();
@@ -2369,6 +2376,11 @@ TEST(tool_get_architecture_emits_populated_sections) {
      * is serialized — which is exactly what #281 wires up. */
     ASSERT_NOT_NULL(strstr(inner, "entry_points["));
     ASSERT_NOT_NULL(strstr(inner, "main"));
+    ASSERT_NOT_NULL(strstr(inner, "kind"));
+    ASSERT_NOT_NULL(strstr(inner, "confidence"));
+    ASSERT_NOT_NULL(strstr(inner, "evidence"));
+    ASSERT_NOT_NULL(strstr(inner, "section_status["));
+    ASSERT_NOT_NULL(strstr(inner, "stop_recommended: true"));
 
     free(inner);
     free(resp);
@@ -2727,6 +2739,24 @@ TEST(tool_get_architecture_path_scoping) {
     ASSERT_NOT_NULL(strstr(inner_scoped, "path: "));
     ASSERT_NOT_NULL(strstr(inner_scoped, "hoa"));
     ASSERT_NULL(strstr(inner_scoped, "Django"));
+    ASSERT_NOT_NULL(strstr(inner_scoped, "module_granularity: directory"));
+    ASSERT_NOT_NULL(strstr(inner_scoped, "section_status["));
+    ASSERT_NOT_NULL(strstr(inner_scoped, "stop_recommended: true"));
+    ASSERT_NOT_NULL(strstr(inner_scoped, "next_action:"));
+
+    char *resp_json =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":94,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"get_architecture\","
+                                   "\"arguments\":{\"project\":\"arch-path\",\"path\":\"apps/hoa\","
+                                   "\"aspects\":[\"packages\"],\"format\":\"json\"}}}");
+    ASSERT_NOT_NULL(resp_json);
+    char *inner_json = extract_text_content(resp_json);
+    ASSERT_NOT_NULL(inner_json);
+    ASSERT_NOT_NULL(strstr(inner_json, "\"module_granularity\":\"directory\""));
+    ASSERT_NOT_NULL(strstr(inner_json, "\"section_status\":{\"packages\":"));
+    ASSERT_NOT_NULL(strstr(inner_json, "\"stop_recommended\":true"));
+    free(inner_json);
+    free(resp_json);
 
     int root_nodes = 0;
     int scoped_nodes = 0;

@@ -214,13 +214,7 @@ async function requestQuit() {
   isQuitting = true;
   updateManager?.stop();
   clearInterval(statusTimer);
-  try {
-    if (service?.snapshot().managed) {
-      await service.stop();
-    }
-  } finally {
-    app.quit();
-  }
+  app.quit();
 }
 
 if (gotLock) {

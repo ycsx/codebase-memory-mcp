@@ -190,6 +190,180 @@ TEST(arch_hotspots_exclude_tests) {
     PASS();
 }
 
+TEST(arch_entry_points_filter_vue_component_methods) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "vue-app", "/tmp/vue-app"), CBM_STORE_OK);
+
+    cbm_node_t main_render = {.project = "vue-app",
+                              .label = "Function",
+                              .name = "render",
+                              .qualified_name = "vue-app.src.main.render",
+                              .file_path = "src/main.js",
+                              .properties_json = "{\"is_entry_point\":true}"};
+    cbm_node_t app_created = {.project = "vue-app",
+                              .label = "Method",
+                              .name = "created",
+                              .qualified_name = "vue-app.src.App.created",
+                              .file_path = "src/App.vue",
+                              .properties_json = "{\"is_entry_point\":true}"};
+    cbm_node_t modal_created = {.project = "vue-app",
+                                .label = "Method",
+                                .name = "created",
+                                .qualified_name = "vue-app.src.components.Modal.created",
+                                .file_path = "src/components/Modal.vue",
+                                .properties_json = "{\"is_entry_point\":true}"};
+    cbm_node_t modal_open = {.project = "vue-app",
+                             .label = "Method",
+                             .name = "open",
+                             .qualified_name = "vue-app.src.components.Modal.open",
+                             .file_path = "src/components/Modal.vue",
+                             .properties_json = "{\"is_entry_point\":true}"};
+    cbm_store_upsert_node(s, &main_render);
+    cbm_store_upsert_node(s, &app_created);
+    cbm_store_upsert_node(s, &modal_created);
+    cbm_store_upsert_node(s, &modal_open);
+
+    cbm_architecture_info_t info;
+    const char *aspects[] = {"entry_points"};
+    ASSERT_EQ(cbm_store_get_architecture(s, "vue-app", NULL, aspects, 1, &info), CBM_STORE_OK);
+    ASSERT_EQ(info.entry_point_count, 2);
+    bool found_runtime = false;
+    bool found_root = false;
+    for (int i = 0; i < info.entry_point_count; i++) {
+        ASSERT_TRUE(strstr(info.entry_points[i].file, "Modal.vue") == NULL);
+        if (strcmp(info.entry_points[i].kind, "runtime") == 0) {
+            found_runtime = true;
+            ASSERT_TRUE(info.entry_points[i].confidence >= 0.95);
+        }
+        if (strcmp(info.entry_points[i].kind, "framework_root") == 0) {
+            found_root = true;
+        }
+    }
+    ASSERT_TRUE(found_runtime);
+    ASSERT_TRUE(found_root);
+
+    cbm_store_architecture_free(&info);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(arch_hotspots_require_reliable_distinct_callers) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "confidence", "/tmp/confidence"), CBM_STORE_OK);
+
+    cbm_node_t noisy = {.project = "confidence",
+                        .label = "Function",
+                        .name = "log",
+                        .qualified_name = "confidence.ui.log",
+                        .file_path = "src/ui.js"};
+    cbm_node_t reliable = {.project = "confidence",
+                           .label = "Function",
+                           .name = "processOrder",
+                           .qualified_name = "confidence.service.processOrder",
+                           .file_path = "src/service.js"};
+    int64_t noisy_id = cbm_store_upsert_node(s, &noisy);
+    int64_t reliable_id = cbm_store_upsert_node(s, &reliable);
+    for (int i = 0; i < 3; i++) {
+        char name[32];
+        char qn[64];
+        snprintf(name, sizeof(name), "caller%d", i);
+        snprintf(qn, sizeof(qn), "confidence.views.%s", name);
+        cbm_node_t caller = {.project = "confidence",
+                             .label = "Function",
+                             .name = name,
+                             .qualified_name = qn,
+                             .file_path = "src/views/Page.vue"};
+        int64_t caller_id = cbm_store_upsert_node(s, &caller);
+        cbm_edge_t low = {.project = "confidence",
+                          .source_id = caller_id,
+                          .target_id = noisy_id,
+                          .type = "CALLS",
+                          .properties_json = "{\"confidence\":0.34}"};
+        cbm_store_insert_edge(s, &low);
+        if (i == 0) {
+            cbm_edge_t high = {.project = "confidence",
+                               .source_id = caller_id,
+                               .target_id = reliable_id,
+                               .type = "CALLS",
+                               .properties_json = "{\"confidence\":0.95}"};
+            cbm_store_insert_edge(s, &high);
+        }
+    }
+
+    cbm_architecture_info_t info;
+    const char *aspects[] = {"hotspots"};
+    ASSERT_EQ(cbm_store_get_architecture(s, "confidence", NULL, aspects, 1, &info), CBM_STORE_OK);
+    ASSERT_EQ(info.hotspot_count, 1);
+    ASSERT_STR_EQ(info.hotspots[0].name, "processOrder");
+    ASSERT_EQ(info.hotspots[0].fan_in, 1);
+
+    cbm_store_architecture_free(&info);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(arch_scoped_directory_modules_and_boundaries) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "mono", "/tmp/mono"), CBM_STORE_OK);
+    const char *scope = "develop/@aikb/aikb-web";
+
+    cbm_node_t view = {.project = "mono",
+                       .label = "Function",
+                       .name = "loadPage",
+                       .qualified_name = "mono.develop.@aikb.views.loadPage",
+                       .file_path = "develop/@aikb/aikb-web/src/views/Page.vue"};
+    cbm_node_t component = {.project = "mono",
+                            .label = "Function",
+                            .name = "renderPanel",
+                            .qualified_name = "mono.develop.@aikb.components.renderPanel",
+                            .file_path = "develop/@aikb/aikb-web/src/components/Panel.vue"};
+    cbm_node_t service = {.project = "mono",
+                          .label = "Function",
+                          .name = "requestData",
+                          .qualified_name = "mono.develop.@aikb.services.requestData",
+                          .file_path = "develop/@aikb/aikb-web/src/services/api.js"};
+    int64_t view_id = cbm_store_upsert_node(s, &view);
+    int64_t component_id = cbm_store_upsert_node(s, &component);
+    int64_t service_id = cbm_store_upsert_node(s, &service);
+    cbm_edge_t e1 = {.project = "mono",
+                     .source_id = view_id,
+                     .target_id = component_id,
+                     .type = "CALLS",
+                     .properties_json = "{\"confidence\":0.95}"};
+    cbm_edge_t e2 = {.project = "mono",
+                     .source_id = component_id,
+                     .target_id = service_id,
+                     .type = "CALLS",
+                     .properties_json = "{\"confidence\":0.95}"};
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+
+    cbm_architecture_info_t info;
+    const char *aspects[] = {"packages", "boundaries", "layers"};
+    ASSERT_EQ(cbm_store_get_architecture(s, "mono", scope, aspects, 3, &info), CBM_STORE_OK);
+    ASSERT_EQ(info.package_count, 3);
+    ASSERT_EQ(info.boundary_count, 2);
+    bool found_views = false;
+    bool found_components = false;
+    bool found_services = false;
+    for (int i = 0; i < info.package_count; i++) {
+        found_views |= strcmp(info.packages[i].name, "views") == 0;
+        found_components |= strcmp(info.packages[i].name, "components") == 0;
+        found_services |= strcmp(info.packages[i].name, "services") == 0;
+    }
+    ASSERT_TRUE(found_views);
+    ASSERT_TRUE(found_components);
+    ASSERT_TRUE(found_services);
+    ASSERT_TRUE(info.layer_count >= 3);
+
+    cbm_store_architecture_free(&info);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(arch_specific_aspects) {
     cbm_store_t *s = setup_arch_test_store();
     cbm_architecture_info_t info;
@@ -1398,7 +1572,10 @@ SUITE(store_arch) {
     /* Architecture */
     RUN_TEST(arch_get_all);
     RUN_TEST(arch_entry_points_exclude_tests);
+    RUN_TEST(arch_entry_points_filter_vue_component_methods);
     RUN_TEST(arch_hotspots_exclude_tests);
+    RUN_TEST(arch_hotspots_require_reliable_distinct_callers);
+    RUN_TEST(arch_scoped_directory_modules_and_boundaries);
     RUN_TEST(arch_specific_aspects);
     RUN_TEST(arch_path_scoping);
     RUN_TEST(arch_empty_project);
