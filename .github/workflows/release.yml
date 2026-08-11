@@ -283,16 +283,22 @@ jobs:
           cp assets/*.dmg binaries/
           ls -la binaries/
 
-      - name: Security audits on all release files
+      - name: Security audits on release payloads
         run: |
-          # Audit every file that ships in the release archives — binaries,
-          # install scripts, LICENSE, and any future companion files.
+          # Audit executable payloads and install scripts. DMG containers are
+          # verified by macOS smoke tests and handled by the VirusTotal policy.
           # security-strings.sh detects file type and applies binary-only
           # rules (URL allowlist, dangerous-command detection) only to real
           # binaries; for shell scripts it still runs credential and base64
           # pattern audits.
           for f in binaries/*; do
             [ -f "$f" ] || continue
+            case "$f" in
+              *.dmg)
+                echo "Skipping raw string audit for DMG container; macOS smoke and VirusTotal policy handle it separately."
+                continue
+                ;;
+            esac
             echo "--- Auditing: $(basename "$f") ---"
             scripts/security-strings.sh "$f"
           done
