@@ -38,6 +38,7 @@
 #include "foundation/compat_thread.h"
 #include "foundation/subprocess.h" /* cbm_build_win_cmdline — shared MS-CRT arg quoting */
 #include "foundation/win_utf8.h"   /* cbm_utf8_to_wide — CreateProcessW wide cmdline (#423/#20) */
+#include "foundation/win_process.h"
 #include "foundation/workspace.h"
 
 #include <sqlite3/sqlite3.h>
@@ -1292,7 +1293,8 @@ static void *index_thread_fn(void *arg) {
         si_proc.hStdOutput = hlog;
     }
     PROCESS_INFORMATION pi = {0};
-    BOOL spawned = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si_proc, &pi);
+    BOOL spawned = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
+                                  cbm_win_background_creation_flags(0), NULL, NULL, &si_proc, &pi);
     DWORD spawn_error = spawned ? ERROR_SUCCESS : GetLastError();
     free(wcmd);
     if (!spawned) {

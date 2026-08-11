@@ -13,6 +13,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include "win_process.h"
 #include "win_utf8.h" /* cbm_utf8_to_wide — spawn the worker with a wide command line so a
                        * non-ASCII repo path survives CreateProcess (#423/#20) */
 #include <stdlib.h>   /* free */
@@ -263,7 +264,8 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     }
 
     PROCESS_INFORMATION pi = {0};
-    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, cbm_win_background_creation_flags(0),
+                             NULL, NULL, &si, &pi);
     free(wcmd);
     if (hlog != INVALID_HANDLE_VALUE) {
         CloseHandle(hlog);

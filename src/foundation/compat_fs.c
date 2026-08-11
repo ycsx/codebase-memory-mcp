@@ -26,6 +26,7 @@
 #include <io.h>     /* _wunlink, _open_osfhandle, _close */
 #include <stdint.h> /* intptr_t */
 #include "foundation/log.h"
+#include "foundation/win_process.h"
 #include "foundation/win_utf8.h"
 
 struct cbm_dir {
@@ -272,7 +273,8 @@ static FILE *cbm_popen_isolated(const char *cmd, const char **stage, DWORD *gle)
         *stage = "cmdline";
         *gle = ERROR_NOT_ENOUGH_MEMORY;
     } else {
-        created = CreateProcessW(app, wcmdline, NULL, NULL, TRUE, EXTENDED_STARTUPINFO_PRESENT,
+        created = CreateProcessW(app, wcmdline, NULL, NULL, TRUE,
+                                 cbm_win_background_creation_flags(EXTENDED_STARTUPINFO_PRESENT),
                                  NULL, NULL, &si.StartupInfo, &pi);
         if (!created) {
             *stage = "spawn";

@@ -14,6 +14,7 @@
 #include "../src/foundation/compat_fs.h"
 #ifdef _WIN32
 #include "../src/foundation/compat_fs_internal.h"
+#include "../src/foundation/win_process.h"
 #include "../src/foundation/win_utf8.h"
 #include <winsock2.h> /* #798 follow-up: listening-socket isolation guard */
 #include <windows.h>
@@ -724,6 +725,17 @@ TEST(popen_isolated_propagates_exit_code) {
     PASS();
 }
 
+TEST(background_process_flags_hide_console) {
+    DWORD basic = cbm_win_background_creation_flags(0);
+    ASSERT((basic & CREATE_NO_WINDOW) != 0);
+    ASSERT_EQ(basic & EXTENDED_STARTUPINFO_PRESENT, 0);
+
+    DWORD extended = cbm_win_background_creation_flags(EXTENDED_STARTUPINFO_PRESENT);
+    ASSERT((extended & CREATE_NO_WINDOW) != 0);
+    ASSERT((extended & EXTENDED_STARTUPINFO_PRESENT) != 0);
+    PASS();
+}
+
 /* #798 follow-up (the full-repro gap flagged above): prove the EXACT handle class
  * that deadlocked git — an inheritable AFD/listening-socket handle, the kind the
  * UI HTTP server holds — does NOT cross into the cbm_popen child. Unlike the
@@ -861,6 +873,7 @@ SUITE(security) {
     /* Isolated popen — handle-inheritance regression guard for #798 */
     RUN_TEST(popen_isolated_git_version_round_trip);
     RUN_TEST(popen_isolated_propagates_exit_code);
+    RUN_TEST(background_process_flags_hide_console);
     RUN_TEST(popen_isolates_listening_socket);
 #endif
 }
