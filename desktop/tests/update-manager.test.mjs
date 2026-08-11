@@ -12,6 +12,7 @@ const {
   RELEASE_API_URL,
   UpdateManager,
   compareVersions,
+  createElectronUpdaterFetch,
   installerAssetName,
   launchWindowsInstaller,
   parseChecksum,
@@ -96,6 +97,76 @@ test("an older Release does not require installer assets", async () => {
   assert.equal(status.state, "up-to-date");
   assert.equal(status.latestVersion, "1.2.0");
   assert.equal(status.error, null);
+});
+
+test("Electron request transport follows an allowed redirect synchronously", async () => {
+  const payload = Buffer.from("electron-request-redirect");
+  let requestedOptions = null;
+  let followed = false;
+  const fetchImpl = createElectronUpdaterFetch((options) => {
+    requestedOptions = options;
+    const request = new EventEmitter();
+    request.followRedirect = () => { followed = true; };
+    request.abort = () => undefined;
+    request.end = () => queueMicrotask(() => {
+      request.emit("redirect", 302, "GET", REDIRECTED_INSTALLER_URL, {});
+      if (!followed) {
+        request.emit("error", new Error("Redirect was cancelled"));
+        return;
+      }
+      const response = new EventEmitter();
+      response.statusCode = 200;
+      response.statusMessage = "OK";
+      response.headers = { "content-length": String(payload.length) };
+      request.emit("response", response);
+      queueMicrotask(() => {
+        response.emit("data", payload);
+        response.emit("end");
+      });
+    });
+    return request;
+  });
+
+  const response = await fetchImpl(INSTALLER_URL, { redirect: "manual" });
+  assert.equal(requestedOptions.redirect, "manual");
+  assert.equal(requestedOptions.credentials, "omit");
+  assert.equal(response.url, REDIRECTED_INSTALLER_URL);
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), payload);
+});
+
+test("Electron request transport rejects an untrusted redirect before following it", async () => {
+  let aborted = false;
+  let followed = false;
+  const fetchImpl = createElectronUpdaterFetch(() => {
+    const request = new EventEmitter();
+    request.followRedirect = () => { followed = true; };
+    request.abort = () => { aborted = true; };
+    request.end = () => queueMicrotask(() => {
+      request.emit("redirect", 302, "GET", "http://github.com/redirected", {});
+    });
+    return request;
+  });
+
+  await assert.rejects(fetchImpl(INSTALLER_URL), /不受信任/);
+  assert.equal(aborted, true);
+  assert.equal(followed, false);
+});
+
+test("Electron request transport aborts a pending request", async () => {
+  let aborted = false;
+  const fetchImpl = createElectronUpdaterFetch(() => {
+    const request = new EventEmitter();
+    request.followRedirect = () => undefined;
+    request.abort = () => { aborted = true; };
+    request.end = () => undefined;
+    return request;
+  });
+  const controller = new AbortController();
+  const pending = fetchImpl(INSTALLER_URL, { signal: controller.signal });
+
+  controller.abort();
+  await assert.rejects(pending, (error) => error.name === "AbortError" && error.code === "ABORT_ERR");
+  assert.equal(aborted, true);
 });
 
 test("default updater transport uses the injected Electron-compatible fetch implementation", async () => {

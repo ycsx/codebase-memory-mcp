@@ -115,6 +115,136 @@ async function fetchAllowedResponse(url, fetchImpl, init, redirects = 0) {
   return response;
 }
 
+function createAbortError() {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  return error;
+}
+
+function createElectronUpdaterFetch(requestImpl) {
+  if (typeof requestImpl !== "function") {
+    throw new TypeError("Electron request implementation is required");
+  }
+  return (url, options = {}) => {
+    const parsed = assertAllowedDownloadUrl(url);
+    if (options.signal?.aborted) {
+      return Promise.reject(createAbortError());
+    }
+
+    return new Promise((resolve, reject) => {
+      let request;
+      let responseController = null;
+      let promiseResolved = false;
+      let finished = false;
+      let redirects = 0;
+      let finalUrl = parsed.toString();
+
+      const cleanup = () => options.signal?.removeEventListener("abort", abortRequest);
+      const fail = (error) => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        cleanup();
+        if (promiseResolved && responseController) {
+          responseController.error(error);
+        } else {
+          reject(error);
+        }
+      };
+      const abortRequest = () => {
+        const error = createAbortError();
+        fail(error);
+        request?.abort();
+      };
+
+      try {
+        request = requestImpl({
+          url: parsed.toString(),
+          method: options.method ?? "GET",
+          headers: options.headers,
+          redirect: "manual",
+          credentials: "omit",
+        });
+      } catch (error) {
+        fail(error);
+        return;
+      }
+
+      options.signal?.addEventListener("abort", abortRequest, { once: true });
+      request.on("redirect", (_statusCode, _method, redirectUrl) => {
+        if (finished) {
+          return;
+        }
+        try {
+          redirects += 1;
+          if (redirects > 5) {
+            throw new Error("Release 下载重定向次数过多");
+          }
+          finalUrl = assertAllowedDownloadUrl(redirectUrl).toString();
+          request.followRedirect();
+        } catch (error) {
+          fail(error);
+          request.abort();
+        }
+      });
+      request.once("error", fail);
+      request.once("response", (incoming) => {
+        if (finished) {
+          return;
+        }
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers ?? {})) {
+          for (const item of Array.isArray(value) ? value : [value]) {
+            headers.append(name, item);
+          }
+        }
+        const body = new ReadableStream({
+          start(controller) {
+            responseController = controller;
+            incoming.on("data", (chunk) => controller.enqueue(chunk));
+            incoming.once("end", () => {
+              if (!finished) {
+                finished = true;
+                cleanup();
+                controller.close();
+              }
+            });
+            incoming.once("aborted", () => fail(createAbortError()));
+            incoming.once("error", fail);
+          },
+          cancel() {
+            if (!finished) {
+              finished = true;
+              cleanup();
+              request.abort();
+            }
+          },
+        });
+        try {
+          const response = new Response(body, {
+            status: incoming.statusCode,
+            statusText: incoming.statusMessage,
+            headers,
+          });
+          Object.defineProperty(response, "url", { value: finalUrl });
+          promiseResolved = true;
+          resolve(response);
+        } catch (error) {
+          fail(error);
+          request.abort();
+        }
+      });
+      try {
+        request.end();
+      } catch (error) {
+        fail(error);
+      }
+    });
+  };
+}
+
 async function fetchBoundedText(url, options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") {
@@ -499,6 +629,7 @@ module.exports = {
   RELEASE_API_URL,
   UpdateManager,
   compareVersions,
+  createElectronUpdaterFetch,
   downloadAndHash,
   installerAssetName,
   launchWindowsInstaller,

@@ -12,7 +12,7 @@ const {
   Tray,
 } = require("electron");
 const { ServiceManager } = require("./service-manager.cjs");
-const { UpdateManager } = require("./update-manager.cjs");
+const { createElectronUpdaterFetch, UpdateManager } = require("./update-manager.cjs");
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -250,7 +250,7 @@ if (gotLock) {
       arch: process.arch,
       tempDir: path.join(app.getPath("temp"), "codebase-memory-mcp-updates"),
       enabled: app.isPackaged,
-      fetchImpl: (url, options) => net.fetch(url, options),
+      fetchImpl: createElectronUpdaterFetch((options) => net.request(options)),
       prepareInstall: prepareUpdateInstall,
       recoverInstall: recoverUpdateInstall,
     });

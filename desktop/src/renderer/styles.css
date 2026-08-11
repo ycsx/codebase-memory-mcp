@@ -546,6 +546,29 @@ button:disabled {
   background: rgba(255, 255, 255, 0.48);
 }
 
+.version-check-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#version-check-result {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.version-check-button {
+  height: 34px;
+  min-width: 108px;
+  padding: 0 12px;
+}
+
+.version-check-button svg {
+  width: 15px;
+  height: 15px;
+}
+
 .detail-list > div {
   min-width: 0;
   padding: 15px 16px;

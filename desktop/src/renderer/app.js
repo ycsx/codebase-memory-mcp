@@ -35,6 +35,9 @@ const elements = {
   updateDialogCopy: document.querySelector("#update-dialog-copy"),
   updateCancel: document.querySelector("#update-cancel-button"),
   updateConfirm: document.querySelector("#update-confirm-button"),
+  versionCheck: document.querySelector("#version-check-button"),
+  versionCheckLabel: document.querySelector("#version-check-label"),
+  versionCheckResult: document.querySelector("#version-check-result"),
   toast: document.querySelector("#toast"),
   toastMessage: document.querySelector("#toast-message"),
 };
@@ -114,6 +117,18 @@ function renderUpdateStatus(status) {
   elements.appVersion.textContent = currentVersion;
   elements.updateNotice.dataset.state = status?.error ? "error" : state;
 
+  const updateLocked = ["checking", "downloading", "ready", "installing"].includes(state);
+  elements.versionCheck.disabled = updateBusy || updateLocked || state === "unsupported" || status?.supported === false;
+  elements.versionCheckLabel.textContent = state === "checking"
+    ? "检查中"
+    : state === "error" ? "重新检查" : "检查版本";
+  elements.versionCheckResult.textContent = state === "checking"
+    ? "正在连接更新服务器..."
+    : state === "up-to-date" ? "已是最新版本"
+      : state === "available" && latestVersion ? `可更新至 ${latestVersion}`
+        : state === "error" ? "检查失败"
+          : state === "unsupported" ? "当前环境不支持应用内更新" : "";
+
   if (["unsupported", "idle", "up-to-date"].includes(state)) {
     elements.updateNotice.hidden = true;
     return;
@@ -143,6 +158,26 @@ function renderUpdateStatus(status) {
     elements.updateDescription.textContent = status?.error ?? "暂时无法连接更新服务器。";
     elements.updateActionLabel.textContent = "重新检查";
     elements.updateAction.disabled = updateBusy;
+  }
+}
+
+async function checkForUpdates() {
+  if (updateBusy) {
+    return;
+  }
+  updateBusy = true;
+  renderUpdateStatus({ ...updateStatus, state: "checking", error: null });
+  try {
+    renderUpdateStatus(await window.cbmDesktop.checkForUpdates());
+  } catch (error) {
+    showError(error);
+  } finally {
+    updateBusy = false;
+    try {
+      renderUpdateStatus(await window.cbmDesktop.getUpdateStatus());
+    } catch (error) {
+      showError(error);
+    }
   }
 }
 
@@ -289,21 +324,13 @@ elements.start.addEventListener("click", () => runAction(() => window.cbmDesktop
 elements.stop.addEventListener("click", () => runAction(() => window.cbmDesktop.stop()));
 elements.restart.addEventListener("click", () => runAction(() => window.cbmDesktop.restart()));
 elements.console.addEventListener("click", () => runAction(() => window.cbmDesktop.openConsole()));
+elements.versionCheck.addEventListener("click", checkForUpdates);
 elements.updateAction.addEventListener("click", async () => {
   if (updateBusy) {
     return;
   }
   if (updateStatus?.state === "error") {
-    updateBusy = true;
-    renderUpdateStatus(updateStatus);
-    try {
-      renderUpdateStatus(await window.cbmDesktop.checkForUpdates());
-    } catch (error) {
-      showError(error);
-    } finally {
-      updateBusy = false;
-      renderUpdateStatus(await window.cbmDesktop.getUpdateStatus());
-    }
+    await checkForUpdates();
     return;
   }
   if (updateStatus?.state === "available") {
