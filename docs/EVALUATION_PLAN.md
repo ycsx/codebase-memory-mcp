@@ -1,4 +1,4 @@
-# codebase-memory-mcp — Evaluation Plan (159 Languages)
+# codebase-memory-mcp — Evaluation Plan (historical 159-language scope)
 
 > **Status:** Working plan document, **for peer review prior to execution**. This is a **plan, not a
 > result set** — it defines *how* the next evaluation is run and contains no scores. Execution happens
@@ -11,6 +11,8 @@
 ---
 
 ## 1. Purpose
+
+> **口径说明：** 本文的 159-language 是评估计划在编写时冻结的测试范围，不是当前 README 对运行时语言覆盖的承诺。当前能力请以源码注册表和二进制 `get_architecture` 返回为准。
 
 Measure how well `codebase-memory-mcp`'s structured knowledge-graph queries answer real developer
 questions compared to plain text exploration (Grep / Glob / Read), across **all 159 supported

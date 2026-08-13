@@ -101,13 +101,15 @@
           </button>
         </div>
         <div class="prompt-shell">
-          <pre id="connection-prompt">当前电脑已经安装并配置好 Codebase Memory MCP。不要下载、重装或改写 MCP 配置。请先确认当前会话能看到 codebase-memory-mcp 的工具；如果看不到，停止并告诉我需要重启或重新连接 AI 客户端。
+          <pre id="connection-prompt">本机已经安装 Codebase Memory MCP。不要下载、重装、升级或改写 MCP 配置，也不要把代码上传到外部服务。请先确认当前会话能看到名为 codebase-memory-mcp 的 MCP 工具；如果看不到，停止当前任务并告诉我需要重启或重新连接 AI 客户端。
 
-开始代码任务时先调用 list_projects。只有目标仓库尚未索引时才调用 index_repository；已索引项目使用 index_status 检查状态，不要为普通查询重复索引。
+开始代码任务时先调用 list_projects，选择目标仓库对应的 project。只有目标仓库尚未登记或确实需要重新建立索引时才调用 index_repository；已登记项目先用 index_status 检查状态，普通查询不要重复索引。
 
-按问题选择工具：查找符号和定义优先 search_graph；分析调用者、被调用者、依赖、数据流和跨服务链路优先 trace_path；读取已定位符号源码使用 get_code_snippet；复杂多跳和聚合使用 query_graph；修改影响使用 explain_impact；架构、边界和热点使用 get_architecture。已知单个文件的机械修改、精确字符串、错误文案、配置值和非代码文本，直接使用 rg/grep 或源码搜索。
+按问题选择工具：查找函数、类、路由和定义优先 search_graph；分析调用者、被调用者、依赖、数据流和跨服务链路优先 trace_path；读取已定位符号源码使用 get_code_snippet；架构概览使用 get_architecture；修改影响使用 explain_impact 或 detect_changes；复杂多跳、聚合和跨仓库边使用 query_graph；图谱 schema 使用 get_graph_schema；覆盖度使用 check_index_coverage。已知单个文件的机械修改、精确字符串、错误文案、配置值和非代码文本，直接使用 rg/grep 或源码搜索。
 
-不要根据“引入次数”或 grep 命中数推断调用关系。引用文件或作出“没有影响、全部覆盖”之类结论前调用 check_index_coverage；图谱覆盖不足时回退源码搜索，并明确区分图谱证据与推断。响应出现 has_more 或 nextCursor 时继续分页。完成后简要报告使用的项目、关键图谱证据、覆盖限制和修改结果。</pre>
+不要根据 import 次数、节点总度数或 grep 命中数推断调用关系。引用文件或作出“没有影响”“全部覆盖”“不存在”之类结论前，调用 check_index_coverage 检查相关文件或目录范围；看到 parse_partial、skipped、not_indexed、stale 或未知覆盖时，回退到报告范围内的源码读取/搜索，并明确区分图谱证据与推断。响应出现 has_more 或 nextCursor 时继续分页；query_graph 使用 LIMIT 控制结果量。
+
+默认只读分析。只有我明确要求时才修改文件、配置或索引；完成后简要报告使用的 project、关键图谱证据、覆盖限制和实际修改结果。</pre>
         </div>
       </section>
 

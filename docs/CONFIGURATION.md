@@ -1,43 +1,17 @@
-# Configuration Reference
+# 配置参考
 
-This page documents the configuration files that `codebase-memory-mcp` reads or writes today.
+## 文件位置
 
-## At a Glance
+| 用途 | 路径 | 格式 |
+|---|---|---|
+| 全局扩展名映射 | `$XDG_CONFIG_HOME/codebase-memory-mcp/config.json`，未设置时为 `~/.config/codebase-memory-mcp/config.json` | JSON |
+| 项目扩展名映射 | `{repo_root}/.codebase-memory.json` | JSON |
+| CLI 运行时设置 | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db` | SQLite |
+| UI 设置 | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json` | JSON |
 
-| Purpose | Path | Format | Notes |
-|---|---|---|---|
-| Global custom extension mapping | `$XDG_CONFIG_HOME/codebase-memory-mcp/config.json` | JSON | Falls back to `~/.config/codebase-memory-mcp/config.json` when `XDG_CONFIG_HOME` is unset. |
-| Per-project custom extension mapping | `{repo_root}/.codebase-memory.json` | JSON | Overrides conflicting global `extra_extensions` entries. |
-| CLI-managed runtime settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db` | SQLite | Written by `codebase-memory-mcp config set/reset`. |
-| UI settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json` | JSON | Stores `ui_enabled` and `ui_port`. |
+## 扩展名映射
 
-## 1. Custom File Extension Mapping
-
-Two optional JSON files let you map additional file extensions to built-in languages.
-
-### Global config
-
-Default path:
-
-```text
-$XDG_CONFIG_HOME/codebase-memory-mcp/config.json
-```
-
-Fallback when `XDG_CONFIG_HOME` is unset:
-
-```text
-~/.config/codebase-memory-mcp/config.json
-```
-
-### Per-project config
-
-Place this file in the repository root:
-
-```text
-.codebase-memory.json
-```
-
-### Format
+全局配置和仓库根目录的 `.codebase-memory.json` 都支持：
 
 ```json
 {
@@ -49,82 +23,59 @@ Place this file in the repository root:
 }
 ```
 
-Notes:
+扩展名必须带点，语言名不区分大小写；未知语言和缺失文件会被忽略。项目级配置优先于全局配置。
 
-- Extension keys must include the leading dot.
-- Language names are case-insensitive.
-- Unknown language names are skipped.
-- Missing files are ignored.
-- If the same extension appears in both files, the per-project file wins.
-
-## 2. CLI-Managed Runtime Settings
-
-The `config` subcommand stores runtime settings in a small SQLite database:
-
-```text
-${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db
-```
-
-Inspect or change values with the CLI:
+## CLI 设置
 
 ```bash
 codebase-memory-mcp config list
 codebase-memory-mcp config get auto_index
 codebase-memory-mcp config set auto_index true
 codebase-memory-mcp config set auto_index_limit 50000
+codebase-memory-mcp config set auto_watch false
 codebase-memory-mcp config reset auto_index
 ```
 
-Current keys:
-
-| Key | Default | Meaning |
+| 键 | 默认值 | 说明 |
 |---|---|---|
-| `auto_index` | `false` | Automatically index new projects when an MCP session starts. |
-| `auto_index_limit` | `50000` | Maximum file count allowed for automatic indexing of a new project. |
+| `auto_index` | `false` | MCP 初始化时是否自动索引新项目。 |
+| `auto_index_limit` | `50000` | 自动索引允许的最大文件数。 |
+| `auto_watch` | `true` | 已索引项目是否注册后台 watcher。 |
 
-## 3. UI Settings
+## UI 设置
 
-The optional built-in graph UI stores its settings in:
-
-```text
-${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json
-```
-
-Current format:
+`${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json`：
 
 ```json
 {
   "ui_enabled": false,
-  "ui_port": 9749
+  "ui_port": 9749,
+  "lang": "zh"
 }
 ```
 
-Notes:
+UI 版本在首次运行时可自动启用嵌入资源。 `CBM_CACHE_DIR` 同时影响索引数据库、CLI 设置和 UI 配置。
 
-- If the UI-enabled binary has embedded assets and no UI config file exists yet, the UI auto-enables on first run.
-- `CBM_CACHE_DIR` changes both the UI config location and the runtime settings database location.
+## 环境变量
 
-## 4. Environment Variables
-
-These environment variables affect runtime behavior:
-
-| Variable | Default | Description |
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `CBM_ALLOWED_ROOT` | *(unset)* | Confine MCP and graph UI indexing to paths within this directory. Unset imposes no containment restriction, but the always-on root limits below still apply. |
-| `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Override the cache directory used for indexes, `_config.db`, and UI `config.json`. |
-| `CBM_DIAGNOSTICS` | `false` | Enable periodic diagnostics output to `/tmp/cbm-diagnostics-<pid>.json`. |
-| `CBM_DOWNLOAD_URL` | GitHub releases | Override the update download URL. |
-| `CBM_LOG_LEVEL` | `info` | Set stderr log level to `debug`, `info`, `warn`, `error`, or `none` (or `0`-`4`). |
-| `CBM_WORKERS` | auto-detected | Override the indexing worker count. |
+| `CBM_ALLOWED_ROOT` | 未设置 | 将 MCP 和 UI 索引限制在指定目录内。 |
+| `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | 覆盖缓存、索引和配置目录。 |
+| `CBM_DIAGNOSTICS` | `false` | 输出周期性诊断文件。 |
+| `CBM_DOWNLOAD_URL` | GitHub Releases | 覆盖升级下载地址。 |
+| `CBM_LOG_LEVEL` | `info` | `debug`、`info`、`warn`、`error`、`none` 或 `0`-`4`。日志写 stderr。 |
+| `CBM_WORKERS` | 自动检测 | 覆盖索引 worker 数，范围 1-256。 |
+| `CBM_MEM_BUDGET_MB` | 自动检测 | 覆盖内存预算，单位 MiB。 |
+| `CBM_DUMP_VERIFY_MIN_RATIO` | `0.5` | 校验持久化节点数，低于比例时报告 degraded；设置 `0` 可关闭。 |
 
-## 5. Agent and Editor Integration Files
+## 客户端接入文件
 
-The `install` command can also write MCP entries and instruction blocks into agent/editor config files such as Claude Code, Codex, Gemini, VS Code, Cursor, Zed, and others.
-
-Those target paths vary by tool and platform, so the easiest way to inspect the exact files for your machine is:
+`install` 可写入 Claude Code、Codex、Gemini、VS Code、Cursor、Zed 等客户端的 MCP、说明、技能、Agent 和生命周期 Hook。路径和客户端能力会随平台变化，建议先执行：
 
 ```bash
 codebase-memory-mcp install --dry-run
+codebase-memory-mcp install --plan
 ```
 
-That prints the specific config files the installer would modify without writing anything.
+控制台的“客户端接入”面板会调用相同的计划接口，并在确认后执行写入。安装器只更新自己拥有的条目，保留无关设置，冲突时拒绝覆盖。

@@ -1,34 +1,30 @@
 # codebase-memory-mcp
 
-mcp-name: io.github.ycsx/codebase-memory-mcp
+面向 AI 编码 Agent 的本地代码知识图谱 MCP 服务。索引、查询和语义搜索均在本机执行，不需要 API Key、Docker 或语言运行时。
 
-**Fast code intelligence engine for AI coding agents.** Indexes an average repository in milliseconds, the Linux kernel (28M LOC) in 3 minutes. Answers structural queries in under 1ms.
-
-This package installs the `codebase-memory-mcp` binary from [GitHub Releases](https://github.com/ycsx/codebase-memory-mcp/releases). The binary is downloaded on first run and cached in your OS cache directory.
-
-## Installation
+## 安装
 
 ```bash
 pip install codebase-memory-mcp
-# or
+# 或
 pipx install codebase-memory-mcp
 ```
 
-## Usage
+该包会从 [GitHub Releases](https://github.com/ycsx/codebase-memory-mcp/releases) 下载并缓存当前平台的二进制。安装后运行：
 
 ```bash
-codebase-memory-mcp install   # configure your coding agents
+codebase-memory-mcp install
 codebase-memory-mcp --help
 ```
 
-## Supported platforms
+## 支持平台
 
-| OS      | Architecture |
-|---------|-------------|
-| macOS   | arm64, amd64 |
-| Linux   | arm64, amd64 |
-| Windows | amd64 |
+| 系统 | 架构 |
+|---|---|
+| macOS | arm64、amd64 |
+| Linux | arm64、amd64 |
+| Windows | amd64、arm64（以最新 Release 资产为准） |
 
-## Full documentation
+修改客户端配置后请重启 AI 客户端。完整安装、MCP 工具、配置和远程部署说明见：
 
-See [github.com/ycsx/codebase-memory-mcp](https://github.com/ycsx/codebase-memory-mcp)
+[项目 README](https://github.com/ycsx/codebase-memory-mcp#readme)

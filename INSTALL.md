@@ -1,128 +1,123 @@
-# Installing the ycsx fork
+# 安装与构建
 
-This repository is the `ycsx/codebase-memory-mcp` fork. Its installers, update
-checks, and source setup scripts use this fork's GitHub repository.
+本文记录当前 `ycsx/codebase-memory-mcp` 分支的安装、源码构建和发布资产使用方式。GitHub Release 是推荐安装来源；`pkg/` 下的 npm/PyPI/Homebrew 等清单不代表对应注册表一定已经发布最新构建。
 
-## Current release status
+## Release 安装
 
-The fork does not currently have a GitHub Release with binary assets. Until a
-release is published, install from source. The release installers intentionally
-do not fall back to binaries from the upstream repository.
-
-## macOS and Linux
-
-Prerequisites:
-
-- Git
-- A C compiler and C++ compiler (Clang or GCC)
-- Make and zlib development headers
-- Node.js 18+ and npm when building the UI variant
-
-Source install:
+### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/scripts/setup.sh \
-  | bash -s -- --from-source
+curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash
 ```
 
-Source install with the embedded graph UI:
+需要图谱 UI 时：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/scripts/setup.sh \
-  | bash -s -- --from-source --ui
+curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash -s -- --ui
 ```
 
-The binary is installed to `~/.local/bin/codebase-memory-mcp` by default.
+脚本会检测系统架构，下载匹配资产并校验 `checksums.txt`。可选参数：`--ui`、`--standard`、`--skip-config`、`--dir=<path>`。Linux 优先使用 `-portable` 资产；macOS 按 Apple Silicon/Intel 选择 arm64/amd64。
 
-## Windows native build
+### Windows
 
-Install Git, Node.js 18+, and MSYS2. In an MSYS2 CLANG64 shell, install the
-native build toolchain:
+推荐使用按用户安装的 Setup：
+
+- [Windows AMD64 UI Setup](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-amd64-setup.exe)
+- [Windows ARM64 UI Setup](https://github.com/ycsx/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-ui-windows-arm64-setup.exe)
+
+Setup 不需要管理员权限，会安装 CLI、MCP 二进制和 Desktop 控制器，并保留索引与设置。脚本安装方式：
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
+Unblock-File .\install.ps1
+.\install.ps1
+```
+
+脚本执行策略受限时，可在当前 PowerShell 进程使用：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+PowerShell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+### 手动安装
+
+从 [最新 Release](https://github.com/ycsx/codebase-memory-mcp/releases/latest) 下载对应平台的标准包或 UI 包，解压后运行包内安装脚本：
 
 ```bash
-pacman -Syu
-pacman -S --needed mingw-w64-clang-x86_64-clang \
-  mingw-w64-clang-x86_64-zlib make git
+tar xzf codebase-memory-mcp-*.tar.gz
+./install.sh
 ```
 
-Clone and build:
+```powershell
+Expand-Archive codebase-memory-mcp-windows-amd64.zip -DestinationPath .
+Unblock-File .\install.ps1
+.\install.ps1
+```
+
+安装完成后重启 AI 客户端。可先用 `--dry-run` 或 `--plan` 审核将要修改的文件。
+
+## 从源码构建
+
+### macOS / Linux
+
+依赖：C/C++ 编译器、zlib、Git。macOS 使用 `xcode-select --install`；Debian/Ubuntu 可使用：
+
+```bash
+sudo apt install build-essential zlib1g-dev git
+```
+
+构建：
 
 ```bash
 git clone https://github.com/ycsx/codebase-memory-mcp.git
 cd codebase-memory-mcp
+scripts/build.sh
+scripts/build.sh --with-ui
+```
+
+二进制位于 `build/c/codebase-memory-mcp`。需要版本号时使用 `scripts/build.sh --version v0.9.0`。
+
+### Windows 原生构建
+
+安装 Git、Node.js 18+ 和 MSYS2。在 MSYS2 CLANG64 中：
+
+```bash
+pacman -Syu
+pacman -S --needed mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-zlib make git
 scripts/build.sh --with-ui CC=clang CXX=clang++
 ```
 
-The UI build is produced at:
-
-```text
-build/c/codebase-memory-mcp.exe
-```
-
-Configure detected coding agents from PowerShell or the CLANG64 shell:
+UI 二进制输出到 `build/c/codebase-memory-mcp.exe`。可在 PowerShell 配置检测到的客户端：
 
 ```powershell
 .\build\c\codebase-memory-mcp.exe install -y
 ```
 
-The legacy WSL setup path remains available when a Linux binary inside WSL is
-preferred:
+偏好 WSL 时仍可使用：
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/scripts/setup-windows.ps1 -OutFile setup-windows.ps1
 .\setup-windows.ps1 -FromSource
 ```
 
-## GitHub Release installation
+## 本地 UI
 
-After a release is published under
-<https://github.com/ycsx/codebase-memory-mcp/releases>, it must include
-`checksums.txt` and the matching platform archives:
-
-- `codebase-memory-mcp-<os>-<arch>.tar.gz` or `.zip`
-- `codebase-memory-mcp-ui-<os>-<arch>.tar.gz` or `.zip`
-- `codebase-memory-mcp-ui-windows-<arch>-setup.exe`
-
-Then the release installers can be used directly.
-
-macOS or Linux:
+UI 版本把图谱控制台嵌入二进制：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash
-curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.sh | bash -s -- --ui
+codebase-memory-mcp console --port=9749 --no-open
 ```
 
-Windows PowerShell:
+服务只绑定 `127.0.0.1`。Windows/macOS Desktop 安装包会独立管理该 `console` 子进程；普通 stdio MCP 启动不会自动创建 UI 服务。
 
-```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
-Unblock-File .\install.ps1
-.\install.ps1 --ui
-```
+## Release 资产清单
 
-Windows users can instead download the matching `setup.exe`. It installs per
-user without administrator rights, adds the CLI to the user `PATH`, creates a
-Start menu shortcut, and offers an optional desktop shortcut. Uninstall removes
-the application and its shortcuts but deliberately retains indexes and settings
-under the user's cache directory.
+发布时应包含：
 
-Registry packages such as npm, PyPI, Homebrew, Scoop, Chocolatey, Winget, and
-AUR require separate publication to those registries. Their manifests in
-`pkg/` are release templates; they are not a substitute for publishing the
-fork's GitHub Release assets.
+- `codebase-memory-mcp-<os>-<arch>.tar.gz` 或 `.zip`
+- `codebase-memory-mcp-ui-<os>-<arch>.tar.gz` 或 `.zip`
+- `codebase-memory-mcp-ui-windows-<arch>-setup.exe`
+- `checksums.txt` 以及相应签名、SBOM 和 provenance 资产
 
-## Standalone UI
-
-The UI is embedded in the `--with-ui` binary. Start the foreground visual
-console with:
-
-```powershell
-$env:HOME = 'C:\Users\Public\cbm-home'
-$env:USERPROFILE = 'C:\Users\Public\cbm-home'
-& '.\build\c\codebase-memory-mcp.exe' console --port=9750
-```
-
-The command binds only to `127.0.0.1` and opens the browser automatically. Add
-`--no-open` in CI or headless environments. Keep the terminal open while the
-console is running. Use a different `HOME` and `USERPROFILE` pair when an
-isolated index database is required.
+注册表包需要单独发布，`pkg/` 中的 manifest 只是发布模板。

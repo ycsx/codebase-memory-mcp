@@ -1,17 +1,17 @@
 # 风暴之眼 Desktop
 
-Windows/macOS 桌面服务控制器。它与 `graph-ui` 独立开发，通过启动现有
-`codebase-memory-mcp console` 子进程管理本地可视化服务。
+Windows/macOS 桌面服务控制器。它与 `graph-ui` 独立开发，通过启动现有的 `codebase-memory-mcp console` 子进程管理本地可视化服务。
 
 ## 功能
 
-- 独立桌面窗口和系统托盘
-- 启动、停止、重启 MCP 可视化服务
-- 展示状态、PID、端口、运行时间、内存和实时日志
-- 在独立 Electron 窗口中打开现有可视化控制台
-- 桌面端启动的服务独立于窗口和 Desktop 进程运行；退出并重开 Desktop 后会通过本地身份标记接管同一个 PID
-- 不相关的外部服务仍为只读状态；“停止服务”和安装更新会显式结束由 Desktop 管理的服务
-- Windows 支持校验和验证后的 Setup 自动升级；macOS 暂不支持应用内自动升级
+- 独立窗口和系统托盘。
+- 启动、停止、重启 Desktop 自己管理的 MCP 可视化服务。
+- 展示状态、PID、端口、运行时间、内存、实时日志和 MCP 调用统计。
+- 在独立 Electron 窗口中打开图谱控制台。
+- 桌面端重启后通过本地身份标记接管同一个服务 PID。
+- 外部启动且不属于 Desktop 管理的服务仅展示状态，不提供停止操作。
+- Windows 支持校验和验证后的 Setup 自动升级；macOS 暂不支持应用内自动升级。
+- 提供“AI 接入”区域，可复制给 Agent 使用的本机 MCP 操作提示词。
 
 ## 本地运行
 
@@ -21,33 +21,35 @@ npm install
 npm start
 ```
 
-开发模式按以下顺序查找服务二进制：
+开发模式按顺序查找服务二进制：
 
 1. `CBM_BINARY`
 2. Electron `resources/bin`
 3. `%LOCALAPPDATA%\Programs\codebase-memory-mcp`（Windows）
-4. 仓库的 `build/c/codebase-memory-mcp`（Windows 上带 `.exe`）
+4. 仓库的 `build/c/codebase-memory-mcp`（Windows 带 `.exe`）
 
-端口读取自 `~/.cache/codebase-memory-mcp/config.json` 的 `ui_port`，无有效配置时使用
-`9749`。如果配置端口未运行，Windows 桌面端会把本机 `codebase-memory-mcp`
-进程与 loopback 监听端口做只读匹配，以发现使用其他端口启动的现有控制台。
-健康检查只访问 `http://127.0.0.1:<port>/api/processes`。
+端口读取 `~/.cache/codebase-memory-mcp/config.json` 的 `ui_port`，无有效配置时使用 `9749`。健康检查只访问 `http://127.0.0.1:<port>/api/processes`。
+
+## 测试与检查
+
+```powershell
+npm test
+npm run check
+```
 
 ## 构建安装包
 
-先确保 `../build/c/codebase-memory-mcp.exe` 存在，然后运行：
+先确保对应架构的 UI 二进制存在。Windows 默认从 `../build/c/codebase-memory-mcp.exe` 查找：
 
 ```powershell
 npm run dist:win
 ```
 
-macOS 需要先将对应架构的 UI 二进制放到
-`desktop/resources/bin/codebase-memory-mcp`，然后在相应架构的 macOS 上运行：
+macOS 将二进制放入 `desktop/resources/bin/codebase-memory-mcp`，然后在对应架构 macOS 上运行：
 
 ```bash
-npm run dist:mac:arm64  # Apple Silicon
-npm run dist:mac:x64    # Intel
+npm run dist:mac:arm64
+npm run dist:mac:x64
 ```
 
-产物输出到 `desktop/dist/`。Release 流水线会自动完成二进制暂存、DMG
-打包、挂载校验和 ad-hoc 签名验证；Apple notarization 尚未接入。
+产物输出到 `desktop/dist/`。Release 流程负责二进制暂存、DMG/Setup 打包、挂载校验和 ad-hoc 签名；Apple notarization 尚未接入。
