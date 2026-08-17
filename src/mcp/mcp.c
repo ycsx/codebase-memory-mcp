@@ -7518,7 +7518,8 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                "powershell -Command \"[Console]::OutputEncoding = "
+                "[System.Text.UTF8Encoding]::new($false); "
                 "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
                 "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                 "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
@@ -7530,7 +7531,8 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                "powershell -Command \"[Console]::OutputEncoding = "
+                "[System.Text.UTF8Encoding]::new($false); "
                 "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
                 "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                 "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
@@ -7543,7 +7545,8 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                "powershell -Command \"[Console]::OutputEncoding = "
+                "[System.Text.UTF8Encoding]::new($false); "
                 "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
                 "Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
                 "-ErrorAction SilentlyContinue"
@@ -7554,7 +7557,8 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+                "powershell -Command \"[Console]::OutputEncoding = "
+                "[System.Text.UTF8Encoding]::new($false); "
                 "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
                 "Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
                 "SilentlyContinue"
