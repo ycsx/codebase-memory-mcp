@@ -267,6 +267,12 @@ const char *cbm_pipeline_repo_path(const cbm_pipeline_t *p) {
     return p ? p->repo_path : NULL;
 }
 
+const char *cbm_pipeline_indexed_commit(const cbm_pipeline_t *p) {
+    return p && p->git_ctx.is_git && p->git_ctx.head_sha && p->git_ctx.head_sha[0]
+               ? p->git_ctx.head_sha
+               : NULL;
+}
+
 atomic_int *cbm_pipeline_cancelled_ptr(cbm_pipeline_t *p) {
     return p ? &p->cancelled : NULL;
 }
@@ -1286,12 +1292,22 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         cbm_project_t project_info = {0};
         bool have_project_info =
             cbm_store_get_project(hash_store, p->project_name, &project_info) == CBM_STORE_OK;
+        cbm_project_metadata_t generation = {0};
+        bool have_generation =
+            cbm_store_project_metadata_create(p->git_ctx.is_git && p->git_ctx.head_sha &&
+                                                      p->git_ctx.head_sha[0]
+                                                  ? p->git_ctx.head_sha
+                                                  : NULL,
+                                              &generation) == CBM_STORE_OK;
         const char *recording_status =
             !coverage_rows_available
                 ? "unavailable"
                 : (p->ignored_total > p->ignored_count ? "truncated" : "complete");
         cbm_coverage_meta_t coverage_meta = {
             .generation = have_project_info ? project_info.indexed_at : NULL,
+            .generation_id = have_generation ? generation.generation_id : NULL,
+            .indexed_commit = have_generation ? generation.indexed_commit : NULL,
+            .generated_at = have_generation ? generation.generated_at : NULL,
             .index_mode = pipeline_mode_name(p->mode),
             .recording_status = recording_status,
             .ignored_files_stored = p->ignored_count,
@@ -1307,6 +1323,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         if (have_project_info) {
             cbm_project_free_fields(&project_info);
         }
+        cbm_store_project_metadata_clear(&generation);
         if (p->ignored_total > p->ignored_count) {
             cbm_log_warn("index.ignored_capped", "stored", itoa_buf(p->ignored_count), "total",
                          itoa_buf(p->ignored_total));

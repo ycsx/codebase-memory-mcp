@@ -126,23 +126,14 @@
 
 ### 4.2 统一元数据
 
-所有组合型工具必须返回：
+所有组合型工具必须返回统一的 `analysis_meta`。唯一规范见
+[可信分析响应契约](ANALYSIS_META_CONTRACT.md) 和
+[JSON Schema](schemas/analysis-meta.schema.json)，其他文档不再复制一套可能漂移的字段定义。
 
-```json
-{
-  "analysis_meta": {
-    "project": "example",
-    "graph_generation": "gen-20260810-001",
-    "indexed_commit": "abc123",
-    "working_tree_state": "clean | dirty | unavailable",
-    "generated_at": "2026-08-10T10:00:00Z",
-    "freshness": "current | stale | unknown",
-    "coverage": "complete_no_known_gap | partial | unknown",
-    "truncated": false,
-    "confidence": "high | medium | low"
-  }
-}
-```
+契约固定包含 graph generation、当前源码状态、freshness、coverage、结果完整性、
+confidence、claim 和结构化 limitations。`confidence` 使用
+`verified | best_effort | unknown`，结论强度由独立的
+`supported | provisional | insufficient` 表达，不能用一个模糊分数同时承担两种语义。
 
 其中 `complete_no_known_gap` 只表示没有记录到已知缺口，不得解释为绝对完整。
 

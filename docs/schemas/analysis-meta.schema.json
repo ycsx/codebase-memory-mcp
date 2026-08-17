@@ -1,0 +1,439 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ycsx/codebase-memory-mcp/blob/main/docs/schemas/analysis-meta.schema.json",
+  "title": "Codebase Memory analysis metadata",
+  "description": "Trust metadata carried by project-bound analysis responses.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "tool",
+    "profile",
+    "project",
+    "graph",
+    "source",
+    "freshness",
+    "coverage",
+    "result",
+    "confidence",
+    "claim",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1
+    },
+    "profile": {
+      "enum": ["all", "analysis", "scout", "unknown"]
+    },
+    "project": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "indexed_at",
+        "generated_at",
+        "index_mode",
+        "indexed_commit"
+      ],
+      "properties": {
+        "generation_id": {
+          "description": "Opaque identifier for one atomically published graph generation. It must not be derived solely from a wall-clock timestamp.",
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "indexed_at": {
+          "description": "Compatibility timestamp from the existing projects table.",
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "generated_at": {
+          "description": "Time at which the graph generation was successfully published.",
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "index_mode": {
+          "enum": ["fast", "moderate", "full", "cross-repo-intelligence", "unknown"]
+        },
+        "indexed_commit": {
+          "description": "Git commit represented by the published generation, when known.",
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{7,64}$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vcs", "current_commit", "branch", "worktree_state"],
+      "properties": {
+        "vcs": {
+          "enum": ["git", "none", "unknown"]
+        },
+        "current_commit": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{7,64}$"
+        },
+        "branch": {
+          "type": ["string", "null"]
+        },
+        "worktree_state": {
+          "enum": ["clean", "dirty", "not_applicable", "unknown"]
+        }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "basis", "checked_at", "reason_codes"],
+      "properties": {
+        "status": {
+          "enum": ["current", "stale", "unknown"]
+        },
+        "basis": {
+          "enum": ["git", "content_hash", "metadata", "mixed", "unavailable"]
+        },
+        "checked_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "reason_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "generation_mismatch",
+              "commit_mismatch",
+              "worktree_dirty",
+              "source_changed",
+              "source_missing",
+              "source_probe_inconsistent",
+              "source_unavailable",
+              "no_git",
+              "metadata_missing",
+              "hash_records_incomplete",
+              "clock_invalid",
+              "unknown"
+            ]
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "signal",
+        "recording_status",
+        "generation_id",
+        "generation_match",
+        "known_gap_count",
+        "excluded_count",
+        "hash_records_complete",
+        "details_truncated"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["complete_no_known_gap", "partial", "unknown"]
+        },
+        "signal": {
+          "enum": ["authoritative", "best_effort", "unknown"]
+        },
+        "recording_status": {
+          "enum": ["complete", "truncated", "unavailable", "unknown"]
+        },
+        "generation_id": {
+          "description": "Generation that produced the coverage record. Null is allowed only for legacy records that cannot be compared.",
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "generation_match": {
+          "description": "Whether coverage belongs to graph.generation_id. Null means legacy comparison is unavailable.",
+          "type": ["boolean", "null"]
+        },
+        "known_gap_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "excluded_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "hash_records_complete": {
+          "type": ["boolean", "null"]
+        },
+        "details_truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "truncated",
+        "returned",
+        "total",
+        "limit",
+        "has_more",
+        "next_cursor",
+        "truncation_reasons"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["complete", "partial", "unknown"]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "returned": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "total": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "limit": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "has_more": {
+          "type": ["boolean", "null"]
+        },
+        "next_cursor": {
+          "type": ["string", "null"]
+        },
+        "truncation_reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "requested_limit",
+              "service_row_ceiling",
+              "response_byte_budget",
+              "coverage_detail_cap",
+              "source_window_cap",
+              "unknown"
+            ]
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "reasons"],
+      "properties": {
+        "level": {
+          "enum": ["verified", "best_effort", "unknown"]
+        },
+        "reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "negative_claim_allowed", "reason_codes"],
+      "properties": {
+        "status": {
+          "enum": ["supported", "provisional", "insufficient"]
+        },
+        "negative_claim_allowed": {
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message", "scopes", "fallback_action"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "enum": ["info", "warning", "blocking"]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fallback_action": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {"freshness": {"type": "object", "properties": {"status": {"const": "current"}}, "required": ["status"]}},
+        "required": ["freshness"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "graph": {"type": "object", "properties": {"generation_id": {"type": "string"}, "generated_at": {"type": "string"}}, "required": ["generation_id", "generated_at"]},
+          "freshness": {"type": "object", "properties": {"basis": {"not": {"const": "unavailable"}}}}
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"source": {"type": "object", "properties": {"worktree_state": {"const": "dirty"}}, "required": ["worktree_state"]}},
+        "required": ["source"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "freshness": {"type": "object", "properties": {"status": {"const": "stale"}, "reason_codes": {"type": "array", "contains": {"const": "worktree_dirty"}}}, "required": ["status", "reason_codes"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"freshness": {"type": "object", "properties": {"reason_codes": {"type": "array", "contains": {"const": "source_probe_inconsistent"}}}, "required": ["reason_codes"]}},
+        "required": ["freshness"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "freshness": {"type": "object", "properties": {"status": {"const": "unknown"}}},
+          "limitations": {"type": "array", "contains": {"type": "object", "properties": {"code": {"const": "source_probe_inconsistent"}, "severity": {"const": "blocking"}}, "required": ["code", "severity"]}}
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"coverage": {"type": "object", "properties": {"generation_match": {"const": false}}, "required": ["generation_match"]}},
+        "required": ["coverage"]
+      },
+      "then": {"type": "object", "properties": {"coverage": {"type": "object", "properties": {"status": {"const": "unknown"}}}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"coverage": {"type": "object", "properties": {"status": {"const": "complete_no_known_gap"}}, "required": ["status"]}},
+        "required": ["coverage"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "coverage": {"type": "object", "properties": {"generation_id": {"type": "string"}, "generation_match": {"const": true}, "recording_status": {"const": "complete"}, "hash_records_complete": {"const": true}, "details_truncated": {"const": false}}, "required": ["generation_id", "generation_match", "recording_status", "hash_records_complete", "details_truncated"]}
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"coverage": {"type": "object", "properties": {"recording_status": {"const": "truncated"}}, "required": ["recording_status"]}},
+        "required": ["coverage"]
+      },
+      "then": {"type": "object", "properties": {"coverage": {"type": "object", "properties": {"status": {"const": "unknown"}}}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"coverage": {"type": "object", "properties": {"details_truncated": {"const": true}}, "required": ["details_truncated"]}},
+        "required": ["coverage"]
+      },
+      "then": {"type": "object", "properties": {"coverage": {"type": "object", "properties": {"status": {"not": {"const": "complete_no_known_gap"}}}}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"result": {"type": "object", "properties": {"has_more": {"const": true}}, "required": ["has_more"]}},
+        "required": ["result"]
+      },
+      "then": {"type": "object", "properties": {"result": {"type": "object", "properties": {"status": {"const": "partial"}, "truncated": {"const": true}, "next_cursor": {"type": "string", "minLength": 1}}, "required": ["status", "truncated", "next_cursor"]}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"result": {"type": "object", "properties": {"has_more": {"const": false}}, "required": ["has_more"]}},
+        "required": ["result"]
+      },
+      "then": {"type": "object", "properties": {"result": {"type": "object", "properties": {"next_cursor": {"type": "null"}}}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"result": {"type": "object", "properties": {"has_more": {"type": "null"}}, "required": ["has_more"]}},
+        "required": ["result"]
+      },
+      "then": {"type": "object", "properties": {"result": {"type": "object", "properties": {"next_cursor": {"type": "null"}}}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"result": {"type": "object", "properties": {"truncated": {"const": true}}, "required": ["truncated"]}},
+        "required": ["result"]
+      },
+      "then": {"type": "object", "properties": {"result": {"type": "object", "properties": {"status": {"const": "partial"}, "truncation_reasons": {"type": "array", "minItems": 1}}, "required": ["status", "truncation_reasons"]}}}
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"claim": {"type": "object", "properties": {"negative_claim_allowed": {"const": true}}, "required": ["negative_claim_allowed"]}},
+        "required": ["claim"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "profile": {"not": {"const": "scout"}},
+          "freshness": {"type": "object", "properties": {"status": {"const": "current"}}},
+          "coverage": {"type": "object", "properties": {"status": {"const": "complete_no_known_gap"}}},
+          "result": {"type": "object", "properties": {"status": {"const": "complete"}, "truncated": {"const": false}, "has_more": {"anyOf": [{"const": false}, {"type": "null"}]}}}
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {"claim": {"type": "object", "properties": {"status": {"const": "insufficient"}}, "required": ["status"]}},
+        "required": ["claim"]
+      },
+      "then": {"type": "object", "properties": {"claim": {"type": "object", "properties": {"negative_claim_allowed": {"const": false}}}}}
+    }
+  ]
+}

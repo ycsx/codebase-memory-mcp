@@ -1714,8 +1714,18 @@ int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store) {
         return CBM_NOT_FOUND;
     }
 
-    /* Upsert project */
-    cbm_store_upsert_project(store, gb->project, gb->root_path);
+    /* Upsert the graph row, then explicitly publish a stable generation.
+     * Plain project CRUD does not imply an index publication. */
+    if (cbm_store_upsert_project(store, gb->project, gb->root_path) != CBM_STORE_OK) {
+        return CBM_NOT_FOUND;
+    }
+    cbm_project_metadata_t generation = {0};
+    if (cbm_store_project_metadata_create(NULL, &generation) != CBM_STORE_OK ||
+        cbm_store_set_project_metadata(store, gb->project, &generation) != CBM_STORE_OK) {
+        cbm_store_project_metadata_clear(&generation);
+        return CBM_NOT_FOUND;
+    }
+    cbm_store_project_metadata_clear(&generation);
 
     /* Begin bulk mode */
     cbm_store_begin_bulk(store);

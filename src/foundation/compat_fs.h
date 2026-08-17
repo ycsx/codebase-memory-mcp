@@ -10,6 +10,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
+
+typedef struct {
+    int64_t size;
+    int64_t mtime_ns;
+} cbm_file_stat_t;
 
 /* ── Directory iteration ──────────────────────────────────────── */
 
@@ -67,6 +73,9 @@ int cbm_rmdir(const char *path);
  * non-ASCII characters (accents, CJK, etc.) are handled correctly.
  * On POSIX, delegates to fopen. mode must be an ASCII string. */
 FILE *cbm_fopen(const char *path, const char *mode);
+
+/* Stat a UTF-8 path. Windows uses _wstat64; POSIX uses stat(2). */
+int cbm_stat_utf8(const char *path, cbm_file_stat_t *out);
 
 /* Execute a command without shell interpretation.
  * argv is a NULL-terminated array: {"cmd", "arg1", "arg2", NULL}.

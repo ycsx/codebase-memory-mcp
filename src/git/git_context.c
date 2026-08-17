@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 enum {
     GIT_CMD_MAX = 1024,
@@ -84,6 +83,40 @@ static int git_capture(const char *repo_path, const char *git_args, char **out) 
 
     *out = git_strdup(buf);
     return *out ? 0 : CBM_NOT_FOUND;
+}
+
+/* `git status --porcelain` distinguishes a clean tree (zero output) from a
+ * dirty tree while retaining an explicit unknown state when Git cannot run. */
+static cbm_git_worktree_state_t git_worktree_state(const char *repo_path) {
+    if (!repo_path || !git_validate_repo_path(repo_path)) {
+        return CBM_GIT_WORKTREE_UNKNOWN;
+    }
+    char cmd[GIT_CMD_MAX];
+#ifdef _WIN32
+    const char *null_dev = "NUL";
+#else
+    const char *null_dev = "/dev/null";
+#endif
+    int n =
+        snprintf(cmd, sizeof(cmd), "git -C \"%s\" status --porcelain=v1 --untracked-files=all 2>%s",
+                 repo_path, null_dev);
+    if (n < 0 || n >= (int)sizeof(cmd)) {
+        return CBM_GIT_WORKTREE_UNKNOWN;
+    }
+    FILE *fp = cbm_popen(cmd, "r");
+    if (!fp) {
+        return CBM_GIT_WORKTREE_UNKNOWN;
+    }
+    char line[8];
+    bool dirty = fgets(line, sizeof(line), fp) != NULL;
+    /* Drain all status records before waiting for the child. A large dirty
+     * worktree can otherwise fill the pipe after the first record. */
+    while (fgets(line, sizeof(line), fp) != NULL) {}
+    int rc = cbm_pclose(fp);
+    if (rc != 0) {
+        return CBM_GIT_WORKTREE_UNKNOWN;
+    }
+    return dirty ? CBM_GIT_WORKTREE_DIRTY : CBM_GIT_WORKTREE_CLEAN;
 }
 
 static bool path_is_absolute(const char *path) {
@@ -254,8 +287,8 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
         return CBM_NOT_FOUND;
     }
 
-    struct stat st;
-    out->root_exists = (stat(path, &st) == 0);
+    cbm_file_stat_t stat_info = {0};
+    out->root_exists = (cbm_stat_utf8(path, &stat_info) == 0);
     if (!out->root_exists) {
         return 0;
     }
@@ -265,6 +298,7 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
         return 0;
     }
     out->is_git = true;
+    out->worktree_state = git_worktree_state(path);
 
     if (git_capture(path, "rev-parse --git-dir", &out->git_dir) != 0) {
         out->git_dir = git_strdup("");
@@ -394,6 +428,10 @@ int cbm_git_context_props_json(const cbm_git_context_t *ctx, char *buf, int buf_
         json_append_bool(buf, buf_size, &off, "is_worktree", ctx->is_worktree, true) &&
         json_append_bool(buf, buf_size, &off, "is_detached", ctx->is_detached, true) &&
         json_append_bool(buf, buf_size, &off, "root_exists", ctx->root_exists, true) &&
+        append_fmt_checked(buf, buf_size, &off, "\"worktree_state\":\"%s\",",
+                           ctx->worktree_state == CBM_GIT_WORKTREE_DIRTY   ? "dirty"
+                           : ctx->worktree_state == CBM_GIT_WORKTREE_CLEAN ? "clean"
+                                                                           : "unknown") &&
         json_append_string(buf, buf_size, &off, "canonical_root", ctx->canonical_root, true) &&
         json_append_string(buf, buf_size, &off, "worktree_root", ctx->worktree_root, true) &&
         json_append_string(buf, buf_size, &off, "git_common_dir", ctx->git_common_dir, true) &&

@@ -228,6 +228,63 @@ static void iso_now(char *buf, size_t sz) {
                          // timestamp always fits in caller-provided buffers
 }
 
+static void generate_generation_id(char *buf, size_t sz) {
+    enum { GEN_RANDOM_BYTES = 16, GEN_TEXT_BYTES = 4 + (GEN_RANDOM_BYTES * 2) + 1 };
+    static const char hex[] = "0123456789abcdef";
+    unsigned char random[GEN_RANDOM_BYTES];
+    if (!buf || sz < GEN_TEXT_BYTES) {
+        if (buf && sz > 0) {
+            buf[0] = '\0';
+        }
+        return;
+    }
+    sqlite3_randomness((int)sizeof(random), random);
+    memcpy(buf, "gen-", 4);
+    for (size_t i = 0; i < sizeof(random); i++) {
+        buf[4 + (i * 2)] = hex[random[i] >> 4];
+        buf[5 + (i * 2)] = hex[random[i] & 0x0f];
+    }
+    buf[GEN_TEXT_BYTES - 1] = '\0';
+}
+
+/* SQLite CREATE TABLE IF NOT EXISTS does not evolve an existing table. Keep
+ * these migrations additive and nullable so old databases open in place while
+ * their missing generation metadata remains explicitly unknown. */
+static int ensure_text_column(cbm_store_t *s, const char *table, const char *column) {
+    char sql[ST_BUF_64 * 2];
+    int n = snprintf(sql, sizeof(sql), "PRAGMA table_info(%s);", table);
+    if (n < 0 || (size_t)n >= sizeof(sql)) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "schema column probe");
+        return CBM_STORE_ERR;
+    }
+    bool found = false;
+    int scan_rc;
+    while ((scan_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        if (name && strcmp(name, column) == 0) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    if (!found && scan_rc != SQLITE_DONE && scan_rc != SQLITE_ROW) {
+        store_set_error_sqlite(s, "schema column scan");
+        return CBM_STORE_ERR;
+    }
+    if (found) {
+        return CBM_STORE_OK;
+    }
+    n = snprintf(sql, sizeof(sql), "ALTER TABLE %s ADD COLUMN %s TEXT;", table, column);
+    if (n < 0 || (size_t)n >= sizeof(sql)) {
+        return CBM_STORE_ERR;
+    }
+    return exec_sql(s, sql);
+}
+
 /* ── Schema ─────────────────────────────────────────────────────── */
 
 static int init_schema(cbm_store_t *s) {
@@ -235,7 +292,10 @@ static int init_schema(cbm_store_t *s) {
         "CREATE TABLE IF NOT EXISTS projects ("
         "  name TEXT PRIMARY KEY,"
         "  indexed_at TEXT NOT NULL,"
-        "  root_path TEXT NOT NULL"
+        "  root_path TEXT NOT NULL,"
+        "  generation_id TEXT,"
+        "  indexed_commit TEXT,"
+        "  generated_at TEXT"
         ");"
         "CREATE TABLE IF NOT EXISTS file_hashes ("
         "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
@@ -309,12 +369,33 @@ static int init_schema(cbm_store_t *s) {
         "  ignored_files_stored INTEGER NOT NULL DEFAULT 0,"
         "  ignored_files_total INTEGER NOT NULL DEFAULT 0,"
         "  coverage_version INTEGER NOT NULL DEFAULT 1,"
-        "  hash_records_complete INTEGER NOT NULL DEFAULT 0"
+        "  hash_records_complete INTEGER NOT NULL DEFAULT 0,"
+        "  generation_id TEXT,"
+        "  indexed_commit TEXT,"
+        "  generated_at TEXT"
         ");";
 
     int rc = exec_sql(s, ddl);
     if (rc != CBM_STORE_OK) {
         return rc;
+    }
+
+    static const struct {
+        const char *table;
+        const char *column;
+    } generation_columns[] = {
+        {"projects", "generation_id"},
+        {"projects", "indexed_commit"},
+        {"projects", "generated_at"},
+        {"index_coverage_meta", "generation_id"},
+        {"index_coverage_meta", "indexed_commit"},
+        {"index_coverage_meta", "generated_at"},
+    };
+    for (size_t i = 0; i < sizeof(generation_columns) / sizeof(generation_columns[0]); i++) {
+        if (ensure_text_column(s, generation_columns[i].table, generation_columns[i].column) !=
+            CBM_STORE_OK) {
+            return CBM_STORE_ERR;
+        }
     }
 
     /* Schema-compat probe (#768): DBs created before the local_name_gen
@@ -1234,6 +1315,119 @@ int cbm_store_upsert_project(cbm_store_t *s, const char *name, const char *root_
         return CBM_STORE_ERR;
     }
     return CBM_STORE_OK;
+}
+
+int cbm_store_project_metadata_create(const char *indexed_commit, cbm_project_metadata_t *out) {
+    if (!out) {
+        return CBM_STORE_ERR;
+    }
+    memset(out, 0, sizeof(*out));
+    char generation_id[CBM_SZ_64];
+    char generated_at[CBM_SZ_64];
+    generate_generation_id(generation_id, sizeof(generation_id));
+    iso_now(generated_at, sizeof(generated_at));
+    out->generation_id = heap_strdup(generation_id);
+    out->generated_at = heap_strdup(generated_at);
+    out->indexed_commit = indexed_commit && indexed_commit[0] ? heap_strdup(indexed_commit) : NULL;
+    if (!out->generation_id || !out->generated_at ||
+        (indexed_commit && indexed_commit[0] && !out->indexed_commit)) {
+        cbm_store_project_metadata_clear(out);
+        return CBM_STORE_ERR;
+    }
+    return CBM_STORE_OK;
+}
+
+int cbm_store_set_project_metadata(cbm_store_t *s, const char *name,
+                                   const cbm_project_metadata_t *meta) {
+    if (!s || !s->db || !name || !meta || !meta->generation_id || !meta->generation_id[0] ||
+        !meta->generated_at || !meta->generated_at[0]) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(
+            s->db,
+            "UPDATE projects SET generation_id=?2, indexed_commit=?3, generated_at=?4 "
+            "WHERE name=?1;",
+            CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "project metadata set prepare");
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, ST_COL_1, name);
+    bind_text(stmt, ST_COL_2, meta->generation_id);
+    if (meta->indexed_commit && meta->indexed_commit[0]) {
+        bind_text(stmt, ST_COL_3, meta->indexed_commit);
+    } else {
+        sqlite3_bind_null(stmt, ST_COL_3);
+    }
+    bind_text(stmt, ST_COL_4, meta->generated_at);
+    int rc = sqlite3_step(stmt);
+    int changes = sqlite3_changes(s->db);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        store_set_error_sqlite(s, "project metadata set");
+        return CBM_STORE_ERR;
+    }
+    return changes == 1 ? CBM_STORE_OK : CBM_STORE_NOT_FOUND;
+}
+
+int cbm_store_get_project_metadata(cbm_store_t *s, const char *name, cbm_project_metadata_t *out) {
+    if (!out) {
+        return CBM_STORE_ERR;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!s || !s->db || !name) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+                           "SELECT generation_id, indexed_commit, generated_at "
+                           "FROM projects WHERE name = ?1;",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        /* Read-only query opens intentionally skip migrations. An old DB has
+         * no stable columns; if its project row exists, report unknown/null. */
+        sqlite3_stmt *legacy = NULL;
+        if (sqlite3_prepare_v2(s->db, "SELECT 1 FROM projects WHERE name = ?1;", CBM_NOT_FOUND,
+                               &legacy, NULL) != SQLITE_OK) {
+            store_set_error_sqlite(s, "project metadata legacy probe");
+            return CBM_STORE_ERR;
+        }
+        bind_text(legacy, ST_COL_1, name);
+        int legacy_rc = sqlite3_step(legacy);
+        sqlite3_finalize(legacy);
+        if (legacy_rc == SQLITE_ROW) {
+            return CBM_STORE_OK;
+        }
+        if (legacy_rc != SQLITE_DONE) {
+            store_set_error_sqlite(s, "project metadata legacy get");
+            return CBM_STORE_ERR;
+        }
+        return CBM_STORE_NOT_FOUND;
+    }
+    bind_text(stmt, ST_COL_1, name);
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        out->generation_id = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
+        out->indexed_commit = heap_strdup((const char *)sqlite3_column_text(stmt, ST_COL_1));
+        out->generated_at = heap_strdup((const char *)sqlite3_column_text(stmt, ST_COL_2));
+        sqlite3_finalize(stmt);
+        return CBM_STORE_OK;
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        store_set_error_sqlite(s, "project metadata get");
+        return CBM_STORE_ERR;
+    }
+    return CBM_STORE_NOT_FOUND;
+}
+
+void cbm_store_project_metadata_clear(cbm_project_metadata_t *meta) {
+    if (!meta) {
+        return;
+    }
+    free((char *)meta->generation_id);
+    free((char *)meta->indexed_commit);
+    free((char *)meta->generated_at);
+    memset(meta, 0, sizeof(*meta));
 }
 
 int cbm_store_get_project(cbm_store_t *s, const char *name, cbm_project_t *out) {
@@ -2338,6 +2532,7 @@ int cbm_store_coverage_replace_ex(cbm_store_t *s, const char *project,
 
     if (meta) {
         char recorded_at[CBM_SZ_64];
+        char generated_id_buf[CBM_SZ_64];
         if (meta->recorded_at && meta->recorded_at[0]) {
             snprintf(recorded_at, sizeof(recorded_at), "%s", meta->recorded_at);
         } else {
@@ -2345,6 +2540,13 @@ int cbm_store_coverage_replace_ex(cbm_store_t *s, const char *project,
         }
         const char *generation =
             meta->generation && meta->generation[0] ? meta->generation : recorded_at;
+        const char *generation_id =
+            meta->generation_id && meta->generation_id[0]
+                ? meta->generation_id
+                : (generate_generation_id(generated_id_buf, sizeof(generated_id_buf)),
+                   generated_id_buf);
+        const char *generated_at =
+            meta->generated_at && meta->generated_at[0] ? meta->generated_at : recorded_at;
         const char *index_mode =
             meta->index_mode && meta->index_mode[0] ? meta->index_mode : "unknown";
         const char *recording_status = meta->recording_status && meta->recording_status[0]
@@ -2360,11 +2562,12 @@ int cbm_store_coverage_replace_ex(cbm_store_t *s, const char *project,
                 "INSERT INTO index_coverage_meta "
                 "(project, generation, index_mode, recorded_at, recording_status, "
                 " ignored_files_stored, ignored_files_total, coverage_version, "
-                " hash_records_complete) "
-                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) "
+                " hash_records_complete, generation_id, indexed_commit, generated_at) "
+                "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) "
                 "ON CONFLICT(project) DO UPDATE SET generation=?2, index_mode=?3, "
                 "recorded_at=?4, recording_status=?5, ignored_files_stored=?6, "
-                "ignored_files_total=?7, coverage_version=?8, hash_records_complete=?9;",
+                "ignored_files_total=?7, coverage_version=?8, hash_records_complete=?9, "
+                "generation_id=?10, indexed_commit=?11, generated_at=?12;",
                 CBM_NOT_FOUND, &up_meta, NULL) != SQLITE_OK) {
             store_set_error_sqlite(s, "coverage meta upsert prepare");
             (void)exec_sql(s, "ROLLBACK;");
@@ -2379,10 +2582,46 @@ int cbm_store_coverage_replace_ex(cbm_store_t *s, const char *project,
         sqlite3_bind_int(up_meta, 7, ignored_total);
         sqlite3_bind_int(up_meta, 8, coverage_version);
         sqlite3_bind_int(up_meta, 9, meta->hash_records_complete ? 1 : 0);
+        bind_text(up_meta, 10, generation_id);
+        if (meta->indexed_commit && meta->indexed_commit[0]) {
+            bind_text(up_meta, 11, meta->indexed_commit);
+        } else {
+            sqlite3_bind_null(up_meta, 11);
+        }
+        bind_text(up_meta, 12, generated_at);
         int meta_rc = sqlite3_step(up_meta);
         sqlite3_finalize(up_meta);
         if (meta_rc != SQLITE_DONE) {
             store_set_error_sqlite(s, "coverage meta upsert");
+            (void)exec_sql(s, "ROLLBACK;");
+            return CBM_STORE_ERR;
+        }
+
+        /* The project row and its coverage metadata are one published
+         * generation. Keep both updates inside this transaction. */
+        sqlite3_stmt *up_project = NULL;
+        if (sqlite3_prepare_v2(
+                s->db,
+                "UPDATE projects SET generation_id=?2, indexed_commit=?3, generated_at=?4 "
+                "WHERE name=?1;",
+                CBM_NOT_FOUND, &up_project, NULL) != SQLITE_OK) {
+            store_set_error_sqlite(s, "project metadata update prepare");
+            (void)exec_sql(s, "ROLLBACK;");
+            return CBM_STORE_ERR;
+        }
+        bind_text(up_project, ST_COL_1, project);
+        bind_text(up_project, ST_COL_2, generation_id);
+        if (meta->indexed_commit && meta->indexed_commit[0]) {
+            bind_text(up_project, ST_COL_3, meta->indexed_commit);
+        } else {
+            sqlite3_bind_null(up_project, ST_COL_3);
+        }
+        bind_text(up_project, ST_COL_4, generated_at);
+        int project_rc = sqlite3_step(up_project);
+        int project_changes = sqlite3_changes(s->db);
+        sqlite3_finalize(up_project);
+        if (project_rc != SQLITE_DONE || project_changes != 1) {
+            store_set_error_sqlite(s, "project metadata update");
             (void)exec_sql(s, "ROLLBACK;");
             return CBM_STORE_ERR;
         }
@@ -2503,6 +2742,9 @@ void cbm_store_coverage_meta_clear(cbm_coverage_meta_t *meta) {
     }
     free((char *)meta->project);
     free((char *)meta->generation);
+    free((char *)meta->generation_id);
+    free((char *)meta->indexed_commit);
+    free((char *)meta->generated_at);
     free((char *)meta->index_mode);
     free((char *)meta->recorded_at);
     free((char *)meta->recording_status);
@@ -2518,13 +2760,25 @@ int cbm_store_coverage_meta_get(cbm_store_t *s, const char *project, cbm_coverag
         return CBM_STORE_ERR;
     }
     sqlite3_stmt *stmt = NULL;
+    bool stable_columns = true;
     if (sqlite3_prepare_v2(s->db,
                            "SELECT project, generation, index_mode, recorded_at, recording_status, "
                            "ignored_files_stored, ignored_files_total, coverage_version, "
-                           "hash_records_complete FROM index_coverage_meta WHERE project = ?1;",
+                           "hash_records_complete, generation_id, indexed_commit, generated_at "
+                           "FROM index_coverage_meta WHERE project = ?1;",
                            CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "coverage meta get prepare");
-        return CBM_STORE_ERR;
+        /* Old read-only stores cannot be migrated in place. Preserve their
+         * legacy coverage fields and expose stable generation fields as NULL. */
+        stable_columns = false;
+        if (sqlite3_prepare_v2(
+                s->db,
+                "SELECT project, generation, index_mode, recorded_at, recording_status, "
+                "ignored_files_stored, ignored_files_total, coverage_version, "
+                "hash_records_complete FROM index_coverage_meta WHERE project = ?1;",
+                CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+            store_set_error_sqlite(s, "coverage meta get prepare");
+            return CBM_STORE_ERR;
+        }
     }
     bind_text(stmt, SKIP_ONE, project);
     int rc = sqlite3_step(stmt);
@@ -2538,6 +2792,11 @@ int cbm_store_coverage_meta_get(cbm_store_t *s, const char *project, cbm_coverag
         out->ignored_files_total = sqlite3_column_int(stmt, 6);
         out->coverage_version = sqlite3_column_int(stmt, 7);
         out->hash_records_complete = sqlite3_column_int(stmt, 8) != 0;
+        if (stable_columns) {
+            out->generation_id = heap_strdup((const char *)sqlite3_column_text(stmt, 9));
+            out->indexed_commit = heap_strdup((const char *)sqlite3_column_text(stmt, 10));
+            out->generated_at = heap_strdup((const char *)sqlite3_column_text(stmt, 11));
+        }
         sqlite3_finalize(stmt);
         if (!out->project || !out->generation || !out->index_mode || !out->recorded_at ||
             !out->recording_status) {

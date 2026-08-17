@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "tool": "check_index_coverage",
+  "profile": "analysis",
+  "project": "demo",
+  "graph": {
+    "generation_id": "gen-20260817-0004",
+    "indexed_at": "2026-08-17T04:00:00Z",
+    "generated_at": "2026-08-17T04:00:03Z",
+    "index_mode": "fast",
+    "indexed_commit": "4444444444444444444444444444444444444444"
+  },
+  "source": {
+    "vcs": "git",
+    "current_commit": "4444444444444444444444444444444444444444",
+    "branch": "main",
+    "worktree_state": "clean"
+  },
+  "freshness": {
+    "status": "current",
+    "basis": "git",
+    "checked_at": "2026-08-17T04:05:00Z",
+    "reason_codes": []
+  },
+  "coverage": {
+    "status": "unknown",
+    "signal": "best_effort",
+    "recording_status": "complete",
+    "generation_id": "gen-20260817-0004",
+    "generation_match": true,
+    "known_gap_count": null,
+    "excluded_count": null,
+    "hash_records_complete": false,
+    "details_truncated": false
+  },
+  "result": {
+    "status": "complete",
+    "truncated": false,
+    "returned": 1,
+    "total": 1,
+    "limit": 128,
+    "has_more": false,
+    "next_cursor": null,
+    "truncation_reasons": []
+  },
+  "confidence": {
+    "level": "unknown",
+    "reasons": ["coverage_cannot_be_correlated_with_complete_hash_records"]
+  },
+  "claim": {
+    "status": "insufficient",
+    "negative_claim_allowed": false,
+    "reason_codes": ["coverage_unknown"]
+  },
+  "limitations": [
+    {
+      "code": "hash_records_incomplete",
+      "severity": "blocking",
+      "message": "The index does not contain a complete file-hash set for freshness verification.",
+      "scopes": ["demo"],
+      "fallback_action": "reindex_project"
+    }
+  ]
+}

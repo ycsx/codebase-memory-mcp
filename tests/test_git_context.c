@@ -34,14 +34,15 @@
 #include <limits.h>
 #endif
 
-/* These helpers shell out to git and are only used by the non-Windows test
- * bodies below; on Windows every test SKIP_PLATFORMs, so guard them here too or
- * they'd be unused-static functions and fail the -Werror build. */
-#ifndef _WIN32
 /* Run a git command inside dir, return 0 on success. */
 static int git_run(const char *dir, const char *args) {
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s >/dev/null 2>&1", dir, args);
+#ifdef _WIN32
+    const char *null_dev = "NUL";
+#else
+    const char *null_dev = "/dev/null";
+#endif
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s >%s 2>&1", dir, args, null_dev);
     return system(cmd);
 }
 
@@ -59,7 +60,6 @@ static int make_git_repo(const char *dir) {
     if (git_run(dir, "commit -q -m init") != 0) return -1;
     return 0;
 }
-#endif /* _WIN32 */
 
 /* ── canonical_root: normal repo indexed from its root ──────────── */
 
@@ -96,6 +96,62 @@ TEST(canonical_root_repo_root) {
     th_rmtree(tmp);
     PASS();
 #endif /* _WIN32 */
+}
+
+TEST(worktree_state_dirty_and_clean) {
+    char *tmp = th_mktempdir("cbm_gitctx_dirty");
+    if (!tmp)
+        FAIL("th_mktempdir returned NULL");
+    if (make_git_repo(tmp) != 0) {
+        th_rmtree(tmp);
+        SKIP_PLATFORM("git not available to init a repo");
+    }
+
+    cbm_git_context_t ctx = {0};
+    ASSERT_EQ(cbm_git_context_resolve(tmp, &ctx), 0);
+    ASSERT_EQ(ctx.worktree_state, CBM_GIT_WORKTREE_CLEAN);
+    cbm_git_context_free(&ctx);
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.dirty", tmp);
+    ASSERT_EQ(th_write_file(path, "untracked\n"), 0);
+    ASSERT_EQ(cbm_git_context_resolve(tmp, &ctx), 0);
+    ASSERT_EQ(ctx.worktree_state, CBM_GIT_WORKTREE_DIRTY);
+    cbm_git_context_free(&ctx);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(utf8_stat_non_ascii_path) {
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_gitctx_utf8_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp))
+        FAIL("cbm_mkdtemp failed");
+
+    char cjk_dir[768];
+    snprintf(cjk_dir, sizeof(cjk_dir), "%s/%s", tmp,
+             "\xE4\xB8\xAD\xE6\x96\x87\xE7\x9B\xAE\xE5\xbd\x95");
+    ASSERT_TRUE(cbm_mkdir_p(cjk_dir, 0755));
+
+    cbm_git_context_t ctx = {0};
+    ASSERT_EQ(cbm_git_context_resolve(cjk_dir, &ctx), 0);
+    ASSERT_TRUE(ctx.root_exists);
+    ASSERT_FALSE(ctx.is_git);
+    cbm_git_context_free(&ctx);
+
+    char path[896];
+    snprintf(path, sizeof(path), "%s/%s", cjk_dir, "\xE6\x96\x87\xE4\xbb\xb6.txt");
+    ASSERT_EQ(th_write_file(path, "utf8\n"), 0);
+
+    cbm_file_stat_t st = {0};
+    ASSERT_EQ(cbm_stat_utf8(path, &st), 0);
+    ASSERT_EQ(st.size, 5);
+    ASSERT_GT(st.mtime_ns, 0);
+
+    ASSERT_EQ(cbm_unlink(path), 0);
+    ASSERT_EQ(cbm_rmdir(cjk_dir), 0);
+    ASSERT_EQ(cbm_rmdir(tmp), 0);
+    PASS();
 }
 
 /* ── canonical_root: indexed from a subdirectory (issue #659) ─────
@@ -236,6 +292,8 @@ TEST(canonical_root_linked_worktree) {
 
 SUITE(git_context) {
     RUN_TEST(canonical_root_repo_root);
+    RUN_TEST(worktree_state_dirty_and_clean);
+    RUN_TEST(utf8_stat_non_ascii_path);
     RUN_TEST(canonical_root_subdir);
     RUN_TEST(canonical_root_linked_worktree);
 }

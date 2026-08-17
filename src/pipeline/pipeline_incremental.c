@@ -991,7 +991,13 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_pipeline_set_committed_counts(p, cbm_gbuf_node_count(existing),
                                       cbm_gbuf_edge_count(existing));
     int index_mode = cbm_pipeline_get_mode(p);
+    cbm_project_metadata_t generation = {0};
+    bool have_generation = cbm_store_project_metadata_create(cbm_pipeline_indexed_commit(p),
+                                                             &generation) == CBM_STORE_OK;
     cbm_coverage_meta_t coverage_meta = {
+        .generation_id = have_generation ? generation.generation_id : NULL,
+        .indexed_commit = have_generation ? generation.indexed_commit : NULL,
+        .generated_at = have_generation ? generation.generated_at : NULL,
         .index_mode = incr_mode_name(index_mode),
         .recording_status =
             !coverage_rows_available
@@ -1003,6 +1009,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     };
     dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
                      mode_skipped_count, cbm_pipeline_repo_path(p), cov, cov_n, &coverage_meta);
+    cbm_store_project_metadata_clear(&generation);
     free(cov);
     cbm_store_free_coverage(old_cov, old_cov_count);
     free_mode_skipped(mode_skipped, mode_skipped_count);

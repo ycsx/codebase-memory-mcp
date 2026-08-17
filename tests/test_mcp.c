@@ -11,6 +11,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
+#include <mcp/analysis_meta.h>
 #include <mcp/index_supervisor.h> /* spawn-count hook — #845 in-process guard */
 #include <mcp/mcp.h>
 #include <mcp/mcp_internal.h>
@@ -64,6 +65,75 @@ static size_t mcp_response_tool_count(const char *response) {
     size_t count = tools && yyjson_is_arr(tools) ? yyjson_arr_size(tools) : 0U;
     yyjson_doc_free(doc);
     return count;
+}
+
+typedef struct {
+    const char *name;
+    const char *freshness;
+    const char *coverage;
+    const char *worktree_state;
+    const char *result;
+    const char *claim;
+    const char *confidence;
+    bool truncated;
+    bool has_more;
+} analysis_meta_fixture_expectation_t;
+
+static char *analysis_meta_read_fixture(const char *name) {
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    char path[512];
+    int n = snprintf(path, sizeof(path), "tests/fixtures/analysis_meta/%s", name);
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        return NULL;
+    }
+    FILE *file = cbm_fopen(path, "rb");
+    if (!file || fseek(file, 0, SEEK_END) != 0) {
+        if (file) {
+            fclose(file);
+        }
+        return NULL;
+    }
+    long size = ftell(file);
+    if (size < 0 || fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    char *content = malloc((size_t)size + 1U);
+    if (!content) {
+        fclose(file);
+        return NULL;
+    }
+    size_t read = fread(content, 1U, (size_t)size, file);
+    fclose(file);
+    if (read != (size_t)size) {
+        free(content);
+        return NULL;
+    }
+    content[size] = '\0';
+    return content;
+}
+
+static bool analysis_meta_str_eq(yyjson_val *object, const char *key, const char *expected) {
+    yyjson_val *value = object ? yyjson_obj_get(object, key) : NULL;
+    return value && yyjson_is_str(value) && expected &&
+           strcmp(yyjson_get_str(value), expected) == 0;
+}
+
+static bool analysis_meta_string(yyjson_val *object, const char *key) {
+    yyjson_val *value = object ? yyjson_obj_get(object, key) : NULL;
+    return value && yyjson_is_str(value) && yyjson_get_str(value)[0] != '\0';
+}
+
+static bool analysis_meta_nullable_string(yyjson_val *object, const char *key) {
+    yyjson_val *value = object ? yyjson_obj_get(object, key) : NULL;
+    return value && (yyjson_is_str(value) || yyjson_is_null(value));
+}
+
+static bool analysis_meta_nullable_int(yyjson_val *object, const char *key) {
+    yyjson_val *value = object ? yyjson_obj_get(object, key) : NULL;
+    return value && (yyjson_is_int(value) || yyjson_is_uint(value) || yyjson_is_null(value));
 }
 
 static char mcp_log_buf[4096];
@@ -447,6 +517,278 @@ TEST(mcp_index_repository_declares_name_override_issue571) {
     ASSERT_NOT_NULL(strstr(json, "\"name\":{\"type\":\"string\""));
     ASSERT_NOT_NULL(strstr(json, "Non-ASCII bytes are encoded"));
     free(json);
+    PASS();
+}
+
+TEST(analysis_meta_golden_fixtures) {
+    static const analysis_meta_fixture_expectation_t expectations[] = {
+        {"fresh_complete.json", "current", "complete_no_known_gap", "clean", "complete",
+         "supported", "best_effort", false, false},
+        {"generation_mismatch.json", "current", "unknown", "clean", "complete", "insufficient",
+         "unknown", false, false},
+        {"partial_coverage.json", "current", "partial", "clean", "complete", "provisional",
+         "best_effort", false, false},
+        {"coverage_unknown_hash_incomplete.json", "current", "unknown", "clean", "complete",
+         "insufficient", "unknown", false, false},
+        {"no_git_unknown.json", "unknown", "complete_no_known_gap", "not_applicable", "complete",
+         "provisional", "unknown", false, false},
+        {"stale_dirty.json", "stale", "complete_no_known_gap", "dirty", "complete", "provisional",
+         "best_effort", false, false},
+        {"truncated_page.json", "current", "complete_no_known_gap", "clean", "partial",
+         "provisional", "best_effort", true, true},
+        {"windows_path_probe_inconsistent.json", "unknown", "unknown", "unknown", "complete",
+         "insufficient", "unknown", false, false},
+    };
+
+    for (size_t i = 0; i < sizeof(expectations) / sizeof(expectations[0]); i++) {
+        const analysis_meta_fixture_expectation_t *expected = &expectations[i];
+        char *content = analysis_meta_read_fixture(expected->name);
+        ASSERT_NOT_NULL(content);
+        yyjson_doc *doc = yyjson_read(content, strlen(content), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        ASSERT_TRUE(root && yyjson_is_obj(root));
+        ASSERT_EQ(yyjson_obj_size(root), 12U);
+        ASSERT_TRUE(yyjson_is_int(yyjson_obj_get(root, "schema_version")));
+        ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "schema_version")), 1);
+        ASSERT_TRUE(analysis_meta_string(root, "tool"));
+        ASSERT_TRUE(analysis_meta_string(root, "project"));
+        ASSERT_TRUE(analysis_meta_str_eq(root, "profile", "analysis") ||
+                    analysis_meta_str_eq(root, "profile", "all"));
+
+        yyjson_val *graph = yyjson_obj_get(root, "graph");
+        yyjson_val *source = yyjson_obj_get(root, "source");
+        yyjson_val *freshness = yyjson_obj_get(root, "freshness");
+        yyjson_val *coverage = yyjson_obj_get(root, "coverage");
+        yyjson_val *result = yyjson_obj_get(root, "result");
+        yyjson_val *confidence = yyjson_obj_get(root, "confidence");
+        yyjson_val *claim = yyjson_obj_get(root, "claim");
+        yyjson_val *limitations = yyjson_obj_get(root, "limitations");
+        ASSERT_TRUE(graph && yyjson_is_obj(graph) && yyjson_obj_size(graph) == 5U);
+        ASSERT_TRUE(source && yyjson_is_obj(source) && yyjson_obj_size(source) == 4U);
+        ASSERT_TRUE(freshness && yyjson_is_obj(freshness) && yyjson_obj_size(freshness) == 4U);
+        ASSERT_TRUE(coverage && yyjson_is_obj(coverage) && yyjson_obj_size(coverage) == 9U);
+        ASSERT_TRUE(result && yyjson_is_obj(result) && yyjson_obj_size(result) == 8U);
+        ASSERT_TRUE(confidence && yyjson_is_obj(confidence) && yyjson_obj_size(confidence) == 2U);
+        ASSERT_TRUE(claim && yyjson_is_obj(claim) && yyjson_obj_size(claim) == 3U);
+        ASSERT_TRUE(limitations && yyjson_is_arr(limitations));
+
+        ASSERT_TRUE(analysis_meta_str_eq(coverage, "status", expected->coverage));
+        ASSERT_TRUE(analysis_meta_str_eq(freshness, "status", expected->freshness));
+        ASSERT_TRUE(analysis_meta_str_eq(source, "worktree_state", expected->worktree_state));
+        ASSERT_TRUE(analysis_meta_str_eq(result, "status", expected->result));
+        ASSERT_TRUE(analysis_meta_str_eq(claim, "status", expected->claim));
+        ASSERT_TRUE(analysis_meta_str_eq(confidence, "level", expected->confidence));
+        ASSERT_TRUE(analysis_meta_nullable_string(graph, "generation_id"));
+        ASSERT_TRUE(analysis_meta_nullable_string(graph, "indexed_at"));
+        ASSERT_TRUE(analysis_meta_nullable_string(graph, "generated_at"));
+        ASSERT_TRUE(analysis_meta_nullable_string(graph, "indexed_commit"));
+        ASSERT_TRUE(analysis_meta_string(graph, "index_mode"));
+        ASSERT_TRUE(analysis_meta_string(source, "vcs"));
+        ASSERT_TRUE(analysis_meta_nullable_string(source, "current_commit"));
+        ASSERT_TRUE(analysis_meta_nullable_string(source, "branch"));
+        ASSERT_TRUE(analysis_meta_string(freshness, "basis"));
+        ASSERT_TRUE(analysis_meta_nullable_string(freshness, "checked_at"));
+        ASSERT_TRUE(analysis_meta_string(coverage, "signal"));
+        ASSERT_TRUE(analysis_meta_string(coverage, "recording_status"));
+        ASSERT_TRUE(analysis_meta_nullable_int(coverage, "known_gap_count"));
+        ASSERT_TRUE(analysis_meta_nullable_int(coverage, "excluded_count"));
+        ASSERT_TRUE(analysis_meta_nullable_string(coverage, "generation_id"));
+        ASSERT_TRUE(yyjson_is_bool(yyjson_obj_get(coverage, "hash_records_complete")) ||
+                    yyjson_is_null(yyjson_obj_get(coverage, "hash_records_complete")));
+        ASSERT_TRUE(yyjson_is_bool(yyjson_obj_get(coverage, "generation_match")) ||
+                    yyjson_is_null(yyjson_obj_get(coverage, "generation_match")));
+        ASSERT_TRUE(yyjson_is_bool(yyjson_obj_get(coverage, "details_truncated")));
+        ASSERT_TRUE(analysis_meta_nullable_int(result, "returned"));
+        ASSERT_TRUE(analysis_meta_nullable_int(result, "total"));
+        ASSERT_TRUE(analysis_meta_nullable_int(result, "limit"));
+        ASSERT_TRUE(analysis_meta_nullable_string(result, "next_cursor"));
+        ASSERT_TRUE(yyjson_is_arr(yyjson_obj_get(freshness, "reason_codes")));
+        ASSERT_TRUE(yyjson_is_arr(yyjson_obj_get(result, "truncation_reasons")));
+        ASSERT_TRUE(yyjson_is_arr(yyjson_obj_get(confidence, "reasons")));
+        ASSERT_TRUE(yyjson_is_bool(yyjson_obj_get(claim, "negative_claim_allowed")));
+        ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(claim, "negative_claim_allowed")));
+
+        yyjson_val *result_truncated = yyjson_obj_get(result, "truncated");
+        yyjson_val *result_has_more = yyjson_obj_get(result, "has_more");
+        ASSERT_TRUE(result_truncated && yyjson_is_bool(result_truncated));
+        ASSERT_EQ(yyjson_get_bool(result_truncated), expected->truncated);
+        if (expected->has_more) {
+            ASSERT_TRUE(result_has_more && yyjson_is_bool(result_has_more));
+            ASSERT_TRUE(yyjson_get_bool(result_has_more));
+            ASSERT_TRUE(analysis_meta_nullable_string(result, "next_cursor"));
+            ASSERT_GT(yyjson_arr_size(yyjson_obj_get(result, "truncation_reasons")), 0U);
+        } else if (result_has_more && yyjson_is_bool(result_has_more)) {
+            ASSERT_FALSE(yyjson_get_bool(result_has_more));
+            ASSERT_TRUE(yyjson_is_null(yyjson_obj_get(result, "next_cursor")));
+        }
+        if (strcmp(expected->coverage, "partial") == 0) {
+            ASSERT_GT(yyjson_get_int(yyjson_obj_get(coverage, "known_gap_count")), 0);
+        }
+        if (strcmp(expected->coverage, "unknown") == 0) {
+            ASSERT_TRUE(yyjson_is_null(yyjson_obj_get(coverage, "known_gap_count")));
+        }
+        yyjson_val *generation_match = yyjson_obj_get(coverage, "generation_match");
+        if (strcmp(expected->coverage, "complete_no_known_gap") == 0) {
+            ASSERT_TRUE(generation_match && yyjson_is_bool(generation_match));
+            ASSERT_TRUE(yyjson_get_bool(generation_match));
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(coverage, "recording_status")), "complete");
+            ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(coverage, "hash_records_complete")));
+            ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(coverage, "details_truncated")));
+        }
+        if (generation_match && yyjson_is_bool(generation_match) &&
+            yyjson_get_bool(generation_match)) {
+            yyjson_val *graph_generation = yyjson_obj_get(graph, "generation_id");
+            yyjson_val *coverage_generation = yyjson_obj_get(coverage, "generation_id");
+            ASSERT_TRUE(graph_generation && coverage_generation &&
+                        yyjson_is_str(graph_generation) && yyjson_is_str(coverage_generation));
+            ASSERT_STR_EQ(yyjson_get_str(graph_generation), yyjson_get_str(coverage_generation));
+        } else if (generation_match && yyjson_is_bool(generation_match)) {
+            ASSERT_TRUE(analysis_meta_str_eq(coverage, "status", "unknown"));
+        }
+        if (strcmp(expected->worktree_state, "dirty") == 0) {
+            ASSERT_TRUE(analysis_meta_str_eq(freshness, "status", "stale"));
+            ASSERT_NOT_NULL(strstr(content, "worktree_dirty"));
+        }
+        if (strcmp(expected->name, "windows_path_probe_inconsistent.json") == 0) {
+            ASSERT_TRUE(analysis_meta_str_eq(freshness, "status", "unknown"));
+            ASSERT_NOT_NULL(strstr(content, "source_probe_inconsistent"));
+            ASSERT_NOT_NULL(strstr(content, "\"severity\": \"blocking\""));
+        }
+        for (size_t j = 0; j < yyjson_arr_size(limitations); j++) {
+            yyjson_val *limitation = yyjson_arr_get(limitations, j);
+            ASSERT_TRUE(limitation && yyjson_is_obj(limitation) &&
+                        yyjson_obj_size(limitation) == 5U);
+            ASSERT_TRUE(analysis_meta_string(limitation, "code"));
+            ASSERT_TRUE(analysis_meta_string(limitation, "severity"));
+            ASSERT_TRUE(analysis_meta_string(limitation, "message"));
+            ASSERT_TRUE(yyjson_is_arr(yyjson_obj_get(limitation, "scopes")));
+            ASSERT_TRUE(analysis_meta_nullable_string(limitation, "fallback_action"));
+        }
+        yyjson_doc_free(doc);
+        free(content);
+    }
+    PASS();
+}
+
+static yyjson_doc *analysis_meta_build_doc(const cbm_analysis_meta_input_t *input) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) {
+        return NULL;
+    }
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    if (!cbm_analysis_meta_add(doc, root, input)) {
+        yyjson_mut_doc_free(doc);
+        return NULL;
+    }
+    char *json = yyjson_mut_write(doc, YYJSON_WRITE_NOFLAG, NULL);
+    yyjson_mut_doc_free(doc);
+    if (!json) {
+        return NULL;
+    }
+    yyjson_doc *parsed = yyjson_read(json, strlen(json), YYJSON_READ_NOFLAG);
+    free(json);
+    return parsed;
+}
+
+TEST(analysis_meta_builder_normalizes_runtime_states) {
+    cbm_project_t project = {
+        .name = "analysis-meta-project",
+        .indexed_at = "2026-08-17T00:00:00Z",
+        .root_path = "/tmp/analysis-meta-project",
+    };
+    cbm_project_metadata_t graph = {
+        .generation_id = "gen-a",
+        .indexed_commit = "0123456789abcdef0123456789abcdef01234567",
+        .generated_at = "2026-08-17T00:00:00Z",
+    };
+    cbm_git_context_t source = {
+        .is_git = true,
+        .root_exists = true,
+        .worktree_state = CBM_GIT_WORKTREE_CLEAN,
+        .branch = "main",
+        .head_sha = "0123456789abcdef0123456789abcdef01234567",
+    };
+    cbm_coverage_meta_t coverage = {
+        .generation_id = "gen-a",
+        .index_mode = "full",
+        .recording_status = "complete",
+        .hash_records_complete = true,
+    };
+    cbm_analysis_meta_input_t input = {
+        .tool = "index_status",
+        .profile = "analysis",
+        .project = project.name,
+        .project_info = &project,
+        .graph_meta = &graph,
+        .source = &source,
+        .coverage_meta = &coverage,
+        .have_coverage = true,
+        .known_gap_count = 0,
+        .excluded_count = 0,
+        .result_status = "complete",
+        .returned = 1,
+        .total = 1,
+        .limit = -1,
+        .has_more = 0,
+    };
+
+    yyjson_doc *doc = analysis_meta_build_doc(&input);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *meta = yyjson_obj_get(yyjson_doc_get_root(doc), "analysis_meta");
+    ASSERT_TRUE(analysis_meta_str_eq(yyjson_obj_get(meta, "freshness"), "status", "current"));
+    ASSERT_TRUE(
+        analysis_meta_str_eq(yyjson_obj_get(meta, "coverage"), "status", "complete_no_known_gap"));
+    ASSERT_TRUE(analysis_meta_str_eq(yyjson_obj_get(meta, "claim"), "status", "supported"));
+    yyjson_doc_free(doc);
+
+    source.worktree_state = CBM_GIT_WORKTREE_DIRTY;
+    doc = analysis_meta_build_doc(&input);
+    ASSERT_NOT_NULL(doc);
+    meta = yyjson_obj_get(yyjson_doc_get_root(doc), "analysis_meta");
+    ASSERT_TRUE(analysis_meta_str_eq(yyjson_obj_get(meta, "freshness"), "status", "stale"));
+    ASSERT_TRUE(analysis_meta_str_eq(yyjson_obj_get(meta, "claim"), "status", "provisional"));
+    yyjson_doc_free(doc);
+
+    source.worktree_state = CBM_GIT_WORKTREE_CLEAN;
+    coverage.generation_id = "gen-b";
+    doc = analysis_meta_build_doc(&input);
+    ASSERT_NOT_NULL(doc);
+    meta = yyjson_obj_get(yyjson_doc_get_root(doc), "analysis_meta");
+    yyjson_val *coverage_obj = yyjson_obj_get(meta, "coverage");
+    ASSERT_TRUE(analysis_meta_str_eq(coverage_obj, "status", "unknown"));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(coverage_obj, "generation_match")));
+    yyjson_doc_free(doc);
+
+    coverage.generation_id = "gen-a";
+    source.is_git = false;
+    source.worktree_state = CBM_GIT_WORKTREE_UNKNOWN;
+    doc = analysis_meta_build_doc(&input);
+    ASSERT_NOT_NULL(doc);
+    meta = yyjson_obj_get(yyjson_doc_get_root(doc), "analysis_meta");
+    ASSERT_TRUE(analysis_meta_str_eq(yyjson_obj_get(meta, "freshness"), "status", "unknown"));
+    ASSERT_TRUE(
+        analysis_meta_str_eq(yyjson_obj_get(meta, "source"), "worktree_state", "not_applicable"));
+    yyjson_doc_free(doc);
+
+    source.is_git = true;
+    source.worktree_state = CBM_GIT_WORKTREE_CLEAN;
+    input.has_more = 1;
+    input.next_cursor = "offset:10";
+    input.truncation_reason_count = 1;
+    input.truncation_reasons = NULL;
+    doc = analysis_meta_build_doc(&input);
+    ASSERT_NOT_NULL(doc);
+    meta = yyjson_obj_get(yyjson_doc_get_root(doc), "analysis_meta");
+    yyjson_val *result = yyjson_obj_get(meta, "result");
+    ASSERT_TRUE(analysis_meta_str_eq(result, "status", "partial"));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(result, "truncated")));
+    yyjson_val *reasons = yyjson_obj_get(result, "truncation_reasons");
+    ASSERT_TRUE(reasons && yyjson_is_arr(reasons));
+    ASSERT_EQ(yyjson_arr_size(reasons), 1U);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(reasons, 0)), "unknown");
+    yyjson_doc_free(doc);
     PASS();
 }
 
@@ -1506,6 +1848,7 @@ TEST(tool_check_index_coverage_reports_paths_scopes_and_ranges) {
     ASSERT_NOT_NULL(strstr(inner, "src/skip.c"));
     ASSERT_NOT_NULL(strstr(inner, "file exceeds cap"));
     ASSERT_NOT_NULL(strstr(inner, "best_effort"));
+    ASSERT_NOT_NULL(strstr(inner, "\"analysis_meta\""));
 
     free(inner);
     free(coverage);
@@ -1548,6 +1891,50 @@ TEST(tool_check_index_coverage_preserves_multiple_scope_labels) {
     PASS();
 }
 
+TEST(tool_check_index_coverage_maps_scope_pagination_to_analysis_meta) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    cbm_coverage_row_t rows[] = {
+        {.rel_path = "alpha/a.c", .kind = "parse_partial", .detail = "1-2"},
+        {.rel_path = "alpha/b.c", .kind = "oversized", .detail = "too large"},
+        {.rel_path = "alpha/generated", .kind = "not_indexed_dir", .detail = "excluded"},
+    };
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "alpha/a.c", "", 0, 0),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "alpha/b.c", "", 0, 0),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_coverage_replace(store, "test-project", rows, 3), CBM_STORE_OK);
+
+    char *coverage = cbm_mcp_handle_tool(
+        srv, "check_index_coverage",
+        "{\"project\":\"test-project\",\"scopes\":[\"alpha\"],\"scope_limit\":1}");
+    ASSERT_NOT_NULL(coverage);
+    char *inner = extract_text_content(coverage);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), YYJSON_READ_NOFLAG);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *meta = yyjson_obj_get(yyjson_doc_get_root(doc), "analysis_meta");
+    ASSERT_TRUE(meta && yyjson_is_obj(meta));
+    yyjson_val *result = yyjson_obj_get(meta, "result");
+    ASSERT_TRUE(analysis_meta_str_eq(result, "status", "partial"));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(result, "truncated")));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(result, "has_more")));
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(result, "next_cursor")), "1");
+    yyjson_val *reasons = yyjson_obj_get(result, "truncation_reasons");
+    ASSERT_TRUE(reasons && yyjson_is_arr(reasons));
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(reasons, 0)), "requested_limit");
+
+    yyjson_doc_free(doc);
+    free(inner);
+    free(coverage);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
 static int write_coverage_meta(cbm_store_t *store, const char *generation,
                                const char *recording_status) {
     cbm_coverage_meta_t meta = {
@@ -1570,6 +1957,10 @@ TEST(tool_check_index_coverage_rejects_stale_generation) {
     cbm_store_t *store = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(store);
     ASSERT_EQ(write_coverage_meta(store, "stale-generation", "complete"), CBM_STORE_OK);
+    cbm_project_metadata_t replacement = {0};
+    ASSERT_EQ(cbm_store_project_metadata_create(NULL, &replacement), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_set_project_metadata(store, "test-project", &replacement), CBM_STORE_OK);
+    cbm_store_project_metadata_clear(&replacement);
 
     char *response = cbm_mcp_handle_tool(srv, "check_index_coverage",
                                          "{\"project\":\"test-project\",\"paths\":[\"main.go\"]}");
@@ -1577,6 +1968,7 @@ TEST(tool_check_index_coverage_rejects_stale_generation) {
     char *inner = extract_text_content(response);
     ASSERT_NOT_NULL(inner);
     ASSERT_NOT_NULL(strstr(inner, "\"generation_matches\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"generation_match\":false"));
     ASSERT_NOT_NULL(strstr(inner, "\"status\":\"coverage_unavailable\""));
     ASSERT_NOT_NULL(strstr(inner, "\"recommended_action\":\"read_source_and_reindex\""));
 
@@ -1663,6 +2055,8 @@ TEST(tool_index_status_includes_git_metadata) {
     ASSERT_NOT_NULL(strstr(inner, "\"git\""));
     ASSERT_NOT_NULL(strstr(inner, "\"is_git\":false"));
     ASSERT_NOT_NULL(strstr(inner, "\"root_exists\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"analysis_meta\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"tool\":\"index_status\""));
 
     free(inner);
     free(resp);
@@ -6973,6 +7367,8 @@ SUITE(mcp) {
     RUN_TEST(server_handle_tools_call_missing_name);
 
     /* Tool handlers */
+    RUN_TEST(analysis_meta_golden_fixtures);
+    RUN_TEST(analysis_meta_builder_normalizes_runtime_states);
     RUN_TEST(tool_list_projects_empty);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
@@ -6987,6 +7383,7 @@ SUITE(mcp) {
     RUN_TEST(tool_check_index_coverage_finds_path_beyond_status_cap);
     RUN_TEST(tool_check_index_coverage_reports_paths_scopes_and_ranges);
     RUN_TEST(tool_check_index_coverage_preserves_multiple_scope_labels);
+    RUN_TEST(tool_check_index_coverage_maps_scope_pagination_to_analysis_meta);
     RUN_TEST(tool_check_index_coverage_rejects_stale_generation);
     RUN_TEST(tool_check_index_coverage_requires_source_when_file_metadata_changed);
     RUN_TEST(tool_check_index_coverage_surfaces_lookup_errors);

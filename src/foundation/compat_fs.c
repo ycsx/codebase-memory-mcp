@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 
@@ -395,6 +396,25 @@ FILE *cbm_fopen(const char *path, const char *mode) {
     return f;
 }
 
+int cbm_stat_utf8(const char *path, cbm_file_stat_t *out) {
+    if (!path || !out) {
+        return -1;
+    }
+    wchar_t *wpath = cbm_utf8_to_wide(path);
+    if (!wpath) {
+        return -1;
+    }
+    struct _stat64 st;
+    int rc = _wstat64(wpath, &st);
+    free(wpath);
+    if (rc != 0) {
+        return rc;
+    }
+    out->size = (int64_t)st.st_size;
+    out->mtime_ns = (int64_t)st.st_mtime * 1000000000LL;
+    return 0;
+}
+
 static bool cbm_windows_mkdir_component(wchar_t *path) {
     if (_wmkdir(path) != 0 && errno != EEXIST) {
         return false;
@@ -775,6 +795,23 @@ int cbm_pclose(FILE *f) {
 
 FILE *cbm_fopen(const char *path, const char *mode) {
     return fopen(path, mode);
+}
+
+int cbm_stat_utf8(const char *path, cbm_file_stat_t *out) {
+    if (!path || !out) {
+        return -1;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    out->size = (int64_t)st.st_size;
+#ifdef __APPLE__
+    out->mtime_ns = (int64_t)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+    out->mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+    return 0;
 }
 
 static int cbm_open_directory_component(int parent, const char *component, int flags) {

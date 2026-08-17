@@ -180,7 +180,7 @@ STORE_SRCS = src/store/store.c
 CYPHER_SRCS = src/cypher/cypher.c
 
 # MCP server module (new)
-MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c \
+MCP_SRCS = src/mcp/mcp.c src/mcp/analysis_meta.c src/mcp/index_supervisor.c src/mcp/compact_out.c \
     src/mcp/usage_stats.c \
     src/mcp/http_transport.c
 

@@ -53,6 +53,16 @@ typedef struct {
     const char *root_path;
 } cbm_project_t;
 
+/* Stable metadata for one published graph generation. Legacy databases have
+ * NULL fields until a new generation is published; indexed_at is deliberately
+ * not promoted to generation_id. Strings returned by the getter are owned by
+ * the caller and released with cbm_store_project_metadata_clear(). */
+typedef struct {
+    const char *generation_id;
+    const char *indexed_commit;
+    const char *generated_at; /* ISO 8601 publication time */
+} cbm_project_metadata_t;
+
 typedef struct {
     const char *project;
     const char *rel_path;
@@ -287,6 +297,13 @@ int cbm_store_get_project(cbm_store_t *s, const char *name, cbm_project_t *out);
 int cbm_store_list_projects(cbm_store_t *s, cbm_project_t **out, int *count);
 int cbm_store_delete_project(cbm_store_t *s, const char *name);
 
+/* Fetch/free the stable metadata for the project's current generation. */
+int cbm_store_project_metadata_create(const char *indexed_commit, cbm_project_metadata_t *out);
+int cbm_store_set_project_metadata(cbm_store_t *s, const char *name,
+                                   const cbm_project_metadata_t *meta);
+int cbm_store_get_project_metadata(cbm_store_t *s, const char *name, cbm_project_metadata_t *out);
+void cbm_store_project_metadata_clear(cbm_project_metadata_t *meta);
+
 /* ── Node CRUD ──────────────────────────────────────────────────── */
 
 /* Upsert a single node. Returns node ID (>0) or CBM_STORE_ERR. */
@@ -433,7 +450,10 @@ typedef struct {
  * Strings returned by cbm_store_coverage_meta_get are heap-owned. */
 typedef struct {
     const char *project;
-    const char *generation;
+    const char *generation; /* legacy indexed_at-based coverage generation */
+    const char *generation_id;
+    const char *indexed_commit;
+    const char *generated_at;
     const char *index_mode;
     const char *recorded_at;
     const char *recording_status;

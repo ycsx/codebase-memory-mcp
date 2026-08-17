@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "tool": "explain_impact",
+  "profile": "analysis",
+  "project": "demo",
+  "graph": {
+    "generation_id": "gen-20260817-0003",
+    "indexed_at": "2026-08-17T03:00:00Z",
+    "generated_at": "2026-08-17T03:00:04Z",
+    "index_mode": "moderate",
+    "indexed_commit": "3333333333333333333333333333333333333333"
+  },
+  "source": {
+    "vcs": "git",
+    "current_commit": "3333333333333333333333333333333333333333",
+    "branch": "main",
+    "worktree_state": "clean"
+  },
+  "freshness": {
+    "status": "current",
+    "basis": "mixed",
+    "checked_at": "2026-08-17T03:05:00Z",
+    "reason_codes": []
+  },
+  "coverage": {
+    "status": "partial",
+    "signal": "best_effort",
+    "recording_status": "complete",
+    "generation_id": "gen-20260817-0003",
+    "generation_match": true,
+    "known_gap_count": 2,
+    "excluded_count": 0,
+    "hash_records_complete": true,
+    "details_truncated": false
+  },
+  "result": {
+    "status": "complete",
+    "truncated": false,
+    "returned": 4,
+    "total": 4,
+    "limit": 300,
+    "has_more": false,
+    "next_cursor": null,
+    "truncation_reasons": []
+  },
+  "confidence": {
+    "level": "best_effort",
+    "reasons": ["known_parse_gaps_intersect_analysis_scope"]
+  },
+  "claim": {
+    "status": "provisional",
+    "negative_claim_allowed": false,
+    "reason_codes": ["coverage_partial"]
+  },
+  "limitations": [
+    {
+      "code": "known_coverage_gaps",
+      "severity": "warning",
+      "message": "Two files in the analysis scope contain recorded parse or extraction gaps.",
+      "scopes": ["src/partial.c", "src/skipped.c"],
+      "fallback_action": "read_flagged_source"
+    }
+  ]
+}

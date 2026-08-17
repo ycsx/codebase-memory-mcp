@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "tool": "check_index_coverage",
+  "profile": "analysis",
+  "project": "demo",
+  "graph": {
+    "generation_id": "gen-20260817-0006",
+    "indexed_at": "2026-08-17T06:00:00Z",
+    "generated_at": "2026-08-17T06:00:04Z",
+    "index_mode": "moderate",
+    "indexed_commit": "6666666666666666666666666666666666666666"
+  },
+  "source": {
+    "vcs": "git",
+    "current_commit": "6666666666666666666666666666666666666666",
+    "branch": "main",
+    "worktree_state": "clean"
+  },
+  "freshness": {
+    "status": "current",
+    "basis": "git",
+    "checked_at": "2026-08-17T06:05:00Z",
+    "reason_codes": []
+  },
+  "coverage": {
+    "status": "unknown",
+    "signal": "best_effort",
+    "recording_status": "complete",
+    "generation_id": "gen-20260817-0005",
+    "generation_match": false,
+    "known_gap_count": null,
+    "excluded_count": null,
+    "hash_records_complete": true,
+    "details_truncated": false
+  },
+  "result": {
+    "status": "complete",
+    "truncated": false,
+    "returned": 1,
+    "total": 1,
+    "limit": 128,
+    "has_more": false,
+    "next_cursor": null,
+    "truncation_reasons": []
+  },
+  "confidence": {
+    "level": "unknown",
+    "reasons": ["coverage_metadata_belongs_to_another_generation"]
+  },
+  "claim": {
+    "status": "insufficient",
+    "negative_claim_allowed": false,
+    "reason_codes": ["generation_mismatch"]
+  },
+  "limitations": [
+    {
+      "code": "coverage_generation_mismatch",
+      "severity": "blocking",
+      "message": "Coverage metadata does not belong to the graph generation being queried.",
+      "scopes": ["demo"],
+      "fallback_action": "reindex_project"
+    }
+  ]
+}

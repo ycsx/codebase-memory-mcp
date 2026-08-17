@@ -5,6 +5,8 @@
  * TestNodeDedup, TestProjectCRUD, TestUpsertNodeBatch, etc.)
  */
 #include "test_framework.h"
+#include "foundation/compat.h"
+#include "foundation/platform.h"
 #include <store/store.h>
 #include <sqlite3.h>
 #include <string.h>
@@ -93,6 +95,106 @@ TEST(store_project_update) {
     cbm_store_free_projects(projects, count);
 
     cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_project_generation_requires_explicit_publication) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "generation-project", "/tmp/generation-project"),
+              CBM_STORE_OK);
+
+    /* Plain project CRUD is not an index publication. */
+    cbm_project_metadata_t got = {0};
+    ASSERT_EQ(cbm_store_get_project_metadata(s, "generation-project", &got), CBM_STORE_OK);
+    ASSERT_NULL(got.generation_id);
+    ASSERT_NULL(got.indexed_commit);
+    ASSERT_NULL(got.generated_at);
+    cbm_store_project_metadata_clear(&got);
+
+    const char *commit = "1111111111111111111111111111111111111111";
+    cbm_project_metadata_t first = {0};
+    ASSERT_EQ(cbm_store_project_metadata_create(commit, &first), CBM_STORE_OK);
+    ASSERT_NOT_NULL(first.generation_id);
+    ASSERT_NOT_NULL(first.generated_at);
+    ASSERT_STR_EQ(first.indexed_commit, commit);
+    ASSERT_EQ(cbm_store_set_project_metadata(s, "generation-project", &first), CBM_STORE_OK);
+
+    ASSERT_EQ(cbm_store_get_project_metadata(s, "generation-project", &got), CBM_STORE_OK);
+    ASSERT_STR_EQ(got.generation_id, first.generation_id);
+    ASSERT_STR_EQ(got.indexed_commit, commit);
+    ASSERT_STR_EQ(got.generated_at, first.generated_at);
+    cbm_store_project_metadata_clear(&got);
+
+    cbm_project_metadata_t second = {0};
+    ASSERT_EQ(cbm_store_project_metadata_create(commit, &second), CBM_STORE_OK);
+    ASSERT_TRUE(strcmp(first.generation_id, second.generation_id) != 0);
+    cbm_store_project_metadata_clear(&first);
+    cbm_store_project_metadata_clear(&second);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_generation_migrates_legacy_database_to_unknown) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/cbm_store_generation_%d.db", cbm_tmpdir(), (int)getpid());
+    unlink(path);
+
+    sqlite3 *db = NULL;
+    ASSERT_EQ(sqlite3_open(path, &db), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "CREATE TABLE projects(name TEXT PRIMARY KEY, indexed_at TEXT NOT NULL, "
+                           "root_path TEXT NOT NULL);"
+                           "INSERT INTO projects VALUES('legacy','2026-01-01T00:00:00Z','/legacy');"
+                           "CREATE TABLE index_coverage_meta("
+                           "project TEXT PRIMARY KEY REFERENCES projects(name) ON DELETE CASCADE,"
+                           "generation TEXT NOT NULL,index_mode TEXT NOT NULL,"
+                           "recorded_at TEXT NOT NULL,recording_status TEXT NOT NULL,"
+                           "ignored_files_stored INTEGER NOT NULL DEFAULT 0,"
+                           "ignored_files_total INTEGER NOT NULL DEFAULT 0,"
+                           "coverage_version INTEGER NOT NULL DEFAULT 1,"
+                           "hash_records_complete INTEGER NOT NULL DEFAULT 0);"
+                           "INSERT INTO index_coverage_meta VALUES("
+                           "'legacy','2026-01-01T00:00:00Z','fast','2026-01-01T00:00:01Z',"
+                           "'complete',0,0,1,1);",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_close(db), SQLITE_OK);
+
+    /* Query-only opens skip migrations but must still expose old rows. */
+    cbm_store_t *query = cbm_store_open_path_query(path);
+    ASSERT_NOT_NULL(query);
+    cbm_project_metadata_t project_meta = {0};
+    ASSERT_EQ(cbm_store_get_project_metadata(query, "legacy", &project_meta), CBM_STORE_OK);
+    ASSERT_NULL(project_meta.generation_id);
+    ASSERT_NULL(project_meta.indexed_commit);
+    ASSERT_NULL(project_meta.generated_at);
+    cbm_store_project_metadata_clear(&project_meta);
+    cbm_coverage_meta_t coverage_meta = {0};
+    ASSERT_EQ(cbm_store_coverage_meta_get(query, "legacy", &coverage_meta), CBM_STORE_OK);
+    ASSERT_STR_EQ(coverage_meta.generation, "2026-01-01T00:00:00Z");
+    ASSERT_NULL(coverage_meta.generation_id);
+    ASSERT_NULL(coverage_meta.indexed_commit);
+    ASSERT_NULL(coverage_meta.generated_at);
+    cbm_store_coverage_meta_clear(&coverage_meta);
+    cbm_store_close(query);
+
+    /* A writable open adds nullable columns without promoting timestamps. */
+    cbm_store_t *store = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_get_project_metadata(store, "legacy", &project_meta), CBM_STORE_OK);
+    ASSERT_NULL(project_meta.generation_id);
+    ASSERT_NULL(project_meta.indexed_commit);
+    ASSERT_NULL(project_meta.generated_at);
+    cbm_store_project_metadata_clear(&project_meta);
+    cbm_store_close(store);
+
+    unlink(path);
+    char sidecar[544];
+    snprintf(sidecar, sizeof(sidecar), "%s-wal", path);
+    unlink(sidecar);
+    snprintf(sidecar, sizeof(sidecar), "%s-shm", path);
+    unlink(sidecar);
     PASS();
 }
 
@@ -1768,6 +1870,9 @@ TEST(store_coverage_meta_zero_row_truncation_and_delete) {
 
     cbm_coverage_meta_t write_meta = {
         .generation = "generation-42",
+        .generation_id = "gen-coverage-42",
+        .indexed_commit = "2222222222222222222222222222222222222222",
+        .generated_at = "2026-08-17T08:00:00Z",
         .index_mode = "fast",
         .recording_status = "truncated",
         .ignored_files_stored = 2000,
@@ -1789,6 +1894,9 @@ TEST(store_coverage_meta_zero_row_truncation_and_delete) {
     ASSERT_EQ(cbm_store_coverage_meta_get(s, "coverage-meta", &got), CBM_STORE_OK);
     ASSERT_STR_EQ(got.project, "coverage-meta");
     ASSERT_STR_EQ(got.generation, "generation-42");
+    ASSERT_STR_EQ(got.generation_id, "gen-coverage-42");
+    ASSERT_STR_EQ(got.indexed_commit, "2222222222222222222222222222222222222222");
+    ASSERT_STR_EQ(got.generated_at, "2026-08-17T08:00:00Z");
     ASSERT_NOT_NULL(got.recorded_at);
     ASSERT_STR_EQ(got.index_mode, "fast");
     ASSERT_STR_EQ(got.recording_status, "truncated");
@@ -1796,9 +1904,18 @@ TEST(store_coverage_meta_zero_row_truncation_and_delete) {
     ASSERT_EQ(got.ignored_files_total, 2501);
     ASSERT_EQ(got.coverage_version, 1);
     ASSERT_FALSE(got.hash_records_complete);
+    cbm_project_metadata_t project_meta = {0};
+    ASSERT_EQ(cbm_store_get_project_metadata(s, "coverage-meta", &project_meta), CBM_STORE_OK);
+    ASSERT_STR_EQ(project_meta.generation_id, got.generation_id);
+    ASSERT_STR_EQ(project_meta.indexed_commit, got.indexed_commit);
+    ASSERT_STR_EQ(project_meta.generated_at, got.generated_at);
+    cbm_store_project_metadata_clear(&project_meta);
     cbm_store_coverage_meta_clear(&got);
     ASSERT_NULL(got.project);
     ASSERT_NULL(got.generation);
+    ASSERT_NULL(got.generation_id);
+    ASSERT_NULL(got.indexed_commit);
+    ASSERT_NULL(got.generated_at);
     ASSERT_NULL(got.recorded_at);
     ASSERT_NULL(got.index_mode);
     ASSERT_NULL(got.recording_status);
@@ -1941,6 +2058,8 @@ SUITE(store_nodes) {
     RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);
     RUN_TEST(store_project_update);
+    RUN_TEST(store_project_generation_requires_explicit_publication);
+    RUN_TEST(store_generation_migrates_legacy_database_to_unknown);
     RUN_TEST(store_project_delete);
     RUN_TEST(store_node_crud);
     RUN_TEST(store_node_dedup);

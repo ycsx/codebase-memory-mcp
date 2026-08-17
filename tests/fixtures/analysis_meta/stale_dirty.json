@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "tool": "get_architecture",
+  "profile": "analysis",
+  "project": "demo",
+  "graph": {
+    "generation_id": "gen-20260816-0007",
+    "indexed_at": "2026-08-16T08:00:00Z",
+    "generated_at": "2026-08-16T08:00:03Z",
+    "index_mode": "moderate",
+    "indexed_commit": "1111111111111111111111111111111111111111"
+  },
+  "source": {
+    "vcs": "git",
+    "current_commit": "2222222222222222222222222222222222222222",
+    "branch": "main",
+    "worktree_state": "dirty"
+  },
+  "freshness": {
+    "status": "stale",
+    "basis": "git",
+    "checked_at": "2026-08-17T02:00:00Z",
+    "reason_codes": ["commit_mismatch", "worktree_dirty"]
+  },
+  "coverage": {
+    "status": "complete_no_known_gap",
+    "signal": "best_effort",
+    "recording_status": "complete",
+    "generation_id": "gen-20260816-0007",
+    "generation_match": true,
+    "known_gap_count": 0,
+    "excluded_count": 0,
+    "hash_records_complete": true,
+    "details_truncated": false
+  },
+  "result": {
+    "status": "complete",
+    "truncated": false,
+    "returned": null,
+    "total": null,
+    "limit": null,
+    "has_more": null,
+    "next_cursor": null,
+    "truncation_reasons": []
+  },
+  "confidence": {
+    "level": "best_effort",
+    "reasons": ["graph_is_older_than_source"]
+  },
+  "claim": {
+    "status": "provisional",
+    "negative_claim_allowed": false,
+    "reason_codes": ["freshness_not_current"]
+  },
+  "limitations": [
+    {
+      "code": "stale_graph",
+      "severity": "warning",
+      "message": "The graph does not represent the current commit or dirty worktree.",
+      "scopes": ["demo"],
+      "fallback_action": "reindex_project"
+    }
+  ]
+}

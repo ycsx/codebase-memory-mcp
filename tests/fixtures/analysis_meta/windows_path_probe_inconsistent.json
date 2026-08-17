@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "tool": "check_index_coverage",
+  "profile": "analysis",
+  "project": "windows-cjk-root",
+  "graph": {
+    "generation_id": "gen-20260817-0007",
+    "indexed_at": "2026-08-17T07:00:00Z",
+    "generated_at": "2026-08-17T07:00:03Z",
+    "index_mode": "moderate",
+    "indexed_commit": "7777777777777777777777777777777777777777"
+  },
+  "source": {
+    "vcs": "git",
+    "current_commit": "7777777777777777777777777777777777777777",
+    "branch": "main",
+    "worktree_state": "unknown"
+  },
+  "freshness": {
+    "status": "unknown",
+    "basis": "unavailable",
+    "checked_at": "2026-08-17T07:05:00Z",
+    "reason_codes": ["source_probe_inconsistent"]
+  },
+  "coverage": {
+    "status": "unknown",
+    "signal": "best_effort",
+    "recording_status": "complete",
+    "generation_id": "gen-20260817-0007",
+    "generation_match": true,
+    "known_gap_count": null,
+    "excluded_count": null,
+    "hash_records_complete": true,
+    "details_truncated": false
+  },
+  "result": {
+    "status": "complete",
+    "truncated": false,
+    "returned": 1,
+    "total": 1,
+    "limit": 128,
+    "has_more": false,
+    "next_cursor": null,
+    "truncation_reasons": []
+  },
+  "confidence": {
+    "level": "unknown",
+    "reasons": ["filesystem_and_freshness_probes_disagree"]
+  },
+  "claim": {
+    "status": "insufficient",
+    "negative_claim_allowed": false,
+    "reason_codes": ["source_probe_inconsistent"]
+  },
+  "limitations": [
+    {
+      "code": "source_probe_inconsistent",
+      "severity": "blocking",
+      "message": "The UTF-8 filesystem check and the freshness probe disagree about whether the source exists.",
+      "scopes": ["src/mcp/mcp.c"],
+      "fallback_action": "read_source_and_reindex"
+    }
+  ]
+}

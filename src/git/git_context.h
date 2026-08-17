@@ -3,11 +3,18 @@
 
 #include <stdbool.h>
 
+typedef enum {
+    CBM_GIT_WORKTREE_UNKNOWN = 0,
+    CBM_GIT_WORKTREE_CLEAN,
+    CBM_GIT_WORKTREE_DIRTY,
+} cbm_git_worktree_state_t;
+
 typedef struct {
     bool is_git;
     bool is_worktree;
     bool is_detached;
     bool root_exists;
+    cbm_git_worktree_state_t worktree_state;
     char *input_path;
     char *worktree_root;
     char *git_dir;

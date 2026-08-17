@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "tool": "search_graph",
+  "profile": "analysis",
+  "project": "demo",
+  "graph": {
+    "generation_id": "gen-20260817-0005",
+    "indexed_at": "2026-08-17T05:00:00Z",
+    "generated_at": "2026-08-17T05:00:03Z",
+    "index_mode": "moderate",
+    "indexed_commit": "5555555555555555555555555555555555555555"
+  },
+  "source": {
+    "vcs": "git",
+    "current_commit": "5555555555555555555555555555555555555555",
+    "branch": "main",
+    "worktree_state": "clean"
+  },
+  "freshness": {
+    "status": "current",
+    "basis": "mixed",
+    "checked_at": "2026-08-17T05:05:00Z",
+    "reason_codes": []
+  },
+  "coverage": {
+    "status": "complete_no_known_gap",
+    "signal": "best_effort",
+    "recording_status": "complete",
+    "generation_id": "gen-20260817-0005",
+    "generation_match": true,
+    "known_gap_count": 0,
+    "excluded_count": 0,
+    "hash_records_complete": true,
+    "details_truncated": false
+  },
+  "result": {
+    "status": "partial",
+    "truncated": true,
+    "returned": 50,
+    "total": 120,
+    "limit": 50,
+    "has_more": true,
+    "next_cursor": "50",
+    "truncation_reasons": ["requested_limit"]
+  },
+  "confidence": {
+    "level": "best_effort",
+    "reasons": ["only_first_result_page_examined"]
+  },
+  "claim": {
+    "status": "provisional",
+    "negative_claim_allowed": false,
+    "reason_codes": ["result_truncated", "continuation_not_consumed"]
+  },
+  "limitations": [
+    {
+      "code": "result_page_incomplete",
+      "severity": "warning",
+      "message": "Only the first 50 of 120 matching nodes are present.",
+      "scopes": ["demo"],
+      "fallback_action": "continue_with_cursor"
+    }
+  ]
+}
