@@ -100,6 +100,12 @@ Windows/macOS Desktop 负责管理独立的 `console` 子进程，不会为每�
 
 ### 客户端接入
 
+`install` 共支持 43 个自动/条件接入面：
+<!-- client-surface-contract: total=43 automatic=37 conditional=6 -->
+
+- **自动检测（37 个）**：Claude Code、Codex CLI、Gemini CLI、Zed、OpenCode、Antigravity、Aider、KiloCode、VS Code、Cursor、Windsurf、Augment / Auggie、OpenClaw、Kiro、Junie、Hermes、OpenHands、Cline、Warp、Qwen Code、GitHub Copilot CLI、Factory Droid、Crush、Goose、Mistral Vibe、Qoder CLI、Kimi Code CLI、GitLab Duo CLI、Rovo Dev CLI、Amp、Devin CLI / Local、Tabnine、Amazon Q Developer IDE、CodeBuddy Code CLI、IBM Bob Shell、Pochi、Pi。
+- **条件/显式（6 个）**：Continue / cn、Visual Studio、TRAE、Roo Code、IBM Bob IDE、Sourcegraph Cody。
+
 最简单的方式是运行：
 
 ```bash
@@ -125,6 +131,7 @@ codebase-memory-mcp install -y
 重启客户端后检查 MCP 列表中是否出现 `codebase-memory-mcp`。若工具不可见，先重启或重新连接客户端，不要再次下载或重复安装二进制。
 
 ## MCP 工具
+<!-- mcp-tool-contract: total=16 -->
 
 | 类别 | 工具 | 用途 |
 |---|---|---|

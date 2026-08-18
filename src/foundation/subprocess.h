@@ -51,6 +51,7 @@ typedef struct {
                                   * NULL => discard child output, no tailing */
     cbm_proc_log_cb on_log_line; /* optional per-line callback */
     void *log_ud;                /* user data for on_log_line */
+    long *child_pid_out;         /* optional PID/process ID, filled immediately after spawn */
     int quiet_timeout_ms;        /* <= 0 => no timeout; else kill+HANG after this many
                                   * ms with no new completed log line */
     bool delete_log_on_exit;     /* unlink log_file after reaping */

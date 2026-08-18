@@ -981,13 +981,19 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * extract. */
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     /* Cross-file LSP (type-aware call/usage resolution across files) — the
-     * most expensive phase. CBM_DISABLE_LSP_CROSS=1 opts out (it can SIGSEGV
-     * on large TS projects — see #340/#344); with cross-LSP off, all_defs
-     * stays NULL and the fused resolver simply no-ops cross-file resolution
-     * (per-file LSP already ran during extract). */
+     * most expensive phase. CBM_DISABLE_LSP_CROSS opts out (it can SIGSEGV
+     * on large projects — see #340/#344); CBM_ENABLE_LSP_CROSS explicitly
+     * overrides that opt-out for an experimental worker run. With cross-LSP
+     * off, all_defs stays NULL and the fused resolver simply no-ops cross-file
+     * resolution (per-file LSP already ran during extract). */
     char cbm_lsp_cross_env[CBM_SZ_16];
-    const bool run_cross_lsp = cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cbm_lsp_cross_env,
-                                               sizeof(cbm_lsp_cross_env), NULL) == NULL;
+    const bool force_cross_lsp =
+        cbm_safe_getenv("CBM_ENABLE_LSP_CROSS", cbm_lsp_cross_env, sizeof(cbm_lsp_cross_env),
+                        NULL) != NULL;
+    const bool run_cross_lsp =
+        force_cross_lsp ||
+        cbm_safe_getenv("CBM_DISABLE_LSP_CROSS", cbm_lsp_cross_env, sizeof(cbm_lsp_cross_env),
+                        NULL) == NULL;
     if (!run_cross_lsp) {
         cbm_log_info("lsp_cross.skipped", "reason", "CBM_DISABLE_LSP_CROSS env set");
     }

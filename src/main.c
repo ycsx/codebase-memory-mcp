@@ -360,6 +360,22 @@ static int run_cli(int argc, char **argv) {
     const char *response_out = cli_strip_flag_value(&argc, argv, "--response-out");
     cbm_index_set_worker_role(index_worker, response_out);
 
+#ifdef __APPLE__
+    /* Large macOS projects can deadlock in the cross-file LSP resolver after
+     * extraction (the worker then appears to index forever to both CLI agents
+     * and the UI).  A supervised worker is already the recovery boundary, so
+     * prefer the reliable per-file resolver on macOS unless the caller has
+     * explicitly selected the existing opt-out/override themselves.  The
+     * graph still contains the structural and per-file edges. Advanced users
+     * can opt into the experimental cross-file phase for workers with
+     * CBM_ENABLE_LSP_CROSS=1.
+     */
+    if (index_worker && getenv("CBM_DISABLE_LSP_CROSS") == NULL &&
+        getenv("CBM_ENABLE_LSP_CROSS") == NULL) {
+        cbm_setenv("CBM_DISABLE_LSP_CROSS", "1", 1);
+    }
+#endif
+
 #ifndef _WIN32
     /* #845: a supervised worker must not outlive its supervisor. If the parent
      * dies without reaping us (agent killed, supervisor crashed), an orphaned
@@ -554,10 +570,10 @@ static void print_help(void) {
     printf("  Manual/UI MCP boundaries: Qodo, Warp, JetBrains AI/ACP, Replit,\n");
     printf("  Plandex, SWE-agent, BLACKBOX, GitHub cloud agents, Jules,\n");
     printf("  CodeRabbit.\n");
-    printf("\nTools: index_repository, search_graph, query_graph, trace_path,\n");
+    printf("\nTools (16): index_repository, search_graph, query_graph, trace_path,\n");
     printf("  get_code_snippet, get_graph_schema, get_architecture, search_code,\n");
     printf("  list_projects, delete_project, index_status, detect_changes,\n");
-    printf("  manage_adr, ingest_traces\n");
+    printf("  explain_impact, check_index_coverage, manage_adr, ingest_traces\n");
 }
 
 static int positive_env_int(const char *name, int fallback, int maximum) {

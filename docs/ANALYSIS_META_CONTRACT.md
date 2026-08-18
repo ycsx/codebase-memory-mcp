@@ -1,6 +1,7 @@
 # 可信分析响应契约
 
-> 状态：W1 候选契约
+> 状态：v1 已冻结（W1 验收通过）
+> 实现状态：W2 已落地
 > Schema：[analysis-meta.schema.json](schemas/analysis-meta.schema.json)
 > 适用范围：项目相关的 MCP 原子分析，以及后续 `build_context`、`review_change` 和健康度结果
 
@@ -156,7 +157,7 @@ coverage 代际不匹配不等同于源码过期：如果 graph generation 与�
 
 黄金文件位于 `tests/fixtures/analysis_meta/`。W1 验证 Schema 和状态组合；W2 将同一批样本接入通用 C 响应构建器。
 
-## 9. 当前实现映射与 W2 边界
+## 9. 实现映射与 W2 落地
 
 当前可复用基础：
 
@@ -166,7 +167,7 @@ coverage 代际不匹配不等同于源码过期：如果 graph generation 与�
 - `cbm_git_context_t` 的 branch、head SHA、base SHA 和 worktree 信息。
 - `search_graph`、coverage scope 和 MCP tools/list 的分页信号。
 
-W2 才进入生产代码的工作：
+W2 已完成以下生产代码工作：
 
 - 持久化真正的 `generation_id` 和 `indexed_commit`。
 - 增加 Git dirty 状态。
@@ -174,4 +175,4 @@ W2 才进入生产代码的工作：
 - 首先接入 `index_status` 和 `check_index_coverage`。
 - 迁移旧索引，并保证失败时继续读取上一代图谱。
 
-本周不直接把未冻结的字段散落接入 16 个工具。
+v1 首批接入 `index_status` 和 `check_index_coverage`；其余工具按组合分析需求逐步接入，且不得绕过本契约另建不兼容字段。

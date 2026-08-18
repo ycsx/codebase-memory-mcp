@@ -648,11 +648,19 @@ export function IndexProgress({
   const t = useUiMessages();
   const [jobs, setJobs] = useState<{ slot: number; status: string; path: string; error?: string }[]>([]);
   const [hasActive, setHasActive] = useState(true);
+  const [statusError, setStatusError] = useState<string | null>(null);
   useEffect(() => {
     if (!hasActive) return;
     const poll = setInterval(async () => {
       try {
-        const data = await (await fetch("/api/index-status")).json();
+        const response = await fetch("/api/index-status");
+        if (response.ok === false) {
+          throw new Error(`Index status request failed (${response.status})`);
+        }
+        const data: unknown = await response.json();
+        if (!Array.isArray(data)) {
+          throw new Error("Index status response was invalid");
+        }
         setJobs(data);
         const stillIndexing = data.some((j: { status: string }) => j.status === "indexing");
         /* Empty list = job not visible: the backend keeps finished jobs listed
@@ -667,16 +675,18 @@ export function IndexProgress({
         }
       } catch (error) {
         console.error("[IndexProgress] Poll failed:", error);
+        setStatusError(error instanceof Error ? error.message : "Index status request failed");
+        setHasActive(false);
       }
     }, 2000);
     return () => clearInterval(poll);
   }, [onComplete, hasActive]);
 
-  const active = jobs.filter((j) => j.status === "indexing");
+  const active = statusError ? [] : jobs.filter((j) => j.status === "indexing");
   const completed = jobs.filter((j) => j.status === "done");
   const errors = jobs.filter((j) => j.status === "error");
 
-  if (active.length === 0 && completed.length === 0 && errors.length === 0) return null;
+  if (!statusError && active.length === 0 && completed.length === 0 && errors.length === 0) return null;
 
   return (
     <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 mb-6">
@@ -708,7 +718,16 @@ export function IndexProgress({
           </div>
         </div>
       ))}
-      {(completed.length > 0 || errors.length > 0) && (
+      {statusError && (
+        <div className="flex items-start gap-3 mt-3 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-destructive" role="alert">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+          <div className="min-w-0">
+            <p className="text-[12px] font-semibold">{t.projects.indexingStatusFailed}</p>
+            <p className="text-[10px] opacity-75 mt-1 font-mono">{statusError}</p>
+          </div>
+        </div>
+      )}
+      {(completed.length > 0 || errors.length > 0 || statusError) && (
         <div className="flex justify-end mt-3">
           <button
             onClick={onDismiss}

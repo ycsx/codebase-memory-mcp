@@ -32,6 +32,14 @@ codebase-memory-mcp uninstall
 
 重启 AI 客户端后即可使用。普通代码任务中先调用 `list_projects` 和 `index_status`，只在目标仓库尚未索引时调用 `index_repository`。
 
+## 客户端接入
+
+`install` 共支持 43 个自动/条件接入面：
+<!-- client-surface-contract: total=43 automatic=37 conditional=6 -->
+
+- **自动检测（37 个）**：Claude Code、Codex CLI、Gemini CLI、Zed、OpenCode、Antigravity、Aider、KiloCode、VS Code、Cursor、Windsurf、Augment / Auggie、OpenClaw、Kiro、Junie、Hermes、OpenHands、Cline、Warp、Qwen Code、GitHub Copilot CLI、Factory Droid、Crush、Goose、Mistral Vibe、Qoder CLI、Kimi Code CLI、GitLab Duo CLI、Rovo Dev CLI、Amp、Devin CLI / Local、Tabnine、Amazon Q Developer IDE、CodeBuddy Code CLI、IBM Bob Shell、Pochi、Pi。
+- **条件/显式（6 个）**：Continue / cn、Visual Studio、TRAE、Roo Code、IBM Bob IDE、Sourcegraph Cody。
+
 ## CLI 模式
 
 ```bash

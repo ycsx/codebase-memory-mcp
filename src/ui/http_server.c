@@ -45,6 +45,7 @@
 #include <yyjson/yyjson.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdarg.h>
@@ -56,6 +57,7 @@
 #include <process.h>
 #include <psapi.h> /* GetProcessMemoryInfo */
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -169,7 +171,7 @@ typedef struct {
     atomic_int status; /* 0=idle, 1=running, 2=done, 3=error */
     char error_msg[256];
 #ifndef _WIN32
-    pid_t child_pid; /* tracked for process-kill validation */
+    long child_pid; /* tracked for process-kill validation */
 #endif
 } index_job_t;
 
@@ -1185,6 +1187,27 @@ static bool index_response_has_error(const char *path) {
     return is_error;
 }
 
+static void ui_index_log_line(const char *line, void *ud) {
+    (void)ud;
+    if (line && line[0]) {
+        cbm_ui_log_append(line);
+    }
+}
+
+static int ui_index_quiet_timeout_ms(void) {
+    enum { DEFAULT_TIMEOUT_MS = 900000 }; /* 15 minutes without a log line */
+    const char *value = getenv("CBM_INDEX_WORKER_TIMEOUT_S");
+    if (!value || !value[0]) {
+        return DEFAULT_TIMEOUT_MS;
+    }
+    char *end = NULL;
+    long seconds = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || seconds <= 0 || seconds > INT_MAX / 1000) {
+        return DEFAULT_TIMEOUT_MS;
+    }
+    return (int)(seconds * 1000L);
+}
+
 static void *index_thread_fn(void *arg) {
     index_job_t *job = arg;
     cbm_log_info("ui.index.start", "path", job->root_path);
@@ -1235,177 +1258,71 @@ static void *index_thread_fn(void *arg) {
     DWORD temp_len = GetTempPathW((DWORD)(sizeof(wide_temp) / sizeof(wide_temp[0])), wide_temp);
     if (temp_len > 0 && temp_len < (sizeof(wide_temp) / sizeof(wide_temp[0]))) {
         int written = swprintf(wide_log, sizeof(wide_log) / sizeof(wide_log[0]),
-                               L"%lscbm_index_%d.log", wide_temp, (int)_getpid());
+                               L"%lscbm_index_%d_%llu.log", wide_temp, (int)_getpid(),
+                               job->job_id);
         int response_written =
             swprintf(wide_response, sizeof(wide_response) / sizeof(wide_response[0]),
-                     L"%lscbm_index_%d.response", wide_temp, (int)_getpid());
+                     L"%lscbm_index_%d_%llu.response", wide_temp, (int)_getpid(), job->job_id);
         char *utf8_log = written > 0 ? cbm_wide_to_utf8(wide_log) : NULL;
         char *utf8_response = response_written > 0 ? cbm_wide_to_utf8(wide_response) : NULL;
         if (!utf8_log || !copy_path(log_file, sizeof(log_file), utf8_log)) {
-            snprintf(log_file, sizeof(log_file), "cbm_index_%d.log", (int)_getpid());
+            snprintf(log_file, sizeof(log_file), "cbm_index_%d_%llu.log", (int)_getpid(),
+                     job->job_id);
         }
         if (!utf8_response || !copy_path(response_file, sizeof(response_file), utf8_response)) {
-            snprintf(response_file, sizeof(response_file), "cbm_index_%d.response", (int)_getpid());
+            snprintf(response_file, sizeof(response_file), "cbm_index_%d_%llu.response",
+                     (int)_getpid(), job->job_id);
         }
         free(utf8_log);
         free(utf8_response);
     } else {
-        snprintf(log_file, sizeof(log_file), "cbm_index_%d.log", (int)_getpid());
-        snprintf(response_file, sizeof(response_file), "cbm_index_%d.response", (int)_getpid());
+        snprintf(log_file, sizeof(log_file), "cbm_index_%d_%llu.log", (int)_getpid(), job->job_id);
+        snprintf(response_file, sizeof(response_file), "cbm_index_%d_%llu.response", (int)_getpid(),
+                 job->job_id);
     }
 
-    /* Build command line for CreateProcess through the shared MS-CRT quoter so the
-     * JSON arg's embedded quotes survive the child's argv re-parse — a naive
-     * `"%s"` wrap dropped them, corrupting {"repo_path":"…"} into {repo_path:…}.
-     * --index-worker: this http_server spawn is already the crash-isolation layer,
-     * so the child runs indexing in-process rather than spawning its own supervisor
-     * (avoids redundant process nesting). */
-    char cmdline[2048];
-    const char *const idx_argv[] = {
-        bin,           "cli", "--index-worker", "index_repository", json_arg, "--response-out",
-        response_file, NULL};
-    if (!cbm_build_win_cmdline(cmdline, sizeof(cmdline), idx_argv)) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "index command line too long");
-        atomic_store(&job->status, 3);
-        return NULL;
-    }
-    /* Wide command line: CreateProcessA would re-mangle the UTF-8 repo path through the
-     * ANSI code page at the spawn boundary, so a non-ASCII repo path never reaches the
-     * worker intact (#423/#20). Convert and spawn via CreateProcessW. */
-    wchar_t *wcmd = cbm_utf8_to_wide(cmdline);
-    if (!wcmd) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "index command line conversion failed");
-        atomic_store(&job->status, 3);
-        return NULL;
-    }
-
-    cbm_log_info("ui.index.spawn", "bin", bin, "log", log_file);
-
-    wchar_t *wide_log_path = cbm_utf8_to_wide(log_file);
-    HANDLE hlog = wide_log_path ? CreateFileW(wide_log_path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
-                                : INVALID_HANDLE_VALUE;
-    free(wide_log_path);
-    STARTUPINFOW si_proc = {.cb = sizeof(si_proc)};
-    if (hlog != INVALID_HANDLE_VALUE) {
-        si_proc.dwFlags = STARTF_USESTDHANDLES;
-        si_proc.hStdError = hlog;
-        si_proc.hStdOutput = hlog;
-    }
-    PROCESS_INFORMATION pi = {0};
-    BOOL spawned = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
-                                  cbm_win_background_creation_flags(0), NULL, NULL, &si_proc, &pi);
-    DWORD spawn_error = spawned ? ERROR_SUCCESS : GetLastError();
-    free(wcmd);
-    if (!spawned) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "CreateProcess failed (Windows error %lu)",
-                 (unsigned long)spawn_error);
-        atomic_store(&job->status, 3);
-        if (hlog != INVALID_HANDLE_VALUE)
-            CloseHandle(hlog);
-        (void)cbm_unlink(response_file);
-        return NULL;
-    }
-    if (hlog != INVALID_HANDLE_VALUE)
-        CloseHandle(hlog);
-
-    /* Poll log file while child runs */
-    long tail_pos = 0;
-    for (;;) {
-        DWORD wait = WaitForSingleObject(pi.hProcess, 500);
-        FILE *lf = cbm_fopen(log_file, "r");
-        if (lf) {
-            fseek(lf, tail_pos, SEEK_SET);
-            char line[512];
-            while (fgets(line, sizeof(line), lf)) {
-                size_t l = strlen(line);
-                if (l > 0 && line[l - 1] == '\n')
-                    line[l - 1] = '\0';
-                if (line[0])
-                    cbm_ui_log_append(line);
-            }
-            tail_pos = ftell(lf);
-            fclose(lf);
-        }
-        if (wait == WAIT_OBJECT_0)
-            break;
-    }
-
-    DWORD win_exit = 1;
-    GetExitCodeProcess(pi.hProcess, &win_exit);
-    int exit_code = (int)win_exit;
-    if (exit_code == 0 && index_response_has_error(response_file)) {
-        exit_code = 1;
-    }
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    (void)cbm_unlink(log_file);
-    (void)cbm_unlink(response_file);
 #else
-    snprintf(log_file, sizeof(log_file), "/tmp/cbm_index_%d.log", (int)getpid());
-    snprintf(response_file, sizeof(response_file), "/tmp/cbm_index_%d.response", (int)getpid());
-
-    cbm_log_info("ui.index.fork", "bin", bin, "log", log_file);
-
-    pid_t child_pid = fork();
-    if (child_pid < 0) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "fork failed");
-        atomic_store(&job->status, 3);
-        return NULL;
-    }
-    job->child_pid = child_pid;
-
-    if (child_pid == 0) {
-        FILE *lf = freopen(log_file, "w", stderr);
-        (void)lf;
-        freopen("/dev/null", "w", stdout);
-        execl(bin, bin, "cli", "--index-worker", "index_repository", json_arg, "--response-out",
-              response_file, (char *)NULL);
-        _exit(127);
-    }
-
-    long tail_pos = 0;
-    for (;;) {
-        int wstatus = 0;
-        pid_t wr = waitpid(child_pid, &wstatus, WNOHANG);
-        bool child_done = (wr == child_pid);
-
-        FILE *lf = fopen(log_file, "r");
-        if (lf) {
-            fseek(lf, tail_pos, SEEK_SET);
-            char line[512];
-            while (fgets(line, sizeof(line), lf)) {
-                size_t l = strlen(line);
-                if (l > 0 && line[l - 1] == '\n')
-                    line[l - 1] = '\0';
-                if (line[0])
-                    cbm_ui_log_append(line);
-            }
-            tail_pos = ftell(lf);
-            fclose(lf);
-        }
-
-        if (child_done)
-            break;
-
-        struct timespec ts = {0, 500000000};
-        cbm_nanosleep(&ts, NULL);
-    }
-
-    int wstatus = 0;
-    waitpid(child_pid, &wstatus, 0);
-    int exit_code = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : -1;
-    if (exit_code == 0 && index_response_has_error(response_file)) {
-        exit_code = 1;
-    }
-
-    (void)unlink(log_file);
-    (void)unlink(response_file);
+    snprintf(log_file, sizeof(log_file), "/tmp/cbm_index_%d_%llu.log", (int)getpid(), job->job_id);
+    snprintf(response_file, sizeof(response_file), "/tmp/cbm_index_%d_%llu.response", (int)getpid(),
+             job->job_id);
 #endif
 
+    /* The shared subprocess runner handles argv quoting, safe POSIX fork/exec,
+     * log tailing, crash classification, and a quiet timeout on every platform.
+     * The UI worker is explicitly marked so it runs the index in-process once;
+     * the runner itself is the isolation boundary. */
+    const char *const idx_argv[] = {bin, "cli", "--index-worker", "index_repository", json_arg,
+                                    "--response-out", response_file, NULL};
+    cbm_proc_opts_t proc_opts = {0};
+    proc_opts.bin = bin;
+    proc_opts.argv = idx_argv;
+    proc_opts.log_file = log_file;
+    proc_opts.on_log_line = ui_index_log_line;
+#ifndef _WIN32
+    proc_opts.child_pid_out = &job->child_pid;
+#endif
+    proc_opts.quiet_timeout_ms = ui_index_quiet_timeout_ms();
+    proc_opts.delete_log_on_exit = false;
+
+    cbm_log_info("ui.index.spawn", "bin", bin, "log", log_file);
+    cbm_proc_result_t proc_result = {0};
+    int spawn_rc = cbm_subprocess_run(&proc_opts, &proc_result);
+    int exit_code = spawn_rc != 0 ? -1 : proc_result.exit_code;
+    if (spawn_rc == 0 && proc_result.outcome != CBM_PROC_CLEAN) {
+        snprintf(job->error_msg, sizeof(job->error_msg), "indexing worker ended with %s (exit code %d)",
+                 cbm_proc_outcome_str(proc_result.outcome), proc_result.exit_code);
+        exit_code = -1;
+    } else if (exit_code == 0 && index_response_has_error(response_file)) {
+        exit_code = 1;
+    }
+    (void)cbm_unlink(log_file);
+    (void)cbm_unlink(response_file);
+
     if (exit_code != 0) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "indexing failed (exit code %d)",
-                 exit_code);
+        if (job->error_msg[0] == '\0') {
+            snprintf(job->error_msg, sizeof(job->error_msg), "indexing failed (exit code %d)",
+                     exit_code);
+        }
         atomic_store(&job->status, 3);
     } else {
         atomic_store(&job->status, 2);
@@ -1463,6 +1380,9 @@ static int start_index_job(cbm_http_server_t *srv, const char *root_path, const 
     job->poll_interval_sec = poll_interval_sec;
     job->watcher = srv->watcher;
     job->error_msg[0] = '\0';
+#ifndef _WIN32
+    job->child_pid = 0;
+#endif
     atomic_store(&job->status, 1);
 
     cbm_thread_t tid;

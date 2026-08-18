@@ -10,6 +10,9 @@
 - 图谱：节点包括 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource；关系包括 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等。
 - 覆盖度：`index_status` 和 `check_index_coverage` 报告 `parse_partial`、`skipped`、`not_indexed`。没有记录缺口不等于证明完整覆盖。
 - 客户端：`install` 支持 43 个自动/条件接入面；会按平台、已存在配置和客户端 schema 保守写入 MCP、说明、技能、Agent 与 Hook。
+<!-- client-surface-contract: total=43 automatic=37 conditional=6 -->
+- 37 个自动检测：Claude Code、Codex CLI、Gemini CLI、Zed、OpenCode、Antigravity、Aider、KiloCode、VS Code、Cursor、Windsurf、Augment / Auggie、OpenClaw、Kiro、Junie、Hermes、OpenHands、Cline、Warp、Qwen Code、GitHub Copilot CLI、Factory Droid、Crush、Goose、Mistral Vibe、Qoder CLI、Kimi Code CLI、GitLab Duo CLI、Rovo Dev CLI、Amp、Devin CLI / Local、Tabnine、Amazon Q Developer IDE、CodeBuddy Code CLI、IBM Bob Shell、Pochi、Pi。
+- 6 个条件/显式：Continue / cn、Visual Studio、TRAE、Roo Code、IBM Bob IDE、Sourcegraph Cody。
 - UI：UI/桌面版本提供 loopback 图谱控制台，默认 `http://127.0.0.1:9749`，包含索引、图谱、影响、热点、风险、进程、日志和客户端接入计划。
 - 远程：`serve` 提供带 Bearer Token 的 Streamable HTTP，默认 `analysis` 工具档位；生产环境应使用 TLS 反向代理。
 

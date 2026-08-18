@@ -1601,7 +1601,7 @@ static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
             return CBM_NOT_FOUND;
         }
         char *end = NULL;
-        long parsed = strtol(index->text, &end, CBM_DECIMAL_BASE);
+        long long parsed = strtoll(index->text, &end, CBM_DECIMAL_BASE);
         if (end == index->text || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
             snprintf(p->error, sizeof(p->error), "split list index must be a non-negative integer");
             return CBM_NOT_FOUND;

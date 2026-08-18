@@ -15,6 +15,7 @@ coverage.txt
 # Test fixture temp dirs (created by C test suite in CWD instead of /tmp/)
 cbm_*/
 cli-*/
+.tmp/
 
 # IDE
 .idea/

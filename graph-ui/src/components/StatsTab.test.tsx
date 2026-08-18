@@ -594,6 +594,31 @@ describe("IndexProgress", () => {
     // onDismiss should be called after manual dismissal
     expect(onDismiss).toHaveBeenCalled();
   });
+
+  it("stops polling and exposes an index-status HTTP error", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "conflict" }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const onComplete = vi.fn();
+    const onDismiss = vi.fn();
+    render(<IndexProgress onComplete={onComplete} onDismiss={onDismiss} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(screen.getByText(messages.en.projects.indexingStatusFailed)).toBeInTheDocument();
+    expect(screen.getByText("Index status request failed (409)")).toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("CrossRepositoryPanel", () => {

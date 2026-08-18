@@ -254,8 +254,12 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     HANDLE hlog = INVALID_HANDLE_VALUE;
     STARTUPINFOW si = {.cb = sizeof(si)};
     if (opts->log_file) {
-        hlog = CreateFileA(opts->log_file, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
+        wchar_t *wlog = cbm_utf8_to_wide(opts->log_file);
+        if (wlog) {
+            hlog = CreateFileW(wlog, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+            free(wlog);
+        }
         if (hlog != INVALID_HANDLE_VALUE) {
             si.dwFlags = STARTF_USESTDHANDLES;
             si.hStdError = hlog;
@@ -275,6 +279,9 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         out->exit_code = -1;
         out->term_signal = 0;
         return -1;
+    }
+    if (opts->child_pid_out) {
+        *opts->child_pid_out = (long)pi.dwProcessId;
     }
 
     long tail_pos = 0;
@@ -302,7 +309,11 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     if (opts->log_file && opts->delete_log_on_exit) {
-        DeleteFileA(opts->log_file);
+        wchar_t *wlog = cbm_utf8_to_wide(opts->log_file);
+        if (wlog) {
+            DeleteFileW(wlog);
+            free(wlog);
+        }
     }
 
     out->exit_code = (int)code;
@@ -320,6 +331,9 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         out->exit_code = -1;
         out->term_signal = 0;
         return -1;
+    }
+    if (opts->child_pid_out) {
+        *opts->child_pid_out = (long)pid;
     }
     if (pid == 0) {
         /* Child: redirect stdout+stderr to the log (or discard), then exec.

@@ -1620,6 +1620,15 @@ TEST(cypher_exec_split_index) {
     ASSERT_STR_EQ(filtered.rows[0][0], "4");
     cbm_cypher_result_free(&filtered);
 
+    cbm_cypher_result_t oversized = {0};
+    rc = cbm_cypher_execute(
+        s, "MATCH (f:Function) RETURN split(f.qualified_name, \".\")[999999999999999999999999]",
+        "test", 0, &oversized);
+    ASSERT_TRUE(rc != 0);
+    ASSERT_NOT_NULL(oversized.error);
+    ASSERT_TRUE(strstr(oversized.error, "split list index must be a non-negative integer") != NULL);
+    cbm_cypher_result_free(&oversized);
+
     cbm_store_close(s);
     PASS();
 }

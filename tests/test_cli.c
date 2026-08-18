@@ -838,6 +838,17 @@ TEST(cli_skill_files_content) {
     ASSERT_EQ(CBM_SKILL_COUNT, 1);
     ASSERT(strcmp(sk[0].name, "codebase-memory") == 0);
 
+    const char *const expected_tools[] = {
+        "index_repository", "index_status",         "list_projects",    "delete_project",
+        "search_graph",     "search_code",          "trace_path",       "detect_changes",
+        "query_graph",      "get_graph_schema",     "get_code_snippet", "get_architecture",
+        "explain_impact",   "check_index_coverage", "manage_adr",       "ingest_traces",
+    };
+    ASSERT_EQ(sizeof(expected_tools) / sizeof(expected_tools[0]), 16U);
+    for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
+        ASSERT(strstr(sk[0].content, expected_tools[i]) != NULL);
+    }
+
     /* Exploring capabilities */
     ASSERT(strstr(sk[0].content, "search_graph") != NULL);
     ASSERT(strstr(sk[0].content, "get_graph_schema") != NULL);
@@ -859,6 +870,22 @@ TEST(cli_skill_files_content) {
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
+
+    char *readme = read_test_file_alloc("README.md");
+    ASSERT_NOT_NULL(readme);
+    ASSERT(strstr(readme, "mcp-tool-contract: total=16") != NULL);
+    for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
+        ASSERT(strstr(readme, expected_tools[i]) != NULL);
+    }
+    free(readme);
+
+    char *main_source = read_test_file_alloc("src/main.c");
+    ASSERT_NOT_NULL(main_source);
+    ASSERT(strstr(main_source, "Tools (16)") != NULL);
+    for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
+        ASSERT(strstr(main_source, expected_tools[i]) != NULL);
+    }
+    free(main_source);
 
     PASS();
 }
@@ -2523,7 +2550,7 @@ TEST(cli_supported_agent_surfaces_match_installers) {
     char *data = read_test_file_alloc("README.md");
     if (!data)
         FAIL("could not read README.md for supported-agent contract");
-    if (!strstr(data, "43 supported automatic/conditional client surfaces")) {
+    if (!strstr(data, "client-surface-contract: total=43 automatic=37 conditional=6")) {
         free(data);
         FAIL("README must describe all 43 automatic/conditional client surfaces accurately");
     }
@@ -2538,7 +2565,7 @@ TEST(cli_supported_agent_surfaces_match_installers) {
     data = read_test_file_alloc("pkg/npm/README.md");
     if (!data)
         FAIL("could not read npm README for supported-agent contract");
-    if (!strstr(data, "43 supported automatic/conditional client surfaces")) {
+    if (!strstr(data, "client-surface-contract: total=43 automatic=37 conditional=6")) {
         free(data);
         FAIL("npm README must describe all 43 automatic/conditional client surfaces accurately");
     }
@@ -2583,8 +2610,7 @@ TEST(cli_supported_agent_surfaces_match_installers) {
     data = read_test_file_alloc("docs/llms.txt");
     if (!data)
         FAIL("could not read docs/llms.txt for supported-agent contract");
-    if (!strstr(data, "43 automatic/conditional client surfaces") ||
-        !strstr(data, "37 automatically detected") || !strstr(data, "6 conditional/explicit")) {
+    if (!strstr(data, "client-surface-contract: total=43 automatic=37 conditional=6")) {
         free(data);
         FAIL("llms.txt must describe the 43-surface 37+6 support matrix accurately");
     }
