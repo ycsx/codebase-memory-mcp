@@ -9,7 +9,7 @@
 
 - **本地优先**：索引、查询、向量语义搜索和 LSP 辅助解析均在本机执行；项目不内置大模型，也不要求 API Key、Docker 或语言运行时。
 - **结构化图谱**：包含 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource 等节点，以及 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等关系。
-- **16 个 MCP 工具**：索引、项目管理、图谱搜索、调用链、代码片段、架构、影响分析、覆盖度校验、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
+- **18 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
 - **Tree-sitter + Hybrid LSP**：内置多语言、配置、模板和基础设施文件解析；对 Python、TypeScript/JavaScript/JSX/TSX、PHP、C#、Go、C/C++、Java、Kotlin、Rust、Perl 等语言提供类型和调用解析增强。具体结果以当前二进制的 `get_architecture` 和 `index_status` 为准。
 - **覆盖度可审计**：索引结果会区分 `parse_partial`、`skipped` 和按规则排除的 `not_indexed` 文件。没有记录缺口不等于证明仓库完整覆盖，重要结论应使用 `check_index_coverage` 并在必要时回退源码检查。
 - **可视化与桌面控制**：UI 只绑定 loopback，默认端口 `9749`，提供项目、图谱、影响、热点、文件风险、进程、日志和客户端接入计划视图。
@@ -80,6 +80,9 @@ codebase-memory-mcp cli get_code_snippet '{"project":"my-project","qualified_nam
 
 # 查询调用者和被调用者
 codebase-memory-mcp cli trace_path '{"project":"my-project","function_name":"ProcessOrder","direction":"both"}'
+
+# 按任务编译可回溯上下文
+codebase-memory-mcp cli build_context '{"project":"my-project","task":"修改订单校验并补齐相关测试","target":"ProcessOrder","token_budget":4000,"evidence_level":"analysis"}'
 ```
 
 索引模式：`fast` 适合快速结构索引，`moderate`（推荐）包含过滤文件和语义边，`full` 包含全部文件及相似/语义边；`cross-repo-intelligence` 用于已索引项目之间的路由和消息关联。
@@ -131,7 +134,7 @@ codebase-memory-mcp install -y
 重启客户端后检查 MCP 列表中是否出现 `codebase-memory-mcp`。若工具不可见，先重启或重新连接客户端，不要再次下载或重复安装二进制。
 
 ## MCP 工具
-<!-- mcp-tool-contract: total=16 -->
+<!-- mcp-tool-contract: total=18 -->
 
 | 类别 | 工具 | 用途 |
 |---|---|---|
@@ -140,11 +143,43 @@ codebase-memory-mcp install -y
 | 发现 | `search_graph`、`search_code` | 结构化符号搜索和图谱增强的文本搜索。 |
 | 关系 | `trace_path` | 追踪调用者、被调用者、数据流和跨服务链路；别名 `trace_call_path`。 |
 | 源码 | `get_code_snippet` | 根据 `search_graph` 返回的限定名读取函数、类或符号源码。 |
-| 分析 | `get_architecture`、`explain_impact`、`detect_changes` | 架构概览、变更影响和 Git diff 风险分析。 |
+| 分析 | `get_architecture`、`explain_impact`、`detect_changes`、`review_change` | 架构概览、单点影响、Git diff 和确定性变更评审。 |
+| 上下文 | `build_context` | 按任务、目标和 Token 预算编译可回溯的证据包；目标模糊时返回候选。 |
 | 校验 | `check_index_coverage`、`get_graph_schema` | 检查文件/目录覆盖度和图谱 schema。 |
 | 深度/记录 | `query_graph`、`manage_adr`、`ingest_traces` | 只读 Cypher 查询、架构决策记录和运行时调用 trace。 |
 
-推荐的发现顺序：`search_graph` 找候选，`trace_path` 看关系，`get_code_snippet` 验证定义；只有需要聚合、多跳、架构或影响分析时再使用 `query_graph`、`get_architecture` 或 `explain_impact`。`search_graph` 和 `query_graph` 返回分页/行数限制时，必须检查 `has_more`、`offset` 或 `LIMIT`。
+推荐的任务顺序：需要完整上下文时优先调用 `build_context`；需要手动核验时使用 `search_graph` 找候选，`trace_path` 看关系，`get_code_snippet` 验证定义；只有需要聚合、多跳、架构或影响分析时再使用 `query_graph`、`get_architecture` 或 `explain_impact`。`search_graph` 和 `query_graph` 返回分页/行数限制时，必须检查 `has_more`、`offset` 或 `LIMIT`。
+
+### `review_change` 变更评审
+
+`review_change` 将 Git ref 的变更文件、变更符号、入站影响、公共 API/路由、跨服务信号、测试和文档候选汇总为一个确定性结果。它返回 `pass`、`warn`、`block` 或 `unknown`，并始终携带 `analysis_meta` 与限制说明；它不调用 LLM，也不把 `unknown` 当作 `pass`。常用调用：
+
+```bash
+codebase-memory-mcp cli review_change --project my-project --since HEAD --depth 2 --token-budget 4000
+```
+
+W4 还提供了一个无第三方依赖的 CI 评论适配器。它读取仓库中的 `CODEOWNERS`，把 Owner、规则状态和限制写成稳定 Markdown，并用当前 commit 标记更新已有评论，避免重试时刷屏。默认只发表评论，不阻断合并：
+
+```bash
+python scripts/review-change-comment.py \
+  --binary ./build/c/codebase-memory-mcp \
+  --root . --project my-project --since "$GITHUB_BASE_REF" \
+  --platform github --repository "$GITHUB_REPOSITORY" \
+  --number "$PR_NUMBER" --dry-run
+```
+
+去掉 `--dry-run` 并提供 `GITHUB_TOKEN` 或 `GITLAB_TOKEN` 后会更新对应 PR/MR 评论；只有显式增加 `--fail-on-block` 才会在规则阻断时返回非零退出码。规则确认/忽略可用 `--rule-action change.public_api=confirm` 记录到 `.codebase-memory/review-telemetry.jsonl`，也可用 `--telemetry-file` 指定路径。
+
+### `build_context` 离线黄金评测
+
+仓库内置 W3 黄金任务，覆盖符号/文件定位、歧义候选、Token 预算、证据等级、文档/测试证据和 `diff_ref`。评测脚本会创建临时本地仓库并使用本地 Git 提交，不访问网络：
+
+```bash
+bash scripts/eval-build-context.sh ./build/codebase-memory-mcp
+```
+
+没有可执行构建产物时脚本返回 `77` 并报告 `SKIP`；黄金数据位于
+`tests/fixtures/build_context_golden.json`。脚本检查目标召回、重复请求排序稳定性、预算上限和截断/partial 信号。
 
 ## 远程 MCP（Codex）
 

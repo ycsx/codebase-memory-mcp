@@ -6,6 +6,8 @@ import type { GraphData } from "../../lib/types";
 import { HotspotsView } from "./HotspotsView";
 import { ImpactView } from "./ImpactView";
 import { ImpactQueryView } from "./ImpactQueryView";
+import { ContextView } from "./ContextView";
+import { ReviewChangeView } from "./ReviewChangeView";
 
 const callToolMock = vi.hoisted(() => vi.fn());
 vi.mock("../../api/rpc", () => ({ callTool: callToolMock }));
@@ -204,6 +206,95 @@ describe("ImpactQueryView", () => {
       query: "saveOrder",
       depth: 2,
       target: "demo.src.orders.saveOrder",
+    });
+  });
+});
+
+describe("ContextView", () => {
+  afterEach(() => callToolMock.mockReset());
+
+  it("submits W3 inputs and renders resolved evidence, budget, and limitations", async () => {
+    callToolMock.mockResolvedValue({
+      project: "demo",
+      task: "修复订单校验",
+      evidence_level: "audit",
+      resolved_target: {
+        id: 1,
+        name: "saveOrder",
+        qualified_name: "demo.src.orders.saveOrder",
+        file_path: "src/orders.ts",
+        in_calls: 2,
+        out_calls: 1,
+      },
+      evidence: [{
+        id: 1,
+        name: "saveOrder",
+        qualified_name: "demo.src.orders.saveOrder",
+        file_path: "src/orders.ts",
+        callers: ["checkout"],
+        callees: ["validateOrder"],
+      }],
+      budget: { requested_tokens: 1200, estimated_tokens: 800, truncated: true },
+      limitations: ["动态调用可能未被捕获。"],
+      analysis_meta: { result: { status: "partial" }, confidence: { level: "medium" } },
+    });
+
+    render(<ContextView project="demo" data={DATA} onOpenExplore={() => {}} />);
+    fireEvent.change(screen.getByLabelText("上下文任务"), { target: { value: "修复订单校验" } });
+    fireEvent.change(screen.getByLabelText("上下文目标"), { target: { value: "saveOrder" } });
+    fireEvent.change(screen.getByLabelText("Token 预算"), { target: { value: "1200" } });
+    fireEvent.change(screen.getByLabelText("证据等级"), { target: { value: "audit" } });
+    fireEvent.click(screen.getByRole("button", { name: "编译上下文" }));
+
+    expect((await screen.findAllByText("saveOrder")).length).toBeGreaterThan(0);
+    expect(screen.getByText("动态调用可能未被捕获。")).toBeInTheDocument();
+    expect(screen.getByText("已按预算裁剪")).toBeInTheDocument();
+    expect(callToolMock).toHaveBeenCalledWith("build_context", {
+      project: "demo",
+      task: "修复订单校验",
+      target: "saveOrder",
+      token_budget: 1200,
+      evidence_level: "audit",
+      include_docs: false,
+      include_tests: false,
+    });
+  });
+});
+
+describe("ReviewChangeView", () => {
+  afterEach(() => callToolMock.mockReset());
+
+  it("submits the deterministic review contract and renders rules plus impact summary", async () => {
+    callToolMock.mockResolvedValue({
+      status: "warn",
+      risk: "high",
+      risk_label_zh: "高",
+      summary_zh: "已完成静态变更影响分析。",
+      changed_files: ["src/orders.ts"],
+      changed_symbols: [{ id: 1, name: "saveOrder", qualified_name: "demo.src.orders.saveOrder", file_path: "src/orders.ts" }],
+      impacts: [{ id: 2, name: "checkout", qualified_name: "demo.src.checkout.checkout", file_path: "src/checkout.ts", hop: 1 }],
+      rules: [{ id: "change.missing_tests", status: "warn", message: "缺少测试证据" }],
+      summary: { changed_files: 1, changed_symbols: 1, direct_impacts: 1, indirect_impacts: 0, affected_files: 1, tests: 0 },
+      limitations: ["静态关系是最佳努力信号。"],
+      analysis_meta: { result: { status: "complete" }, freshness: { status: "current" } },
+    });
+
+    render(<ReviewChangeView project="demo" data={DATA} onOpenExplore={() => {}} />);
+    fireEvent.change(screen.getByLabelText("评审 Git ref"), { target: { value: "origin/main" } });
+    fireEvent.click(screen.getByRole("button", { name: "评审变更" }));
+
+    expect(await screen.findByText("已完成静态变更影响分析。")).toBeInTheDocument();
+    expect(screen.getByText("change.missing_tests")).toBeInTheDocument();
+    expect(screen.getByText("直接影响")).toBeInTheDocument();
+    expect(screen.getByText("静态关系是最佳努力信号。")).toBeInTheDocument();
+    expect(callToolMock).toHaveBeenCalledWith("review_change", {
+      project: "demo",
+      since: "origin/main",
+      depth: 2,
+      token_budget: 4000,
+      evidence_level: "analysis",
+      include_tests: true,
+      include_docs: true,
     });
   });
 });

@@ -711,7 +711,7 @@ Fastjson 的价值不在于多识别一个库，而在于建立了一类可推�
 
 ---
 
-## 六、备份页：16 个 MCP 工具如何分工
+## 六、备份页：18 个 MCP 工具如何分工
 
 正式演示不必全部展示，答疑时按问题类型说明：
 
@@ -723,6 +723,7 @@ Fastjson 的价值不在于多识别一个库，而在于建立了一类可推�
 | 项目怎么组织 | `get_architecture` | 语言、包、入口、热点、边界、层次、社区 |
 | 复杂多跳问题 | `query_graph` | openCypher 子集聚合与路径查询 |
 | 改动影响谁 | `detect_changes` / `explain_impact` | 受影响符号、入口、测试与风险分级 |
+| 一次性准备任务上下文 | `build_context` | 按目标、证据等级和 Token 预算编译可回溯证据包 |
 | 结果是否可信 | `index_status` / `check_index_coverage` | 缺口、新鲜度、未索引和回退建议 |
 | 精确字面量 | `search_code` 或 `rg` | 错误信息、配置值、字符串匹配 |
 | 长期架构意图 | `manage_adr` | 跨会话保存架构决策 |

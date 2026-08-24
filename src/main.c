@@ -570,10 +570,11 @@ static void print_help(void) {
     printf("  Manual/UI MCP boundaries: Qodo, Warp, JetBrains AI/ACP, Replit,\n");
     printf("  Plandex, SWE-agent, BLACKBOX, GitHub cloud agents, Jules,\n");
     printf("  CodeRabbit.\n");
-    printf("\nTools (16): index_repository, search_graph, query_graph, trace_path,\n");
+    printf("\nTools (18): index_repository, search_graph, query_graph, trace_path,\n");
     printf("  get_code_snippet, get_graph_schema, get_architecture, search_code,\n");
     printf("  list_projects, delete_project, index_status, detect_changes,\n");
-    printf("  explain_impact, check_index_coverage, manage_adr, ingest_traces\n");
+    printf("  explain_impact, build_context, review_change, check_index_coverage, manage_adr, "
+           "ingest_traces\n");
 }
 
 static int positive_env_int(const char *name, int fallback, int maximum) {

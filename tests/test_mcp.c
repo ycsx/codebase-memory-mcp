@@ -412,6 +412,8 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "delete_project"));
     ASSERT_NOT_NULL(strstr(json, "index_status"));
     ASSERT_NOT_NULL(strstr(json, "check_index_coverage"));
+    ASSERT_NOT_NULL(strstr(json, "build_context"));
+    ASSERT_NOT_NULL(strstr(json, "review_change"));
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
     ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
@@ -455,6 +457,8 @@ TEST(mcp_tools_have_behavior_annotations) {
         {"delete_project", false, true, true, false},
         {"index_status", false, true, true, false},
         {"check_index_coverage", false, true, true, false},
+        {"build_context", false, true, true, false},
+        {"review_change", false, true, true, false},
         {"detect_changes", false, true, true, false},
         {"manage_adr", false, true, false, false},
         {"ingest_traces", false, false, false, false},
@@ -1114,7 +1118,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(strstr(resp, "\"id\":200"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
     ASSERT_NOT_NULL(strstr(resp, "index_repository"));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
+    ASSERT_NOT_NULL(strstr(resp, "review_change"));
     ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
     free(resp);
 
@@ -1123,7 +1127,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
+    ASSERT_NOT_NULL(strstr(resp, "review_change"));
     ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
     free(resp);
 
@@ -1132,8 +1136,19 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
         "{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":201"));
+    /* W3 adds the seventeenth tool, so the second eight-item page advertises
+     * the final one-item page through nextCursor. */
+    ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\":\"16\""));
+    ASSERT_NOT_NULL(strstr(resp, "detect_changes"));
+    free(resp);
+
+    resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/"
+                                      "list\",\"params\":{\"cursor\":\"16\"}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"id\":203"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
     ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
+    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -1157,8 +1172,10 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     ASSERT_NOT_NULL(resp);
     static const char *const analysis_tools[] = {
         "search_graph",     "query_graph",      "trace_path",           "explain_impact",
-        "get_code_snippet", "get_graph_schema", "get_architecture",     "search_code",
-        "list_projects",    "index_status",     "check_index_coverage", "detect_changes",
+        "build_context",    "review_change",     "get_code_snippet",    "get_graph_schema",
+        "get_architecture",
+        "search_code",      "list_projects",    "index_status",         "check_index_coverage",
+        "detect_changes",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -2208,6 +2225,213 @@ TEST(tool_explain_impact_ambiguous_candidates) {
     ASSERT_NOT_NULL(strstr(inner, "impact-ambiguous.user.renderPanel"));
     free(inner);
     free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* W3 contract: build_context must reject a non-positive budget before doing
+ * any graph work. This keeps an accidental zero/default budget from being
+ * interpreted as unlimited output. */
+TEST(tool_build_context_rejects_invalid_token_budget) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":625,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"build_context\",\"arguments\":{"
+                                   "\"project\":\"w3-budget\",\"task\":\"change renderPanel\","
+                                   "\"token_budget\":0}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
+    ASSERT_NOT_NULL(strstr(resp, "token_budget"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* W4 contract: review_change validates the same positive budget boundary as
+ * build_context and remains deterministic without an LLM. */
+TEST(tool_review_change_rejects_invalid_token_budget) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":629,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"review_change\",\"arguments\":{"
+             "\"project\":\"w4-budget\",\"token_budget\":0}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
+    ASSERT_NOT_NULL(strstr(resp, "token_budget"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* W4 contract: an unavailable Git project is an explicit unknown result, not
+ * a false pass, and still exposes rule/metadata fields for UI consumers. */
+TEST(tool_review_change_unknown_project_is_not_pass) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_handle_tool(srv, "review_change", "{\"project\":\"w4-no-such-project\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"unknown\""));
+    ASSERT_NOT_NULL(strstr(resp, "\"risk\":\"unknown\""));
+    ASSERT_NOT_NULL(strstr(resp, "\"rules\""));
+    ASSERT_NOT_NULL(strstr(resp, "analysis_meta"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* W3 contract: a target that resolves to more than one equally plausible
+ * symbol must return candidates and stop. It must not silently choose the
+ * first graph row and manufacture a context package for the wrong symbol. */
+TEST(tool_build_context_ambiguous_target_returns_candidates) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "context-ambiguous";
+    cbm_mcp_server_set_project(srv, proj);
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/tmp/context-ambiguous"), CBM_STORE_OK);
+
+    cbm_node_t first = {.project = proj,
+                        .label = "Function",
+                        .name = "renderPanel",
+                        .qualified_name = "context-ambiguous.admin.renderPanel",
+                        .file_path = "src/admin.c",
+                        .start_line = 1,
+                        .end_line = 10};
+    cbm_node_t second = {.project = proj,
+                         .label = "Function",
+                         .name = "renderPanel",
+                         .qualified_name = "context-ambiguous.user.renderPanel",
+                         .file_path = "src/user.c",
+                         .start_line = 1,
+                         .end_line = 10};
+    ASSERT_GT(cbm_store_upsert_node(st, &first), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &second), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":626,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"build_context\",\"arguments\":{"
+             "\"project\":\"context-ambiguous\",\"task\":\"change renderPanel\","
+             "\"target\":\"renderPanel\",\"token_budget\":256}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "candidates"));
+    ASSERT_NOT_NULL(strstr(inner, "context-ambiguous.admin.renderPanel"));
+    ASSERT_NOT_NULL(strstr(inner, "context-ambiguous.user.renderPanel"));
+    ASSERT_NOT_NULL(strstr(inner, "\"status\":\"partial\""));
+    ASSERT_NOT_NULL(strstr(inner, "candidate_resolution"));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* W3 contract: even a budget-constrained result carries the canonical
+ * analysis metadata and an explicit limitations array. Consumers must be
+ * able to distinguish an intentionally clipped context from a complete one.
+ * The exact evidence ranking is deliberately not asserted here. */
+TEST(tool_build_context_budget_result_has_analysis_meta_and_limitations) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "context-budget";
+    cbm_mcp_server_set_project(srv, proj);
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/tmp/context-budget"), CBM_STORE_OK);
+
+    cbm_node_t target = {.project = proj,
+                         .label = "Function",
+                         .name = "renderPanel",
+                         .qualified_name = "context-budget.ui.renderPanel",
+                         .file_path = "src/ui.c",
+                         .start_line = 10,
+                         .end_line = 60};
+    cbm_node_t caller = {.project = proj,
+                         .label = "Function",
+                         .name = "openPage",
+                         .qualified_name = "context-budget.routes.openPage",
+                         .file_path = "src/routes.c",
+                         .start_line = 1,
+                         .end_line = 20};
+    int64_t target_id = cbm_store_upsert_node(st, &target);
+    int64_t caller_id = cbm_store_upsert_node(st, &caller);
+    ASSERT_GT(target_id, 0);
+    ASSERT_GT(caller_id, 0);
+    cbm_edge_t edge = {
+        .project = proj, .source_id = caller_id, .target_id = target_id, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":627,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"build_context\",\"arguments\":{"
+                                   "\"project\":\"context-budget\",\"task\":\"change renderPanel\","
+                                   "\"target\":\"renderPanel\",\"token_budget\":1,"
+                                   "\"evidence_level\":\"analysis\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "analysis_meta"));
+    ASSERT_NOT_NULL(strstr(inner, "limitations"));
+    ASSERT_NOT_NULL(strstr(inner, "token_budget"));
+    ASSERT_NOT_NULL(strstr(inner, "truncated"));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* W3 ranking contract: candidates are sorted by explicit score and then by
+ * qualified name, so repeated calls do not depend on SQLite row order. */
+TEST(tool_build_context_ranking_is_stable_and_explained) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "context-ranking";
+    cbm_mcp_server_set_project(srv, proj);
+    ASSERT_EQ(cbm_store_upsert_project(st, proj, "/tmp/context-ranking"), CBM_STORE_OK);
+
+    cbm_node_t later = {.project = proj,
+                        .label = "Function",
+                        .name = "renderPanel",
+                        .qualified_name = "context-ranking.z.renderPanel",
+                        .file_path = "src/z.c",
+                        .start_line = 1,
+                        .end_line = 5};
+    cbm_node_t earlier = {.project = proj,
+                          .label = "Function",
+                          .name = "renderPanel",
+                          .qualified_name = "context-ranking.a.renderPanel",
+                          .file_path = "src/a.c",
+                          .start_line = 1,
+                          .end_line = 5};
+    ASSERT_GT(cbm_store_upsert_node(st, &later), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &earlier), 0);
+
+    const char *request = "{\"jsonrpc\":\"2.0\",\"id\":628,\"method\":\"tools/call\","
+                          "\"params\":{\"name\":\"build_context\",\"arguments\":{"
+                          "\"project\":\"context-ranking\",\"task\":\"change renderPanel\","
+                          "\"target\":\"renderPanel\",\"token_budget\":4000,"
+                          "\"evidence_level\":\"scout\"}}}";
+    char *first_response = cbm_mcp_server_handle(srv, request);
+    char *second_response = cbm_mcp_server_handle(srv, request);
+    ASSERT_NOT_NULL(first_response);
+    ASSERT_NOT_NULL(second_response);
+    char *first = extract_text_content(first_response);
+    char *second = extract_text_content(second_response);
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(second);
+    const char *first_a = strstr(first, "context-ranking.a.renderPanel");
+    const char *first_z = strstr(first, "context-ranking.z.renderPanel");
+    const char *second_a = strstr(second, "context-ranking.a.renderPanel");
+    const char *second_z = strstr(second, "context-ranking.z.renderPanel");
+    ASSERT(first_a && first_z && first_a < first_z);
+    ASSERT(second_a && second_z && second_a < second_z);
+    ASSERT_NOT_NULL(strstr(first, "\"rank\":1"));
+    ASSERT_NOT_NULL(strstr(first, "target_name_match"));
+    ASSERT_NOT_NULL(strstr(first, "\"neighbor_limit\":4"));
+    free(first);
+    free(second);
+    free(first_response);
+    free(second_response);
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -7394,6 +7618,12 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_missing_function_name);
     RUN_TEST(tool_explain_impact_exact_symbol);
     RUN_TEST(tool_explain_impact_ambiguous_candidates);
+    RUN_TEST(tool_build_context_rejects_invalid_token_budget);
+    RUN_TEST(tool_review_change_rejects_invalid_token_budget);
+    RUN_TEST(tool_review_change_unknown_project_is_not_pass);
+    RUN_TEST(tool_build_context_ambiguous_target_returns_candidates);
+    RUN_TEST(tool_build_context_budget_result_has_analysis_meta_and_limitations);
+    RUN_TEST(tool_build_context_ranking_is_stable_and_explained);
     RUN_TEST(tool_explain_impact_file_aggregates_symbols);
     RUN_TEST(tool_explain_impact_filters_docs_and_merges_module_file_candidates);
     RUN_TEST(tool_trace_call_path_ambiguous);

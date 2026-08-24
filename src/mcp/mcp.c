@@ -1,5 +1,5 @@
 /*
- * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 14 graph tools.
+ * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 18 graph tools.
  *
  * Uses yyjson for fast JSON parsing/building.
  * Single-threaded event loop: read line → parse → dispatch → respond.
@@ -58,6 +58,7 @@ enum {
 #include "mcp/index_supervisor.h"
 #include "mcp/compact_out.h"
 #include "mcp/usage_stats.h"
+#include "context/build_context.h"
 #include "foundation/str_util.h"
 #include "foundation/workspace.h"
 #include "foundation/dump_verify.h"
@@ -483,6 +484,36 @@ static const tool_def_t TOOLS[] = {
      "\"limit\":{\"type\":\"integer\",\"default\":300,\"minimum\":1,\"maximum\":2000}"
      "},\"required\":[\"project\",\"query\"]}"},
 
+    {"build_context", "Build context",
+     "Compile a bounded, deterministic context package for an analysis task. Resolves an optional "
+     "file or symbol target, returns candidates when ambiguous, and includes deduplicated graph "
+     "node/neighbor evidence. The response is best-effort and carries analysis_meta limitations.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"task\":{\"type\":\"string\"},\"target\":{\"type\":\"string\"},"
+     "\"diff_ref\":{\"type\":\"string\",\"description\":\"Optional Git diff/base ref\"},"
+     "\"token_budget\":{\"type\":\"integer\",\"default\":4000,\"minimum\":1},"
+     "\"include_docs\":{\"type\":\"boolean\",\"default\":false},"
+     "\"include_tests\":{\"type\":\"boolean\",\"default\":false},"
+     "\"evidence_level\":{\"type\":\"string\",\"enum\":[\"scout\",\"analysis\",\"audit\"],"
+     "\"default\":\"analysis\"}},\"required\":[\"project\",\"task\"]}"},
+
+    {"review_change", "Review change",
+     "Review a Git change deterministically. Detects changed files and symbols, traces inbound "
+     "impact, identifies public API and cross-service signals, reports test/documentation gaps, "
+     "and returns pass, warn, block, or unknown with analysis_meta evidence. This is static graph "
+     "analysis and does not require an LLM.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"base_branch\":{\"type\":\"string\",\"default\":\"main\"},"
+     "\"since\":{\"type\":\"string\",\"description\":\"Git ref to compare from; takes precedence "
+     "over base_branch.\"},"
+     "\"depth\":{\"type\":\"integer\",\"default\":2,\"minimum\":1},"
+     "\"token_budget\":{\"type\":\"integer\",\"default\":4000,\"minimum\":1},"
+     "\"evidence_level\":{\"type\":\"string\",\"enum\":[\"scout\",\"analysis\",\"audit\"],"
+     "\"default\":\"analysis\"},"
+     "\"include_docs\":{\"type\":\"boolean\",\"default\":true},"
+     "\"include_tests\":{\"type\":\"boolean\",\"default\":true}},"
+     "\"required\":[\"project\"]}"},
+
     {"get_code_snippet", "Get code snippet",
      "Read source code for a function/class/symbol. IMPORTANT: First call search_graph to find the "
      "exact qualified_name, then pass it here. This is a read tool, not a search tool. Accepts "
@@ -631,6 +662,8 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"query_graph", false, true, true, false},
     {"trace_path", false, true, true, false},
     {"explain_impact", false, true, true, false},
+    {"build_context", false, true, true, false},
+    {"review_change", false, true, true, false},
     {"get_code_snippet", false, true, true, false},
     {"get_graph_schema", false, true, true, false},
     {"get_architecture", false, true, true, false},
@@ -688,9 +721,10 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
 
 static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",      "trace_path",           "explain_impact",
-        "get_code_snippet", "get_graph_schema", "get_architecture",     "search_code",
-        "list_projects",    "index_status",     "check_index_coverage", "detect_changes",
+        "search_graph",         "query_graph",    "trace_path",       "explain_impact",
+        "build_context",        "review_change",  "get_code_snippet", "get_graph_schema",
+        "get_architecture",     "search_code",    "list_projects",    "index_status",
+        "check_index_coverage", "detect_changes",
     };
     static const char *const scout_tools[] = {
         "search_graph",     "trace_path",    "explain_impact", "get_code_snippet",
@@ -1043,10 +1077,10 @@ static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
         "paths, configs, and non-code text, and use them to verify incomplete graph coverage.";
     static const char REVIEW_TEMPLATE[] =
         "Review change impact in project \"%s\" for: %s\n\n"
-        "Use detect_changes with base_branch \"%s\", then trace_path(direction=\"both\", "
-        "include_tests=true) for affected callers, callees, and tests. Read exact definitions "
-        "with get_code_snippet and use query_graph for cross-boundary patterns. Report affected "
-        "callers, tests, boundaries, and risks; do not modify files.";
+        "Use review_change with since/base_branch \"%s\" for the deterministic diff, impact, "
+        "test, documentation, contract, and risk summary. Follow up with trace_path or "
+        "get_code_snippet only when the returned evidence needs verification. Treat unknown or "
+        "truncated results as insufficient, and do not modify files.";
 
     size_t text_size = strlen(project) + strlen(request) + strlen(base_branch) +
                        (is_explore ? sizeof(EXPLORE_TEMPLATE) : sizeof(REVIEW_TEMPLATE));
@@ -1088,7 +1122,8 @@ static const char MCP_SERVER_INSTRUCTIONS[] =
     "architecture, cross-service behavior, or hotspots, prefer the code graph: use search_graph to "
     "find symbols, "
     "trace_path for callers and callees, get_code_snippet for exact source, query_graph for "
-    "complex multi-hop patterns, explain_impact for change consequences, and get_architecture for "
+    "complex multi-hop patterns, explain_impact for change consequences, review_change for "
+    "deterministic Git review, and get_architecture for "
     "orientation. Do not infer call or impact relationships from import/grep counts alone. Fall "
     "back "
     "to direct source search when graph coverage is insufficient. "
@@ -1102,7 +1137,8 @@ static const char MCP_SERVER_INSTRUCTIONS[] =
 static const char MCP_ANALYSIS_SERVER_INSTRUCTIONS[] =
     "This is the analysis tool profile; graph and index mutation tools are unavailable. Use "
     "list_projects and index_status to select a current graph project, then use search_graph, "
-    "trace_path, explain_impact, get_code_snippet, query_graph, and get_architecture for "
+    "trace_path, explain_impact, review_change, get_code_snippet, query_graph, and "
+    "get_architecture for "
     "structural, "
     "call, dependency, impact, data-flow, and cross-service analysis. Use search_code or "
     "filesystem "
@@ -9126,6 +9162,854 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     return result;
 }
 
+/* Build a context response and attach the canonical freshness/coverage
+ * contract owned by this MCP layer. The context builder itself stays
+ * independent of the server cache and only consumes a query store. */
+static char *handle_build_context(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    char *task = cbm_mcp_get_string_arg(args, "task");
+    char *target = cbm_mcp_get_string_arg(args, "target");
+    char *diff_ref = cbm_mcp_get_string_arg(args, "diff_ref");
+    char *evidence_level = cbm_mcp_get_string_arg(args, "evidence_level");
+    int token_budget = cbm_mcp_get_int_arg(args, "token_budget", 4000);
+    bool include_docs = cbm_mcp_get_bool_arg(args, "include_docs");
+    bool include_tests = cbm_mcp_get_bool_arg(args, "include_tests");
+    if (token_budget <= 0) {
+        free(project);
+        free(task);
+        free(target);
+        free(diff_ref);
+        free(evidence_level);
+        return cbm_mcp_text_result("token_budget must be greater than zero", true);
+    }
+    if (evidence_level && evidence_level[0] && strcmp(evidence_level, "scout") != 0 &&
+        strcmp(evidence_level, "analysis") != 0 && strcmp(evidence_level, "audit") != 0) {
+        free(project);
+        free(task);
+        free(target);
+        free(diff_ref);
+        free(evidence_level);
+        return cbm_mcp_text_result("evidence_level must be scout, analysis, or audit", true);
+    }
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!project || !task) {
+        free(project);
+        free(task);
+        free(target);
+        free(diff_ref);
+        free(evidence_level);
+        return cbm_mcp_text_result("project and task are required", true);
+    }
+    if (!store) {
+        char *message = build_project_list_error("project not found or not indexed");
+        char *result = cbm_mcp_text_result(message, true);
+        free(message);
+        free(project);
+        free(task);
+        free(target);
+        free(diff_ref);
+        free(evidence_level);
+        return result;
+    }
+
+    cbm_context_request_t request = {
+        .project = project,
+        .task = task,
+        .target = target,
+        .diff_ref = diff_ref,
+        .evidence_level = evidence_level,
+        .token_budget = token_budget,
+        .include_docs = include_docs,
+        .include_tests = include_tests,
+    };
+    cbm_context_stats_t stats = {0};
+    char *context_json = cbm_context_build_json(store, &request, &stats);
+    yyjson_doc *context_doc =
+        context_json ? yyjson_read(context_json, strlen(context_json), 0) : NULL;
+    if (!context_doc) {
+        free(context_json);
+        free(project);
+        free(task);
+        free(target);
+        free(diff_ref);
+        free(evidence_level);
+        return cbm_mcp_text_result("failed to build context JSON", true);
+    }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_val_mut_copy(doc, yyjson_doc_get_root(context_doc));
+    yyjson_mut_doc_set_root(doc, root);
+
+    cbm_project_t project_info = {0};
+    cbm_project_metadata_t graph_meta = {0};
+    cbm_coverage_meta_t coverage_meta = {0};
+    cbm_git_context_t source = {0};
+    bool have_project = cbm_store_get_project(store, project, &project_info) == CBM_STORE_OK;
+    bool have_graph_meta =
+        cbm_store_get_project_metadata(store, project, &graph_meta) == CBM_STORE_OK;
+    bool have_coverage_meta =
+        cbm_store_coverage_meta_get(store, project, &coverage_meta) == CBM_STORE_OK;
+    bool have_source = have_project && project_info.root_path;
+    if (have_source) {
+        (void)cbm_git_context_resolve(project_info.root_path, &source);
+    }
+    cbm_coverage_row_t *coverage_rows = NULL;
+    int coverage_count = 0;
+    bool coverage_lookup_ok =
+        cbm_store_coverage_get(store, project, &coverage_rows, &coverage_count) == CBM_STORE_OK;
+    int known_gap_count = 0;
+    int excluded_count = 0;
+    coverage_accumulate_counts(coverage_rows, coverage_count, &known_gap_count, &excluded_count);
+    cbm_store_free_coverage(coverage_rows, coverage_count);
+    const char *reasons[2];
+    size_t reason_count = 0U;
+    if (stats.budget_truncated) {
+        reasons[reason_count++] = "token_budget";
+    }
+    if (stats.resolution_incomplete) {
+        reasons[reason_count++] = "candidate_resolution";
+    }
+    cbm_analysis_meta_input_t analysis_input = {
+        .tool = "build_context",
+        .profile = "analysis",
+        .project = project,
+        .project_info = have_project ? &project_info : NULL,
+        .graph_meta = have_graph_meta ? &graph_meta : NULL,
+        .source = have_source ? &source : NULL,
+        .coverage_meta = have_coverage_meta ? &coverage_meta : NULL,
+        .have_coverage = have_coverage_meta && coverage_lookup_ok,
+        .known_gap_count = known_gap_count,
+        .excluded_count = excluded_count,
+        .coverage_details_truncated = false,
+        .result_status = stats.truncated ? "partial" : "complete",
+        .result_truncated = stats.truncated,
+        .returned = stats.returned,
+        .total = stats.total,
+        .limit = token_budget > 0 ? token_budget : 4000,
+        .has_more = stats.truncated ? 1 : 0,
+        .next_cursor = NULL,
+        .truncation_reasons = stats.truncated ? reasons : NULL,
+        .truncation_reason_count = stats.truncated ? reason_count : 0U,
+    };
+    (void)cbm_analysis_meta_add(doc, root, &analysis_input);
+    size_t json_length = 0;
+    char *json = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, &json_length);
+    yyjson_mut_doc_free(doc);
+    yyjson_doc_free(context_doc);
+    free(context_json);
+    if (have_source) {
+        cbm_git_context_free(&source);
+    }
+    if (have_coverage_meta) {
+        cbm_store_coverage_meta_clear(&coverage_meta);
+    }
+    if (have_graph_meta) {
+        cbm_store_project_metadata_clear(&graph_meta);
+    }
+    if (have_project) {
+        cbm_project_free_fields(&project_info);
+    }
+    free(project);
+    free(task);
+    free(target);
+    free(diff_ref);
+    free(evidence_level);
+    if (!json) {
+        return cbm_mcp_text_result("failed to serialize context", true);
+    }
+    char *result = cbm_mcp_text_result(json, false);
+    free(json);
+    return result;
+}
+
+/* ── review_change: deterministic change review ────────────────── */
+
+static yyjson_val *review_payload(const char *response, yyjson_doc **doc_out, bool *is_error_out) {
+    if (doc_out) {
+        *doc_out = NULL;
+    }
+    if (is_error_out) {
+        *is_error_out = true;
+    }
+    if (!response || !doc_out) {
+        return NULL;
+    }
+    yyjson_doc *wrapper = yyjson_read(response, strlen(response), 0);
+    yyjson_val *wrapper_root = wrapper ? yyjson_doc_get_root(wrapper) : NULL;
+    if (!wrapper_root || !yyjson_is_obj(wrapper_root)) {
+        yyjson_doc_free(wrapper);
+        return NULL;
+    }
+    yyjson_val *error_value = yyjson_obj_get(wrapper_root, "isError");
+    if (is_error_out) {
+        *is_error_out = error_value && yyjson_is_true(error_value);
+    }
+    yyjson_val *structured = yyjson_obj_get(wrapper_root, "structuredContent");
+    if (structured && yyjson_is_obj(structured)) {
+        *doc_out = wrapper;
+        return structured;
+    }
+    yyjson_val *content = yyjson_obj_get(wrapper_root, "content");
+    yyjson_val *first = content && yyjson_is_arr(content) ? yyjson_arr_get_first(content) : NULL;
+    yyjson_val *text_value = first && yyjson_is_obj(first) ? yyjson_obj_get(first, "text") : NULL;
+    const char *text = text_value && yyjson_is_str(text_value) ? yyjson_get_str(text_value) : NULL;
+    yyjson_doc *payload_doc = text ? yyjson_read(text, strlen(text), 0) : NULL;
+    yyjson_doc_free(wrapper);
+    if (!payload_doc) {
+        return NULL;
+    }
+    *doc_out = payload_doc;
+    return yyjson_doc_get_root(payload_doc);
+}
+
+static bool review_is_doc_path(const char *path) {
+    if (!path) {
+        return false;
+    }
+    if (strstr(path, "docs/") || strstr(path, "docs\\")) {
+        return true;
+    }
+    const char *dot = strrchr(path, '.');
+    if (!dot) {
+        return false;
+    }
+    const char *extensions[] = {".md", ".mdx", ".rst", ".adoc"};
+    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++) {
+        const char *a = dot;
+        const char *b = extensions[i];
+        while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*a && !*b) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void review_add_rule(yyjson_mut_doc *doc, yyjson_mut_val *rules, const char *id,
+                            const char *status, const char *message) {
+    yyjson_mut_val *rule = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, rule, "id", id);
+    yyjson_mut_obj_add_strcpy(doc, rule, "status", status);
+    yyjson_mut_obj_add_strcpy(doc, rule, "message", message);
+    yyjson_mut_obj_add_val(doc, rule, "evidence", yyjson_mut_arr(doc));
+    yyjson_mut_arr_add_val(rules, rule);
+}
+
+/* A non-pass rule must point back to something the caller can inspect. Keep
+ * the evidence attachment separate from rule construction so the individual
+ * rule branches stay readable and all evidence remains a JSON string. */
+static void review_add_rule_evidence(yyjson_mut_doc *doc, yyjson_mut_val *rules, const char *id,
+                                     const char *evidence) {
+    if (!doc || !rules || !id || !evidence || !evidence[0]) {
+        return;
+    }
+    size_t index = 0;
+    size_t max = 0;
+    yyjson_mut_val *rule = NULL;
+    yyjson_mut_arr_foreach(rules, index, max, rule) {
+        yyjson_mut_val *rule_id = yyjson_mut_obj_get(rule, "id");
+        if (!rule_id || !yyjson_mut_is_str(rule_id) ||
+            strcmp(yyjson_mut_get_str(rule_id), id) != 0) {
+            continue;
+        }
+        yyjson_mut_val *evidence_array = yyjson_mut_obj_get(rule, "evidence");
+        if (evidence_array && yyjson_mut_is_arr(evidence_array)) {
+            yyjson_mut_arr_add_strcpy(doc, evidence_array, evidence);
+        }
+        return;
+    }
+}
+
+static bool review_public_symbol(const cbm_node_t *node) {
+    if (!node || !node->label) {
+        return false;
+    }
+    return strcmp(node->label, "Route") == 0 || strcmp(node->label, "Endpoint") == 0 ||
+           strcmp(node->label, "Interface") == 0 || strcmp(node->label, "Export") == 0;
+}
+
+static bool review_contract_path(const char *path) {
+    if (!path) {
+        return false;
+    }
+    const char *dot = strrchr(path, '.');
+    if (!dot) {
+        return strstr(path, "schema") != NULL || strstr(path, "config") != NULL;
+    }
+    const char *extensions[] = {".json",  ".json5",   ".yaml", ".yml", ".toml",
+                                ".proto", ".graphql", ".gql",  ".avsc"};
+    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++) {
+        const char *a = dot;
+        const char *b = extensions[i];
+        while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*a && !*b) {
+            return true;
+        }
+    }
+    return strstr(path, "schema") != NULL || strstr(path, "config") != NULL;
+}
+
+static bool review_complexity_signal(const cbm_node_t *node) {
+    if (!node || !node->properties_json || !node->properties_json[0]) {
+        return false;
+    }
+    yyjson_doc *properties = yyjson_read(node->properties_json, strlen(node->properties_json), 0);
+    yyjson_val *root = properties ? yyjson_doc_get_root(properties) : NULL;
+    bool signal = false;
+    if (root && yyjson_is_obj(root)) {
+        const char *keys[] = {"complexity", "cognitive_complexity", "cyclomatic_complexity"};
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            yyjson_val *value = yyjson_obj_get(root, keys[i]);
+            if (value && (yyjson_is_int(value) || yyjson_is_uint(value)) &&
+                yyjson_get_int(value) >= 15) {
+                signal = true;
+                break;
+            }
+        }
+        yyjson_val *loops = yyjson_obj_get(root, "loops");
+        signal = signal || (loops && (yyjson_is_int(loops) || yyjson_is_uint(loops)) &&
+                            yyjson_get_int(loops) >= 3);
+    }
+    yyjson_doc_free(properties);
+    return signal;
+}
+
+static bool review_bool_arg_default(const char *args, const char *key, bool fallback) {
+    yyjson_doc *doc = yyjson_read(args ? args : "{}", strlen(args ? args : "{}"), 0);
+    if (!doc) {
+        return fallback;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *value = root ? yyjson_obj_get(root, key) : NULL;
+    bool result = value && yyjson_is_bool(value) ? yyjson_get_bool(value) : fallback;
+    yyjson_doc_free(doc);
+    return result;
+}
+
+static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    char *evidence_level = cbm_mcp_get_string_arg(args, "evidence_level");
+    int token_budget = cbm_mcp_get_int_arg(args, "token_budget", 4000);
+    int depth = cbm_mcp_get_int_arg(args, "depth", 2);
+    bool include_docs = review_bool_arg_default(args, "include_docs", true);
+    bool include_tests = review_bool_arg_default(args, "include_tests", true);
+    if (!project) {
+        free(evidence_level);
+        return cbm_mcp_text_result("project is required", true);
+    }
+    if (token_budget <= 0) {
+        free(project);
+        free(evidence_level);
+        return cbm_mcp_text_result("token_budget must be greater than zero", true);
+    }
+    if (token_budget > 32000) {
+        token_budget = 32000;
+    }
+    if (!evidence_level || !evidence_level[0]) {
+        free(evidence_level);
+        evidence_level = heap_strdup("analysis");
+    }
+    if (strcmp(evidence_level, "scout") != 0 && strcmp(evidence_level, "analysis") != 0 &&
+        strcmp(evidence_level, "audit") != 0) {
+        free(project);
+        free(evidence_level);
+        return cbm_mcp_text_result("evidence_level must be scout, analysis, or audit", true);
+    }
+    depth = clamp_mcp_depth(depth, "review_change");
+
+    /* Keep Git semantics in one place: detect_changes owns ref validation,
+     * merge-base comparison, worktree status, and changed-line scoping. */
+    char *detect_response = handle_detect_changes(srv, args);
+    yyjson_doc *detect_doc = NULL;
+    bool detect_error = true;
+    yyjson_val *detected = review_payload(detect_response, &detect_doc, &detect_error);
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_strcpy(doc, root, "project", project);
+
+    yyjson_mut_val *changed_files_out = yyjson_mut_arr(doc);
+    yyjson_mut_val *changed_symbols_out = yyjson_mut_arr(doc);
+    yyjson_mut_val *impacts_out = yyjson_mut_arr(doc);
+    yyjson_mut_val *tests_out = yyjson_mut_arr(doc);
+    yyjson_mut_val *docs_out = yyjson_mut_arr(doc);
+    yyjson_mut_val *rules_out = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "changed_files", changed_files_out);
+    yyjson_mut_obj_add_val(doc, root, "changed_symbols", changed_symbols_out);
+    yyjson_mut_obj_add_val(doc, root, "impacts", impacts_out);
+    yyjson_mut_obj_add_val(doc, root, "tests", tests_out);
+    yyjson_mut_obj_add_val(doc, root, "documentation", docs_out);
+    yyjson_mut_obj_add_val(doc, root, "rules", rules_out);
+
+    int changed_count = 0;
+    int changed_test_count = 0;
+    int changed_code_count = 0;
+    bool public_api = false;
+    bool contract_change = false;
+    bool complexity_signal = false;
+    char **changed_paths = NULL;
+    int changed_path_count = 0;
+    if (detected && yyjson_is_obj(detected)) {
+        yyjson_val *changed = yyjson_obj_get(detected, "changed_files");
+        size_t idx, max;
+        yyjson_val *value;
+        yyjson_arr_foreach(changed, idx, max, value) {
+            if (!yyjson_is_str(value)) {
+                continue;
+            }
+            const char *path = yyjson_get_str(value);
+            bool duplicate = false;
+            for (int i = 0; i < changed_path_count; i++) {
+                if (strcmp(changed_paths[i], path) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                continue;
+            }
+            char *copy = heap_strdup(path);
+            changed_paths = safe_realloc(changed_paths,
+                                         (size_t)(changed_path_count + 1) * sizeof(*changed_paths));
+            changed_paths[changed_path_count++] = copy;
+            yyjson_mut_arr_add_strcpy(doc, changed_files_out, path);
+            changed_count++;
+            if (cbm_is_test_file_path(path)) {
+                changed_test_count++;
+                if (include_tests) {
+                    yyjson_mut_arr_add_strcpy(doc, tests_out, path);
+                }
+            } else {
+                changed_code_count++;
+            }
+            if (include_docs && review_is_doc_path(path)) {
+                yyjson_mut_arr_add_strcpy(doc, docs_out, path);
+            }
+            contract_change = contract_change || review_contract_path(path);
+        }
+    }
+
+    cbm_store_t *store = resolve_store(srv, project);
+    int64_t *root_ids = NULL;
+    int root_count = 0;
+    int64_t *impact_ids = NULL;
+    int impact_id_count = 0;
+    int direct_count = 0;
+    int indirect_count = 0;
+    int impact_test_count = 0;
+    int impact_entry_count = 0;
+    int affected_file_count = 0;
+    bool cross_service = false;
+    bool impact_truncated = false;
+    char **affected_files = NULL;
+    int affected_file_names = 0;
+
+    if (!detect_error && store && detected) {
+        yyjson_val *symbols = yyjson_obj_get(detected, "impacted_symbols");
+        size_t idx, max;
+        yyjson_val *value;
+        yyjson_arr_foreach(symbols, idx, max, value) {
+            if (!yyjson_is_obj(value)) {
+                continue;
+            }
+            const char *name = yyjson_get_str(yyjson_obj_get(value, "name"));
+            const char *file = yyjson_get_str(yyjson_obj_get(value, "file"));
+            if (!name || !file) {
+                continue;
+            }
+            cbm_node_t *nodes = NULL;
+            int node_count = 0;
+            cbm_store_find_nodes_by_file(store, project, file, &nodes, &node_count);
+            for (int ni = 0; ni < node_count; ni++) {
+                cbm_node_t *node = &nodes[ni];
+                if (!node->name || strcmp(node->name, name) != 0 ||
+                    !detect_is_symbol_label(node->label)) {
+                    continue;
+                }
+                bool root_seen = false;
+                for (int ri = 0; ri < root_count; ri++) {
+                    if (root_ids[ri] == node->id) {
+                        root_seen = true;
+                        break;
+                    }
+                }
+                if (root_seen) {
+                    continue;
+                }
+                root_ids = safe_realloc(root_ids, (size_t)(root_count + 1) * sizeof(*root_ids));
+                root_ids[root_count++] = node->id;
+                yyjson_mut_val *symbol = yyjson_mut_obj(doc);
+                yyjson_mut_obj_add_int(doc, symbol, "id", node->id);
+                yyjson_mut_obj_add_strcpy(doc, symbol, "name", node->name);
+                yyjson_mut_obj_add_strcpy(doc, symbol, "qualified_name",
+                                          node->qualified_name ? node->qualified_name : "");
+                yyjson_mut_obj_add_strcpy(doc, symbol, "label", node->label ? node->label : "");
+                yyjson_mut_obj_add_strcpy(doc, symbol, "file_path", file);
+                yyjson_mut_obj_add_int(doc, symbol, "start_line", node->start_line);
+                yyjson_mut_obj_add_int(doc, symbol, "end_line", node->end_line);
+                yyjson_mut_arr_add_val(changed_symbols_out, symbol);
+                public_api = public_api || review_public_symbol(node);
+                complexity_signal = complexity_signal || review_complexity_signal(node);
+
+                int max_results = token_budget / 120;
+                if (max_results < 16) {
+                    max_results = 16;
+                }
+                if (max_results > IMPACT_DEFAULT_LIMIT) {
+                    max_results = IMPACT_DEFAULT_LIMIT;
+                }
+                cbm_traverse_result_t traversal = {0};
+                int bfs_rc =
+                    cbm_store_bfs(store, node->id, "inbound", IMPACT_EDGE_TYPES,
+                                  (int)(sizeof(IMPACT_EDGE_TYPES) / sizeof(IMPACT_EDGE_TYPES[0])),
+                                  depth, max_results, &traversal);
+                if (bfs_rc != CBM_STORE_OK) {
+                    cbm_store_traverse_free(&traversal);
+                    continue;
+                }
+                if (traversal.visited_count >= max_results) {
+                    impact_truncated = true;
+                }
+                for (int vi = 0; vi < traversal.visited_count; vi++) {
+                    cbm_node_hop_t *hop = &traversal.visited[vi];
+                    if (hop->node.id == node->id) {
+                        continue;
+                    }
+                    bool seen = false;
+                    for (int ii = 0; ii < impact_id_count; ii++) {
+                        if (impact_ids[ii] == hop->node.id) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (seen) {
+                        continue;
+                    }
+                    impact_ids = safe_realloc(impact_ids,
+                                              (size_t)(impact_id_count + 1) * sizeof(*impact_ids));
+                    impact_ids[impact_id_count++] = hop->node.id;
+                    if (hop->hop == 1) {
+                        direct_count++;
+                    } else {
+                        indirect_count++;
+                    }
+                    if (cbm_is_test_file_path(hop->node.file_path)) {
+                        impact_test_count++;
+                        if (include_tests && hop->node.file_path) {
+                            yyjson_mut_arr_add_strcpy(doc, tests_out, hop->node.file_path);
+                        }
+                    }
+                    if (impact_node_is_entry(&hop->node)) {
+                        impact_entry_count++;
+                    }
+                    if (hop->node.project && strcmp(hop->node.project, project) != 0) {
+                        cross_service = true;
+                    }
+                    if (hop->node.file_path) {
+                        bool file_seen = false;
+                        for (int fi = 0; fi < affected_file_names; fi++) {
+                            if (strcmp(affected_files[fi], hop->node.file_path) == 0) {
+                                file_seen = true;
+                                break;
+                            }
+                        }
+                        if (!file_seen) {
+                            affected_files =
+                                safe_realloc(affected_files, (size_t)(affected_file_names + 1) *
+                                                                 sizeof(*affected_files));
+                            affected_files[affected_file_names++] =
+                                heap_strdup(hop->node.file_path);
+                        }
+                    }
+                    yyjson_mut_val *impact = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_int(doc, impact, "id", hop->node.id);
+                    yyjson_mut_obj_add_strcpy(doc, impact, "name",
+                                              hop->node.name ? hop->node.name : "");
+                    yyjson_mut_obj_add_strcpy(doc, impact, "qualified_name",
+                                              hop->node.qualified_name ? hop->node.qualified_name
+                                                                       : "");
+                    yyjson_mut_obj_add_strcpy(doc, impact, "label",
+                                              hop->node.label ? hop->node.label : "");
+                    yyjson_mut_obj_add_strcpy(doc, impact, "file_path",
+                                              hop->node.file_path ? hop->node.file_path : "");
+                    yyjson_mut_obj_add_int(doc, impact, "hop", hop->hop);
+                    yyjson_mut_obj_add_strcpy(doc, impact, "risk",
+                                              impact_risk_code(cbm_hop_to_risk(hop->hop)));
+                    yyjson_mut_obj_add_strcpy(doc, impact, "changed_by",
+                                              node->qualified_name ? node->qualified_name
+                                                                   : node->name);
+                    yyjson_mut_arr_add_val(impacts_out, impact);
+                }
+                cbm_store_traverse_free(&traversal);
+            }
+            cbm_store_free_nodes(nodes, node_count);
+        }
+    }
+    affected_file_count = affected_file_names;
+
+    bool rule_block = false;
+    bool rule_warn = false;
+    if (!detect_error && changed_code_count > 0 && changed_test_count == 0 &&
+        impact_test_count == 0) {
+        review_add_rule(doc, rules_out, "change.missing_tests", "warn",
+                        "变更了代码文件，但没有发现对应的测试文件或测试影响节点。");
+        review_add_rule_evidence(doc, rules_out, "change.missing_tests",
+                                 changed_path_count > 0 ? changed_paths[0] : "summary.tests");
+        rule_warn = true;
+    } else {
+        review_add_rule(doc, rules_out, "change.missing_tests", "pass",
+                        "已发现变更测试或受影响测试节点。");
+    }
+    if (public_api) {
+        review_add_rule(doc, rules_out, "change.public_api", "warn",
+                        "变更涉及路由、端点、接口或显式公共 API，需要额外关注兼容性。");
+        review_add_rule_evidence(doc, rules_out, "change.public_api", "changed_symbols");
+        rule_warn = true;
+    } else {
+        review_add_rule(doc, rules_out, "change.public_api", "pass", "未发现明确的公共 API 信号。");
+    }
+    if (cross_service) {
+        review_add_rule(doc, rules_out, "change.cross_service", "warn",
+                        "影响路径跨越项目或服务边界，建议同步检查契约和消费者。");
+        review_add_rule_evidence(doc, rules_out, "change.cross_service", "impacts");
+        rule_warn = true;
+    } else {
+        review_add_rule(doc, rules_out, "change.cross_service", "pass", "未发现跨服务影响信号。");
+    }
+    int impact_total = direct_count + indirect_count;
+    if (impact_total >= 50 && changed_test_count == 0 && impact_test_count == 0) {
+        review_add_rule(doc, rules_out, "change.high_impact", "block",
+                        "影响节点数量较高且缺少测试证据，不能将本次变更视为可直接合入。");
+        review_add_rule_evidence(doc, rules_out, "change.high_impact", "summary.direct_impacts");
+        rule_block = true;
+    } else if (impact_total >= 10) {
+        review_add_rule(doc, rules_out, "change.high_impact", "warn",
+                        "影响节点数量较高，建议在合入前检查关键入口和回归测试。");
+        review_add_rule_evidence(doc, rules_out, "change.high_impact", "summary.direct_impacts");
+        rule_warn = true;
+    } else {
+        review_add_rule(doc, rules_out, "change.high_impact", "pass", "影响范围处于常规阈值内。");
+    }
+    if (complexity_signal) {
+        review_add_rule(doc, rules_out, "change.complexity", "warn",
+                        "变更符号带有较高复杂度或循环信号，建议拆分或补充针对性测试。");
+        review_add_rule_evidence(doc, rules_out, "change.complexity", "changed_symbols");
+        rule_warn = true;
+    } else {
+        review_add_rule(doc, rules_out, "change.complexity", "pass", "未发现高复杂度或循环信号。");
+    }
+    if (contract_change) {
+        review_add_rule(doc, rules_out, "change.contract", "warn",
+                        "变更包含配置、Schema 或接口契约文件，建议检查兼容性和消费者。");
+        review_add_rule_evidence(doc, rules_out, "change.contract",
+                                 changed_path_count > 0 ? changed_paths[0] : "changed_files");
+        rule_warn = true;
+    } else {
+        review_add_rule(doc, rules_out, "change.contract", "pass",
+                        "未发现配置或 Schema 契约文件变更。");
+    }
+    if (detect_error) {
+        yyjson_val *hint =
+            detected && yyjson_is_obj(detected) ? yyjson_obj_get(detected, "hint") : NULL;
+        review_add_rule(doc, rules_out, "change.git_ref", "unknown",
+                        hint && yyjson_is_str(hint)
+                            ? yyjson_get_str(hint)
+                            : "无法读取 Git 变更，请检查 ref、仓库状态和 Git 配置。");
+        review_add_rule_evidence(doc, rules_out, "change.git_ref", "git");
+        yyjson_mut_obj_add_str(doc, root, "summary_zh",
+                               "无法可靠读取变更，当前结果不能作为通过结论。");
+    } else {
+        const char *summary =
+            impact_total > 0 ? "已完成静态变更影响分析，结果包含变更文件、符号、影响节点和规则。"
+                             : "未发现需要评审的变更文件。";
+        yyjson_mut_obj_add_str(doc, root, "summary_zh", summary);
+    }
+
+    const char *status = detect_error ? "unknown"
+                         : rule_block ? "block"
+                         : rule_warn  ? "warn"
+                                      : "pass";
+    const char *risk = "low";
+    const char *risk_label = "低";
+    if (detect_error) {
+        risk = "unknown";
+        risk_label = "未知";
+    } else if (cross_service || impact_entry_count > 0) {
+        risk = "critical";
+        risk_label = "严重";
+    } else if (public_api || direct_count > 0) {
+        risk = "high";
+        risk_label = "高";
+    } else if (indirect_count > 0) {
+        risk = "medium";
+        risk_label = "中";
+    }
+    yyjson_mut_obj_add_str(doc, root, "risk", risk);
+    yyjson_mut_obj_add_str(doc, root, "risk_label_zh", risk_label);
+    yyjson_mut_val *summary = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_int(doc, summary, "changed_files", changed_count);
+    yyjson_mut_obj_add_int(doc, summary, "changed_symbols", root_count);
+    yyjson_mut_obj_add_int(doc, summary, "direct_impacts", direct_count);
+    yyjson_mut_obj_add_int(doc, summary, "indirect_impacts", indirect_count);
+    yyjson_mut_obj_add_int(doc, summary, "affected_files", affected_file_count);
+    yyjson_mut_obj_add_int(doc, summary, "tests", changed_test_count + impact_test_count);
+    yyjson_mut_obj_add_int(doc, summary, "entry_points", impact_entry_count);
+    yyjson_mut_obj_add_bool(doc, summary, "cross_service", cross_service);
+    yyjson_mut_obj_add_val(doc, root, "summary", summary);
+
+    const char *limitations[] = {
+        "结果只覆盖已建立索引的静态关系；动态调用、反射、运行时注册和事件总线可能无法完整识别。",
+        "规则是确定性启发式信号，不等价于编译、测试或人工代码审查。",
+    };
+    yyjson_mut_val *limitation_arr = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_strcpy(doc, limitation_arr, limitations[0]);
+    yyjson_mut_arr_add_strcpy(doc, limitation_arr, limitations[1]);
+    if (impact_truncated) {
+        yyjson_mut_arr_add_strcpy(doc, limitation_arr, "影响节点达到预算上限，结果已裁剪。");
+    }
+    yyjson_mut_obj_add_val(doc, root, "limitations", limitation_arr);
+
+    cbm_project_t project_info = {0};
+    cbm_project_metadata_t graph_meta = {0};
+    cbm_coverage_meta_t coverage_meta = {0};
+    cbm_git_context_t source = {0};
+    bool have_project =
+        store && cbm_store_get_project(store, project, &project_info) == CBM_STORE_OK;
+    bool have_graph_meta =
+        store && cbm_store_get_project_metadata(store, project, &graph_meta) == CBM_STORE_OK;
+    bool have_coverage_meta =
+        store && cbm_store_coverage_meta_get(store, project, &coverage_meta) == CBM_STORE_OK;
+    bool have_source = have_project && project_info.root_path;
+    if (have_source) {
+        (void)cbm_git_context_resolve(project_info.root_path, &source);
+    }
+    cbm_coverage_row_t *coverage_rows = NULL;
+    int coverage_count = 0;
+    bool coverage_lookup_ok = store && cbm_store_coverage_get(store, project, &coverage_rows,
+                                                              &coverage_count) == CBM_STORE_OK;
+    int known_gap_count = 0;
+    int excluded_count = 0;
+    coverage_accumulate_counts(coverage_rows, coverage_count, &known_gap_count, &excluded_count);
+    cbm_store_free_coverage(coverage_rows, coverage_count);
+    /* A clean-looking diff is not a passing review when the graph generation
+     * or coverage evidence cannot be correlated with the current source. */
+    bool freshness_current = have_graph_meta && have_project && have_source;
+    if (freshness_current && source.is_git) {
+        freshness_current = graph_meta.indexed_commit && source.head_sha &&
+                            strcmp(graph_meta.indexed_commit, source.head_sha) == 0 &&
+                            source.worktree_state == CBM_GIT_WORKTREE_CLEAN;
+    }
+    bool freshness_stale = have_graph_meta && have_project && have_source && !freshness_current;
+    bool coverage_unknown = !have_coverage_meta || !coverage_lookup_ok;
+    bool coverage_partial = !coverage_unknown && (known_gap_count > 0 || excluded_count > 0);
+    if (freshness_stale) {
+        review_add_rule(doc, rules_out, "change.graph_freshness", "warn",
+                        "图谱代际与当前源码或 Git 提交不一致，结果只能作为临时信号。");
+        review_add_rule_evidence(doc, rules_out, "change.graph_freshness",
+                                 "analysis_meta.freshness");
+        if (!rule_block) {
+            status = "warn";
+        }
+    } else if (!freshness_current) {
+        review_add_rule(doc, rules_out, "change.graph_freshness", "unknown",
+                        "缺少可用于关联当前源码的图谱代际或源代码元数据。");
+        review_add_rule_evidence(doc, rules_out, "change.graph_freshness",
+                                 "analysis_meta.freshness");
+        if (!rule_block && !rule_warn) {
+            status = "unknown";
+        }
+    } else {
+        review_add_rule(doc, rules_out, "change.graph_freshness", "pass",
+                        "图谱与当前源码提交一致。");
+    }
+    if (coverage_unknown) {
+        review_add_rule(doc, rules_out, "change.coverage", "unknown",
+                        "索引覆盖元数据不可用，不能对未出现的影响作穷尽性结论。");
+        review_add_rule_evidence(doc, rules_out, "change.coverage", "analysis_meta.coverage");
+        if (!rule_block && !rule_warn) {
+            status = "unknown";
+        }
+    } else if (coverage_partial) {
+        review_add_rule(doc, rules_out, "change.coverage", "warn",
+                        "索引存在已知解析缺口或按设计排除的范围，建议回读源码核验。");
+        review_add_rule_evidence(doc, rules_out, "change.coverage", "analysis_meta.coverage");
+        if (!rule_block) {
+            status = "warn";
+        }
+    } else {
+        review_add_rule(doc, rules_out, "change.coverage", "pass", "没有记录到已知覆盖缺口。");
+    }
+    yyjson_mut_obj_add_str(doc, root, "status", status);
+    const char *reasons[1] = {"impact_budget"};
+    cbm_analysis_meta_input_t analysis_input = {
+        .tool = "review_change",
+        .profile = strcmp(evidence_level, "scout") == 0 ? "scout" : "analysis",
+        .project = project,
+        .project_info = have_project ? &project_info : NULL,
+        .graph_meta = have_graph_meta ? &graph_meta : NULL,
+        .source = have_source ? &source : NULL,
+        .coverage_meta = have_coverage_meta ? &coverage_meta : NULL,
+        .have_coverage = have_coverage_meta && coverage_lookup_ok,
+        .known_gap_count = known_gap_count,
+        .excluded_count = excluded_count,
+        .coverage_details_truncated = false,
+        .result_status = detect_error       ? "unknown"
+                         : impact_truncated ? "partial"
+                                            : "complete",
+        .result_truncated = impact_truncated,
+        .returned = impact_id_count,
+        .total = impact_id_count,
+        .limit = token_budget,
+        .has_more = impact_truncated ? 1 : 0,
+        .next_cursor = NULL,
+        .truncation_reasons = impact_truncated ? reasons : NULL,
+        .truncation_reason_count = impact_truncated ? 1U : 0U,
+    };
+    (void)cbm_analysis_meta_add(doc, root, &analysis_input);
+
+    if (have_source) {
+        cbm_git_context_free(&source);
+    }
+    if (have_coverage_meta) {
+        cbm_store_coverage_meta_clear(&coverage_meta);
+    }
+    if (have_graph_meta) {
+        cbm_store_project_metadata_clear(&graph_meta);
+    }
+    if (have_project) {
+        cbm_project_free_fields(&project_info);
+    }
+    for (int i = 0; i < changed_path_count; i++) {
+        free(changed_paths[i]);
+    }
+    free(changed_paths);
+    for (int i = 0; i < affected_file_names; i++) {
+        free(affected_files[i]);
+    }
+    free(affected_files);
+    free(root_ids);
+    free(impact_ids);
+    yyjson_doc_free(detect_doc);
+    free(detect_response);
+    free(project);
+    free(evidence_level);
+
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    if (!json) {
+        return cbm_mcp_text_result("failed to serialize review", true);
+    }
+    char *result = cbm_mcp_text_result(json, false);
+    free(json);
+    return result;
+}
+
 /* ── Tool dispatch ────────────────────────────────────────────── */
 
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
@@ -9165,6 +10049,12 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "explain_impact") == 0) {
         return handle_explain_impact(srv, args_json);
+    }
+    if (strcmp(tool_name, "build_context") == 0) {
+        return handle_build_context(srv, args_json);
+    }
+    if (strcmp(tool_name, "review_change") == 0) {
+        return handle_review_change(srv, args_json);
     }
     if (strcmp(tool_name, "get_architecture") == 0) {
         return handle_get_architecture(srv, args_json);

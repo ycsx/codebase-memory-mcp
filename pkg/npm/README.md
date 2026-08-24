@@ -51,7 +51,7 @@ codebase-memory-mcp cli get_architecture '{"project":"my-project"}'
 
 ## MCP 工具
 
-当前二进制提供 16 个工具，分为索引/项目管理、图谱搜索、调用链、源码读取、架构和影响分析、覆盖度检查、Cypher、ADR 与运行时 trace。完整参数和覆盖度边界见仓库 [README.md](https://github.com/ycsx/codebase-memory-mcp/blob/main/README.md)。
+当前二进制提供 17 个工具，分为索引/项目管理、图谱搜索、任务上下文编译、调用链、源码读取、架构和影响分析、覆盖度检查、Cypher、ADR 与运行时 trace。完整参数和覆盖度边界见仓库 [README.md](https://github.com/ycsx/codebase-memory-mcp/blob/main/README.md)。
 
 ## 许可证
 

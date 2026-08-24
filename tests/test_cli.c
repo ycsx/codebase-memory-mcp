@@ -15,6 +15,7 @@
 #include <cli/cli.h>
 #include <foundation/compat_fs.h>
 #include <foundation/yaml.h>
+#include <mcp/mcp.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
 #include <stdint.h>
@@ -842,9 +843,11 @@ TEST(cli_skill_files_content) {
         "index_repository", "index_status",         "list_projects",    "delete_project",
         "search_graph",     "search_code",          "trace_path",       "detect_changes",
         "query_graph",      "get_graph_schema",     "get_code_snippet", "get_architecture",
-        "explain_impact",   "check_index_coverage", "manage_adr",       "ingest_traces",
+        "explain_impact",   "check_index_coverage", "build_context",    "review_change",
+        "manage_adr",
+        "ingest_traces",
     };
-    ASSERT_EQ(sizeof(expected_tools) / sizeof(expected_tools[0]), 16U);
+    ASSERT_EQ(sizeof(expected_tools) / sizeof(expected_tools[0]), 18U);
     for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
         ASSERT(strstr(sk[0].content, expected_tools[i]) != NULL);
     }
@@ -865,7 +868,7 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "16 MCP Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "18 MCP Tools") != NULL);
     ASSERT(strstr(sk[0].content, "explain_impact") != NULL);
 
     /* Gotchas section */
@@ -873,7 +876,7 @@ TEST(cli_skill_files_content) {
 
     char *readme = read_test_file_alloc("README.md");
     ASSERT_NOT_NULL(readme);
-    ASSERT(strstr(readme, "mcp-tool-contract: total=16") != NULL);
+    ASSERT(strstr(readme, "mcp-tool-contract: total=18") != NULL);
     for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
         ASSERT(strstr(readme, expected_tools[i]) != NULL);
     }
@@ -881,7 +884,7 @@ TEST(cli_skill_files_content) {
 
     char *main_source = read_test_file_alloc("src/main.c");
     ASSERT_NOT_NULL(main_source);
-    ASSERT(strstr(main_source, "Tools (16)") != NULL);
+    ASSERT(strstr(main_source, "Tools (18)") != NULL);
     for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
         ASSERT(strstr(main_source, expected_tools[i]) != NULL);
     }
@@ -9722,6 +9725,26 @@ TEST(cli_print_tool_help_issue680) {
     PASS();
 }
 
+/* W3: the CLI flag builder and per-tool help use the MCP schema as their
+ * source of truth. Keep the context compiler's public inputs visible there,
+ * including the budget and evidence controls. */
+TEST(cli_build_context_schema_declares_w3_inputs) {
+    const char *schema = cbm_mcp_tool_input_schema("build_context");
+    ASSERT_NOT_NULL(schema);
+    ASSERT(strstr(schema, "project") != NULL);
+    ASSERT(strstr(schema, "task") != NULL);
+    ASSERT(strstr(schema, "target") != NULL);
+    ASSERT(strstr(schema, "diff_ref") != NULL);
+    ASSERT(strstr(schema, "token_budget") != NULL);
+    ASSERT(strstr(schema, "include_docs") != NULL);
+    ASSERT(strstr(schema, "include_tests") != NULL);
+    ASSERT(strstr(schema, "evidence_level") != NULL);
+    ASSERT(strstr(schema, "scout") != NULL);
+    ASSERT(strstr(schema, "analysis") != NULL);
+    ASSERT(strstr(schema, "audit") != NULL);
+    PASS();
+}
+
 /* The self-update path verifies a downloaded archive against a published
  * checksum. That check is only meaningful if the digest is actually computed —
  * a broken hash command (it once invoked `shasum -a CBM_SZ_256`, an invalid
@@ -10071,4 +10094,5 @@ SUITE(cli) {
     RUN_TEST(cli_build_args_json_key_equals_value_issue680);
     RUN_TEST(cli_build_args_json_bad_positional_errors_issue680);
     RUN_TEST(cli_print_tool_help_issue680);
+    RUN_TEST(cli_build_context_schema_declares_w3_inputs);
 }

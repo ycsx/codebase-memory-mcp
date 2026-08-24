@@ -500,9 +500,9 @@ inv_mcp_initialize() {
 }
 
 # ── Invariant 4: tools/list returns all expected tools ─────────────────────
-# Cross-check against the canonical 14-tool list (TOOLS[] in src/mcp/mcp.c).
-EXPECTED_TOOLS="index_repository search_graph query_graph trace_path get_code_snippet get_graph_schema get_architecture search_code list_projects delete_project index_status detect_changes manage_adr ingest_traces"
-EXPECTED_TOOL_COUNT=14
+# Cross-check against the canonical tool list (TOOLS[] in src/mcp/mcp.c).
+EXPECTED_TOOLS="index_repository search_graph query_graph trace_path get_code_snippet get_graph_schema get_architecture search_code list_projects delete_project index_status detect_changes explain_impact build_context review_change check_index_coverage manage_adr ingest_traces"
+EXPECTED_TOOL_COUNT=18
 inv_tools_list() {
     if ! mcp_alive; then
         fail "tools-list" "server not alive"
@@ -605,7 +605,7 @@ inv_every_tool() {
         return
     fi
 
-    # name|minimal-args (JSON object) for the remaining 13 tools.
+    # name|minimal-args (JSON object) for the remaining 17 tools.
     # Args chosen to be minimally valid per TOOLS[] required fields.
     local p="$PROJ_NAME"
     local -a CALLS
@@ -617,6 +617,10 @@ inv_every_tool() {
         "get_graph_schema|{\"project\":\"$p\"}"
         "get_architecture|{\"project\":\"$p\"}"
         "search_code|{\"project\":\"$p\",\"pattern\":\"def \"}"
+        "explain_impact|{\"project\":\"$p\",\"query\":\"compute\"}"
+        "build_context|{\"project\":\"$p\",\"task\":\"change compute\",\"target\":\"compute\",\"token_budget\":256}"
+        "review_change|{\"project\":\"$p\",\"since\":\"HEAD\",\"depth\":1,\"token_budget\":256}"
+        "check_index_coverage|{\"project\":\"$p\"}"
         "list_projects|{}"
         "index_status|{\"project\":\"$p\"}"
         "detect_changes|{\"project\":\"$p\"}"

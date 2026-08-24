@@ -5,7 +5,7 @@
 ## 事实摘要
 
 - 维护仓库：[ycsx/codebase-memory-mcp](https://github.com/ycsx/codebase-memory-mcp)，基于 DeusData 原项目。
-- MCP 工具：当前二进制提供 16 个工具，覆盖索引、项目管理、图谱搜索、调用链、源码片段、架构、影响、覆盖度、Cypher、ADR 和运行时 trace。
+- MCP 工具：当前二进制提供 18 个工具，覆盖索引、项目管理、图谱搜索、任务上下文编译、调用链、源码片段、架构、影响、确定性变更评审、覆盖度、Cypher、ADR 和运行时 trace。
 - 解析：内置 Tree-sitter 语法解析，覆盖多种编程语言、配置、模板和基础设施文件；Hybrid LSP 对 Python、TypeScript/JavaScript/JSX/TSX、PHP、C#、Go、C/C++、Java、Kotlin、Rust、Perl 等语言增强类型和调用解析。具体支持以 `get_architecture` 返回为准。
 - 图谱：节点包括 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource；关系包括 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等。
 - 覆盖度：`index_status` 和 `check_index_coverage` 报告 `parse_partial`、`skipped`、`not_indexed`。没有记录缺口不等于证明完整覆盖。
@@ -23,8 +23,9 @@
 3. `search_graph` 查找符号和定义。
 4. `trace_path` 分析调用者、被调用者、数据流或跨服务链路。
 5. `get_code_snippet` 读取已定位的准确源码。
-6. 对重要文件调用 `check_index_coverage`；有缺口时回退源码搜索并说明限制。
-7. 仅在需要多跳聚合、架构或影响分析时使用 `query_graph`、`get_architecture`、`explain_impact`。
+6. 需要一次性编译任务上下文时调用 `build_context`，传入目标和 `token_budget`，并保留其 `analysis_meta` 与 `limitations`。
+7. 对重要文件调用 `check_index_coverage`；有缺口时回退源码搜索并说明限制。
+8. 对 Git 变更优先使用 `review_change`；仅在需要多跳聚合、架构或单点影响分析时使用 `query_graph`、`get_architecture`、`explain_impact`。
 
 ## 链接
 

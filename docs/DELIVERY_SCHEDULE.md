@@ -1,6 +1,6 @@
 # 每日 100 美元 Token 预算下的研发交付计划
 
-> 状态：执行排期草案
+> 状态：执行排期草案（W3/W4 核心能力已提前落地）
 > 预算约束：每天模型使用费用上限 100 美元
 > 对应路线图：[Codebase Memory MCP 产品研发路线图](PRODUCT_ENGINEERING_ROADMAP.md)
 > 文档专项：[文档知识图谱与代码知识融合规划](DOCUMENT_KNOWLEDGE_GRAPH_PLAN.md)
@@ -124,7 +124,7 @@
 - `complete_no_known_gap/partial/unknown` 覆盖状态。
 - 分页、上限、截断和置信度字段。
 - 新鲜、过期、dirty、无 Git、部分索引和截断黄金样本。
-- 当前 16 个 MCP 工具、README 和 CLI help 差异清单。
+- 当前 18 个 MCP 工具、README 和 CLI help 差异清单。
 
 验收门槛：
 
@@ -174,6 +174,7 @@
 - 定义、调用、测试、入口和 ADR 证据收集。
 - qualified name、源码范围和路径去重。
 - Token 预算估算和裁剪器。
+- 30 条离线黄金任务集和 `scripts/eval-build-context.sh`，覆盖目标召回、歧义、预算、证据等级、文档/测试和 `diff_ref`。
 
 验收门槛：
 
@@ -181,6 +182,7 @@
 - 同一源码范围不重复出现。
 - 模糊目标返回候选，不擅自选择。
 - 每条关系结论具有可回溯证据。
+- 重复请求的候选/证据排序保持稳定；评测无网络依赖，可在有编译二进制时直接运行。
 
 预算：计划 450 美元，本周硬上限 500 美元。
 
@@ -207,6 +209,8 @@
 预算：计划 350 美元，本周硬上限 500 美元。
 
 里程碑 M1：上下文编译器进入 preview。
+
+验收状态：已完成（2026-08-24）。`build_context` 已接入 analysis profile 和 CLI，支持确定性候选排序、三档证据预算、文档/测试证据、上下文预览 UI、30 条离线黄金评测和 Agent 使用提示；Windows 本机缺少 C 工具链，C 编译、Werror、clang-format 和黄金二进制评测需在 Linux/CI 完成。
 
 ## 6. 第 5-6 周：`review_change`
 
@@ -254,6 +258,8 @@
 预算：计划 350 美元，本周硬上限 500 美元。
 
 里程碑 M2：PR 风险门禁进入评论试点。
+
+当前交付状态（2026-08-24）：W4 已完成本地评审闭环。`review_change` 已接入 MCP/CLI 和 analysis profile，复用 `detect_changes` 的 ref/merge-base 语义，输出变更文件与符号、入站影响、公共 API/跨服务信号、测试/文档候选、规则状态和统一 `analysis_meta`；图谱 UI 已新增“评审”模式。`scripts/review-change-comment.py` 提供 GitHub/GitLab 评论适配、CODEOWNERS 解析、按 commit 去重更新、规则确认/忽略 JSONL 遥测和可选 `--fail-on-block` 门禁，默认只评论不阻断。真实仓库的 10 个 PR 影子评审仍需在接入 CI 后采样，属于运营验收而非本地功能缺口。
 
 ## 7. 第 7-9 周：统一远程 MCP Server
 

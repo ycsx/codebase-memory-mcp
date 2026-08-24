@@ -32,6 +32,8 @@ import { AnalysisModeBar, type AnalysisMode } from "./analysis/AnalysisModeBar";
 import { ImpactView } from "./analysis/ImpactView";
 import { HotspotsView } from "./analysis/HotspotsView";
 import { ImpactQueryView } from "./analysis/ImpactQueryView";
+import { ContextView } from "./analysis/ContextView";
+import { ReviewChangeView } from "./analysis/ReviewChangeView";
 
 /* Persist panel widths */
 function loadWidth(key: string, fallback: number, min: number, max: number): number {
@@ -469,6 +471,10 @@ export function GraphTab({ project }: GraphTabProps) {
       <div className="flex-1 min-h-0">
         {analysisMode === "query" ? (
           <ImpactQueryView project={project} data={data} onOpenExplore={handleOpenExplore} />
+        ) : analysisMode === "review" ? (
+          <ReviewChangeView project={project} data={data} onOpenExplore={handleOpenExplore} />
+        ) : analysisMode === "context" ? (
+          <ContextView project={project} data={data} onOpenExplore={handleOpenExplore} />
         ) : analysisMode === "impact" ? (
           <ImpactView project={project} data={data} onOpenExplore={handleOpenExplore} />
         ) : analysisMode === "hotspots" ? (

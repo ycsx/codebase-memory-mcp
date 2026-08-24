@@ -1,6 +1,6 @@
-import { Flame, GitCompareArrows, Orbit, SearchCode } from "lucide-react";
+import { BookOpen, ClipboardCheck, Flame, GitCompareArrows, Orbit, SearchCode } from "lucide-react";
 
-export type AnalysisMode = "explore" | "query" | "impact" | "hotspots";
+export type AnalysisMode = "explore" | "query" | "impact" | "hotspots" | "context" | "review";
 
 interface AnalysisModeBarProps {
   mode: AnalysisMode;
@@ -12,6 +12,8 @@ const MODES = [
   { id: "query", label: "影响查询", icon: SearchCode },
   { id: "impact", label: "影响", icon: GitCompareArrows },
   { id: "hotspots", label: "热点", icon: Flame },
+  { id: "context", label: "上下文", icon: BookOpen },
+  { id: "review", label: "评审", icon: ClipboardCheck },
 ] as const;
 
 export function AnalysisModeBar({ mode, onChange }: AnalysisModeBarProps) {
@@ -47,7 +49,11 @@ export function AnalysisModeBar({ mode, onChange }: AnalysisModeBarProps) {
             ? "单点影响"
           : mode === "impact"
             ? "变更传播"
-            : "高入度风险"}
+            : mode === "hotspots"
+              ? "高入度风险"
+              : mode === "context"
+                ? "任务证据包"
+                : "Git 变更评审"}
       </p>
     </div>
   );
