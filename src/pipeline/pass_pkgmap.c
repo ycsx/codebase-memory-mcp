@@ -1249,6 +1249,61 @@ static const char *import_candidate_symbol(const char *module_path, char *out, s
     return out;
 }
 
+/* JS/TS/Vue imports that name a package outside the current repository do not
+ * have a local node to resolve to. Keep a typed placeholder in the graph so
+ * the cross-repository pass can later connect it to the package's own graph.
+ * Relative paths, aliases and URL imports are deliberately excluded: those
+ * already have repository-local resolution strategies or are runtime data. */
+static bool is_js_package_import(const char *rel, const char *module_path) {
+    if (!rel || !module_path || !module_path[0] || module_path[0] == '.' ||
+        module_path[0] == '/' || strstr(module_path, "://") != NULL ||
+        module_path[0] == '#') {
+        return false;
+    }
+    const char *dot = strrchr(rel, '.');
+    if (!dot) {
+        return false;
+    }
+    return strcmp(dot, ".js") == 0 || strcmp(dot, ".jsx") == 0 ||
+           strcmp(dot, ".mjs") == 0 || strcmp(dot, ".cjs") == 0 ||
+           strcmp(dot, ".ts") == 0 || strcmp(dot, ".tsx") == 0 ||
+           strcmp(dot, ".mts") == 0 || strcmp(dot, ".cts") == 0 ||
+           strcmp(dot, ".vue") == 0;
+}
+
+static const cbm_gbuf_node_t *create_external_package_reference(cbm_pipeline_ctx_t *ctx,
+                                                                 const CBMImport *imp) {
+    if (!ctx || !ctx->gbuf || !imp || !imp->module_path || !imp->module_path[0]) {
+        return NULL;
+    }
+    char safe[CBM_SZ_1K];
+    size_t n = 0;
+    for (const char *p = imp->module_path; *p && n + 1 < sizeof(safe); p++) {
+        unsigned char c = (unsigned char)*p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+            safe[n++] = (char)c;
+        } else {
+            safe[n++] = '_';
+        }
+    }
+    safe[n] = '\0';
+    char qn[CBM_SZ_2K];
+    int qn_len = snprintf(qn, sizeof(qn), "%s.__external_package__.%s", ctx->project_name, safe);
+    if (qn_len <= 0 || (size_t)qn_len >= sizeof(qn)) {
+        return NULL;
+    }
+    char escaped[CBM_SZ_1K];
+    cbm_json_escape(escaped, sizeof(escaped), imp->module_path);
+    char props[CBM_SZ_2K];
+    snprintf(props, sizeof(props),
+             "{\"external\":true,\"module_path\":\"%s\",\"resolution\":\"unresolved\"}",
+             escaped);
+    int64_t id = cbm_gbuf_upsert_node(ctx->gbuf, "ExternalPackage", imp->module_path, qn, "", 0,
+                                      0, props);
+    return id > 0 ? cbm_gbuf_find_by_id(ctx->gbuf, id) : NULL;
+}
+
 /* True for node labels that represent an importable definition (so a symbol-name
  * fallback does not link to, e.g., a Variable or Field). */
 static bool import_targetable_label(const char *label) {
@@ -1727,15 +1782,19 @@ static void format_import_edge_properties(const CBMImport *imp, bool symbol_bind
     char escaped_local[CBM_SZ_256];
     cbm_json_escape(escaped_local, sizeof(escaped_local),
                     imp && imp->local_name ? imp->local_name : "");
+    char escaped_module[CBM_SZ_1K];
+    cbm_json_escape(escaped_module, sizeof(escaped_module),
+                    imp && imp->module_path ? imp->module_path : "");
     if (imp && imp->imported_name && imp->imported_name[0]) {
         char escaped_imported[CBM_SZ_256];
         cbm_json_escape(escaped_imported, sizeof(escaped_imported), imp->imported_name);
         snprintf(out, out_size,
-                 "{\"local_name\":\"%s\",\"imported_name\":\"%s\",\"binding\":\"%s\"}",
-                 escaped_local, escaped_imported, symbol_binding ? "symbol" : "module");
+                 "{\"local_name\":\"%s\",\"imported_name\":\"%s\",\"module_path\":\"%s\",\"binding\":\"%s\"}",
+                 escaped_local, escaped_imported, escaped_module, symbol_binding ? "symbol" : "module");
         return;
     }
-    snprintf(out, out_size, "{\"local_name\":\"%s\"}", escaped_local);
+    snprintf(out, out_size, "{\"local_name\":\"%s\",\"module_path\":\"%s\"}",
+             escaped_local, escaped_module);
 }
 
 static const cbm_gbuf_node_t *create_java_external_type(cbm_pipeline_ctx_t *ctx,
@@ -1855,11 +1914,14 @@ int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResul
         if (!target) {
             target = create_java_external_type(ctx, imp, rel);
         }
+        if (!target && is_js_package_import(rel, imp->module_path)) {
+            target = create_external_package_reference(ctx, imp);
+        }
         if (!target || target->id == source_node->id) {
             continue;
         }
 
-        char properties[CBM_SZ_1K];
+        char properties[CBM_SZ_2K];
         format_import_edge_properties(imp, false, properties, sizeof(properties));
         if (cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", properties) >
             0) {

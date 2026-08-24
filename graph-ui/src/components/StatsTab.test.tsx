@@ -657,7 +657,9 @@ describe("CrossRepositoryPanel", () => {
             cross_grpc_calls: 0,
             cross_graphql_calls: 0,
             cross_trpc_calls: 0,
-            total_cross_edges: 841,
+            package_import_edges: 7,
+            project_dependency_edges: 3,
+            total_cross_edges: 851,
             elapsed_ms: 24.6,
           }) }] },
         }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -684,8 +686,10 @@ describe("CrossRepositoryPanel", () => {
       });
     });
     expect(await screen.findByText(messages.en.crossRepo.complete)).toBeInTheDocument();
-    expect(screen.getByText("841")).toBeInTheDocument();
+    expect(screen.getByText("851")).toBeInTheDocument();
     expect(screen.getByText("838")).toBeInTheDocument();
+    expect(screen.getByText("7")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 

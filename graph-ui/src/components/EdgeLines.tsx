@@ -50,6 +50,8 @@ const EDGE_TYPE_COLORS: Record<string, string> = {
   CROSS_GRAPHQL_CALLS: "#f0abfc",
   CROSS_TRPC_CALLS: "#c4b5fd",
   CROSS_CHANNEL: "#fdba74",
+  CROSS_PACKAGE_IMPORTS: "#38bdf8",
+  CROSS_PROJECT_DEPENDS: "#2dd4bf",
   MEMBER_OF: "#64748b",
   TESTS_FILE: "#06b6d4",
 };

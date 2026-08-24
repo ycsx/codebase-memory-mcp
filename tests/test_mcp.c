@@ -11,6 +11,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
+#include <context/build_context.h>
 #include <mcp/analysis_meta.h>
 #include <mcp/index_supervisor.h> /* spawn-count hook — #845 in-process guard */
 #include <mcp/mcp.h>
@@ -2433,6 +2434,40 @@ TEST(tool_build_context_ranking_is_stable_and_explained) {
     free(first_response);
     free(second_response);
     cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Local npm/Vue workspaces often hand an agent a URI-like file identity
+ * (file:packages/ui/src/App.vue) instead of a symbol name. Keep that identity
+ * stable at the context boundary: the resolver must strip only the file:
+ * scheme, return file-backed candidates, and preserve their repository
+ * relative path for a later package/workspace lookup. This is deliberately a
+ * unit-level test, so it is independent of npm, Vue, and the filesystem. */
+TEST(tool_build_context_file_uri_target_preserves_file_identity) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    cbm_context_request_t request = {
+        .project = "test-project",
+        .task = "inspect the local package component",
+        .target = "file:main.go",
+        .diff_ref = NULL,
+        .evidence_level = "analysis",
+        .token_budget = 512,
+        .include_docs = false,
+        .include_tests = false,
+    };
+    cbm_context_stats_t stats = {0};
+    char *payload = cbm_context_build_json(store, &request, &stats);
+    ASSERT_NOT_NULL(payload);
+    ASSERT_NOT_NULL(strstr(payload, "\"file_path\":\"main.go\""));
+    ASSERT_NOT_NULL(strstr(payload, "\"candidates\""));
+    ASSERT_GT(stats.total, 0);
+    ASSERT_GT(stats.returned, 0);
+    free(payload);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
     PASS();
 }
 
@@ -7624,6 +7659,7 @@ SUITE(mcp) {
     RUN_TEST(tool_build_context_ambiguous_target_returns_candidates);
     RUN_TEST(tool_build_context_budget_result_has_analysis_meta_and_limitations);
     RUN_TEST(tool_build_context_ranking_is_stable_and_explained);
+    RUN_TEST(tool_build_context_file_uri_target_preserves_file_identity);
     RUN_TEST(tool_explain_impact_file_aggregates_symbols);
     RUN_TEST(tool_explain_impact_filters_docs_and_merges_module_file_candidates);
     RUN_TEST(tool_trace_call_path_ambiguous);

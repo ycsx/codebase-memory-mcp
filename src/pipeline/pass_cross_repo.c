@@ -16,8 +16,10 @@
 #include "foundation/platform.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
+#include "foundation/str_util.h"
 
 #include <sqlite3/sqlite3.h>
+#include <yyjson/yyjson.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +31,7 @@
 enum {
     CR_PATH_BUF = 1024,
     CR_QN_BUF = 512,
-    CR_PROPS_BUF = 2048,
+    CR_PROPS_BUF = CBM_SZ_8K,
     CR_MAX_EDGES = 4096,
     CR_DB_EXT_LEN = 3, /* strlen(".db") */
     CR_INIT_CAP = 32,
@@ -38,6 +40,9 @@ enum {
     CR_SCHEME_SKIP = 3,      /* strlen("://") */
     CR_ROUTE_PREFIX_LEN = 9, /* strlen("__route__") */
     CR_ANY_LEN = 3,          /* strlen("ANY") */
+    CR_PACKAGE_MAX = 512,
+    CR_PACKAGE_DEPTH = 8,
+    CR_MANIFEST_BUF = CBM_SZ_64K,
 };
 
 #define CR_MS_PER_SEC 1000.0
@@ -49,6 +54,17 @@ static const char *cr_itoa(int v) {
     snprintf(cr_ibuf, sizeof(cr_ibuf), "%d", v);
     return cr_ibuf;
 }
+
+typedef struct {
+    char name[CBM_SZ_256];
+    char rel_dir[CR_PATH_BUF];
+    char entry_rel[CR_PATH_BUF];
+} cr_package_t;
+
+typedef struct {
+    cr_package_t items[CR_PACKAGE_MAX];
+    int count;
+} cr_package_list_t;
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -64,27 +80,551 @@ static void cr_db_path(const char *project, char *buf, size_t bufsz) {
 /* Extract a JSON string property from properties_json.
  * Writes into buf, returns buf on success, NULL on miss. */
 static const char *json_str_prop(const char *json, const char *key, char *buf, size_t bufsz) {
-    if (!json || !key) {
+    if (!json || !key || !buf || bufsz == 0) {
         return NULL;
     }
     char pat[CBM_SZ_128];
-    snprintf(pat, sizeof(pat), "\"%s\":\"", key);
-    const char *start = strstr(json, pat);
-    if (!start) {
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *cursor = json;
+    while ((cursor = strstr(cursor, pat)) != NULL) {
+        const char *start = cursor + strlen(pat);
+        while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') {
+            start++;
+        }
+        if (*start++ != ':') {
+            cursor += strlen(pat);
+            continue;
+        }
+        while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') {
+            start++;
+        }
+        if (*start++ != '"') {
+            cursor += strlen(pat);
+            continue;
+        }
+        size_t n = 0;
+        for (const char *p = start; *p; p++) {
+            if (*p == '"') {
+                buf[n] = '\0';
+                return buf;
+            }
+            if (*p == '\\' && p[1] != '\0') {
+                p++;
+            }
+            if (n + 1 < bufsz) {
+                buf[n++] = *p;
+            }
+        }
         return NULL;
     }
-    start += strlen(pat);
-    const char *end = strchr(start, '"');
-    if (!end) {
+    return NULL;
+}
+
+static void cr_slash_normalize(char *path) {
+    if (!path) {
+        return;
+    }
+    for (char *p = path; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    while (path[0] == '.' && path[1] == '/') {
+        memmove(path, path + 2, strlen(path + 2) + 1U);
+    }
+    while (strstr(path, "/./")) {
+        char *p = strstr(path, "/./");
+        memmove(p, p + 2, strlen(p + 2) + 1U);
+    }
+}
+
+static void cr_join_rel(const char *base, const char *suffix, char *out, size_t outsz) {
+    if (!suffix) {
+        suffix = "";
+    }
+    snprintf(out, outsz, "%s%s%s", base && base[0] ? base : "", base && base[0] ? "/" : "",
+             suffix);
+    cr_slash_normalize(out);
+}
+
+static bool cr_read_package_manifest(const char *abs_path, const char *rel_dir,
+                                     cr_package_t *out) {
+    FILE *f = cbm_fopen(abs_path, "rb");
+    if (!f) {
+        return false;
+    }
+    char source[CR_MANIFEST_BUF];
+    size_t len = fread(source, 1, sizeof(source) - 1U, f);
+    fclose(f);
+    source[len] = '\0';
+    char name[CBM_SZ_256];
+    if (!json_str_prop(source, "name", name, sizeof(name)) || !name[0]) {
+        return false;
+    }
+    char entry[CR_PATH_BUF];
+    if (!json_str_prop(source, "module", entry, sizeof(entry)) &&
+        !json_str_prop(source, "main", entry, sizeof(entry)) &&
+        !json_str_prop(source, "import", entry, sizeof(entry)) &&
+        !json_str_prop(source, "default", entry, sizeof(entry)) &&
+        !json_str_prop(source, "require", entry, sizeof(entry)) &&
+        !json_str_prop(source, "exports", entry, sizeof(entry))) {
+        snprintf(entry, sizeof(entry), "src/index.ts");
+    }
+    snprintf(out->name, sizeof(out->name), "%s", name);
+    snprintf(out->rel_dir, sizeof(out->rel_dir), "%s", rel_dir ? rel_dir : "");
+    snprintf(out->entry_rel, sizeof(out->entry_rel), "%s", entry);
+    cr_slash_normalize(out->entry_rel);
+    while (out->entry_rel[0] == '/') {
+        memmove(out->entry_rel, out->entry_rel + 1, strlen(out->entry_rel));
+    }
+    return true;
+}
+
+static void cr_scan_packages(const char *root, const char *rel_dir, int depth,
+                             cr_package_list_t *out) {
+    if (!root || !out || out->count >= CR_PACKAGE_MAX || depth > CR_PACKAGE_DEPTH) {
+        return;
+    }
+    char dir_path[CR_PATH_BUF];
+    if (rel_dir && rel_dir[0]) {
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", root, rel_dir);
+    } else {
+        snprintf(dir_path, sizeof(dir_path), "%s", root);
+    }
+    char manifest[CR_PATH_BUF];
+    snprintf(manifest, sizeof(manifest), "%s/package.json", dir_path);
+    cr_package_t pkg = {0};
+    if (cr_read_package_manifest(manifest, rel_dir, &pkg)) {
+        bool duplicate = false;
+        for (int i = 0; i < out->count; i++) {
+            if (strcmp(out->items[i].name, pkg.name) == 0 &&
+                strcmp(out->items[i].rel_dir, pkg.rel_dir) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate && out->count < CR_PACKAGE_MAX) {
+            out->items[out->count++] = pkg;
+        }
+    }
+    cbm_dir_t *dir = cbm_opendir(dir_path);
+    if (!dir) {
+        return;
+    }
+    cbm_dirent_t *ent;
+    while (out->count < CR_PACKAGE_MAX && (ent = cbm_readdir(dir)) != NULL) {
+        if (!ent->is_dir || ent->is_symlink || strcmp(ent->name, ".") == 0 ||
+            strcmp(ent->name, "..") == 0 || strcmp(ent->name, "node_modules") == 0 ||
+            strcmp(ent->name, ".git") == 0) {
+            continue;
+        }
+        char child_rel[CR_PATH_BUF];
+        cr_join_rel(rel_dir, ent->name, child_rel, sizeof(child_rel));
+        cr_scan_packages(root, child_rel, depth + 1, out);
+    }
+    cbm_closedir(dir);
+}
+
+static const cr_package_t *cr_find_package(const cr_package_list_t *packages, const char *name) {
+    if (!packages || !name || !name[0]) {
         return NULL;
+    }
+    for (int i = 0; i < packages->count; i++) {
+        if (strcmp(packages->items[i].name, name) == 0) {
+            return &packages->items[i];
+        }
+    }
+    return NULL;
+}
+
+static const cr_package_t *cr_find_package_dir(const cr_package_list_t *packages,
+                                               const char *rel_dir) {
+    if (!packages || !rel_dir) {
+        return NULL;
+    }
+    char normalized[CR_PATH_BUF];
+    snprintf(normalized, sizeof(normalized), "%s", rel_dir);
+    cr_slash_normalize(normalized);
+    for (int i = 0; i < packages->count; i++) {
+        if (strcmp(packages->items[i].rel_dir, normalized) == 0) {
+            return &packages->items[i];
+        }
+    }
+    return NULL;
+}
+
+static void cr_collapse_relative(char *path) {
+    char *parts[CR_PATH_BUF / 2];
+    int count = 0;
+    char work[CR_PATH_BUF];
+    snprintf(work, sizeof(work), "%s", path ? path : "");
+    cr_slash_normalize(work);
+    char *part = work;
+    while (*part && count < (int)(sizeof(parts) / sizeof(parts[0]))) {
+        while (*part == '/') {
+            part++;
+        }
+        if (!*part) {
+            break;
+        }
+        char *end = strchr(part, '/');
+        if (end) {
+            *end = '\0';
+        }
+        if (strcmp(part, ".") == 0 || part[0] == '\0') {
+            part = end ? end + 1 : part + strlen(part);
+            continue;
+        }
+        if (strcmp(part, "..") == 0) {
+            if (count > 0) {
+                count--;
+            }
+        } else {
+            parts[count++] = part;
+        }
+        part = end ? end + 1 : part + strlen(part);
+    }
+    path[0] = '\0';
+    for (int i = 0; i < count; i++) {
+        if (i > 0) {
+            strncat(path, "/", CR_PATH_BUF - strlen(path) - 1U);
+        }
+        strncat(path, parts[i], CR_PATH_BUF - strlen(path) - 1U);
+    }
+}
+
+static int64_t cr_find_file_node(cbm_store_t *store, const char *project, const char *rel_path,
+                                 char *file_out, size_t file_sz) {
+    if (!store || !project || !rel_path) {
+        return 0;
+    }
+    struct sqlite3 *db = cbm_store_get_db(store);
+    if (!db) {
+        return 0;
+    }
+    static const char *const suffixes[] = {"", ".js", ".ts", ".jsx", ".tsx", ".vue", NULL};
+    for (int i = 0; suffixes[i]; i++) {
+        char candidate[CR_PATH_BUF];
+        snprintf(candidate, sizeof(candidate), "%s%s", rel_path, suffixes[i]);
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db,
+                               "SELECT id,file_path FROM nodes WHERE project=?1 AND file_path=?2 "
+                               "ORDER BY id LIMIT 1",
+                               CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+            return 0;
+        }
+        sqlite3_bind_text(stmt, SKIP_ONE, project, CBM_NOT_FOUND, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, PAIR_LEN, candidate, CBM_NOT_FOUND, SQLITE_TRANSIENT);
+        int64_t id = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            id = sqlite3_column_int64(stmt, 0);
+            if (file_out && file_sz > 0) {
+                const char *file = (const char *)sqlite3_column_text(stmt, SKIP_ONE);
+                snprintf(file_out, file_sz, "%s", file ? file : candidate);
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (id != 0) {
+            return id;
+        }
+    }
+    return 0;
+}
+
+static int64_t cr_find_project_node(cbm_store_t *store, const char *project) {
+    struct sqlite3 *db = store ? cbm_store_get_db(store) : NULL;
+    if (!db || !project) {
+        return 0;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT id FROM nodes WHERE project=?1 AND label='Project' LIMIT 1",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    sqlite3_bind_text(stmt, SKIP_ONE, project, CBM_NOT_FOUND, SQLITE_STATIC);
+    int64_t id = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0;
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+static const char *cr_package_name_from_spec(const char *spec, char *name_out, size_t name_sz,
+                                             const char **subpath_out) {
+    if (!spec || !name_out || name_sz == 0) {
+        return NULL;
+    }
+    const char *start = spec;
+    while (*start == ' ' || *start == '\t') {
+        start++;
+    }
+    if (strncmp(start, "workspace:", 10) == 0 || strncmp(start, "file:", 5) == 0 ||
+        strncmp(start, "link:", 5) == 0) {
+        return NULL;
+    }
+    const char *slash = strchr(start, '/');
+    const char *end = slash;
+    if (start[0] == '@' && slash) {
+        slash = strchr(slash + 1, '/');
+        end = slash;
+    }
+    if (!end) {
+        end = start + strlen(start);
     }
     size_t len = (size_t)(end - start);
-    if (len >= bufsz) {
-        len = bufsz - SKIP_ONE;
+    if (len == 0 || len >= name_sz) {
+        return NULL;
     }
-    memcpy(buf, start, len);
-    buf[len] = '\0';
-    return buf;
+    memcpy(name_out, start, len);
+    name_out[len] = '\0';
+    if (subpath_out) {
+        *subpath_out = end[0] == '/' ? end + 1 : NULL;
+    }
+    return name_out;
+}
+
+static const cr_package_t *cr_source_package(const cr_package_list_t *packages,
+                                             const char *source_file) {
+    const cr_package_t *best = NULL;
+    size_t best_len = 0;
+    for (int i = 0; packages && i < packages->count; i++) {
+        const char *dir = packages->items[i].rel_dir;
+        size_t len = strlen(dir);
+        const char *file = source_file ? source_file : "";
+        size_t file_len = strlen(file);
+        bool match = len == 0 || (file_len >= len && strncmp(file, dir, len) == 0 &&
+                                  (file[len] == '/' || file[len] == '\0'));
+        if (match && len >= best_len) {
+            best = &packages->items[i];
+            best_len = len;
+        }
+    }
+    return best;
+}
+
+static void insert_cross_edge(cbm_store_t *store, const char *project, int64_t from_id,
+                              int64_t to_id, const char *edge_type, const char *props);
+
+static int cr_match_package_imports(cbm_store_t *src_store, const char *src_project,
+                                    cbm_store_t *tgt_store, const char *tgt_project,
+                                    const cr_package_list_t *src_packages,
+                                    const cr_package_list_t *tgt_packages) {
+    struct sqlite3 *db = cbm_store_get_db(src_store);
+    if (!db) {
+        return 0;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(
+            db,
+            "SELECT e.source_id,e.target_id,e.properties,n.file_path "
+            "FROM edges e JOIN nodes n ON n.id=e.source_id "
+            "WHERE e.project=?1 AND e.type='IMPORTS' ORDER BY e.source_id,e.target_id",
+            CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    sqlite3_bind_text(stmt, SKIP_ONE, src_project, CBM_NOT_FOUND, SQLITE_STATIC);
+    int created = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t source_id = sqlite3_column_int64(stmt, 0);
+        const char *props = (const char *)sqlite3_column_text(stmt, 2);
+        const char *source_file = (const char *)sqlite3_column_text(stmt, 3);
+        char spec[CBM_SZ_512] = {0};
+        if (!json_str_prop(props, "module_path", spec, sizeof(spec)) &&
+            !json_str_prop(props, "specifier", spec, sizeof(spec))) {
+            continue;
+        }
+        const cr_package_t *source_pkg = cr_source_package(src_packages, source_file);
+        const cr_package_t *target_pkg = NULL;
+        const char *subpath = NULL;
+        char package_name[CBM_SZ_256] = {0};
+        char target_rel[CR_PATH_BUF] = {0};
+        if (strncmp(spec, "file:", 5) == 0 || strncmp(spec, "link:", 5) == 0 ||
+            strncmp(spec, "workspace:", 10) == 0) {
+            const char *path_spec = strchr(spec, ':') + 1;
+            while (*path_spec == '/') {
+                path_spec++;
+            }
+            if (strcmp(path_spec, "*") == 0 || strcmp(path_spec, "^") == 0) {
+                continue;
+            }
+            cr_join_rel(source_pkg ? source_pkg->rel_dir : "", path_spec, target_rel,
+                        sizeof(target_rel));
+            cr_collapse_relative(target_rel);
+            target_pkg = cr_find_package_dir(tgt_packages, target_rel);
+            if (!target_pkg && strncmp(spec, "workspace:", 10) == 0) {
+                target_pkg = cr_find_package(tgt_packages, path_spec);
+            }
+        } else if (cr_package_name_from_spec(spec, package_name, sizeof(package_name), &subpath)) {
+            target_pkg = cr_find_package(tgt_packages, package_name);
+        }
+        if (!target_pkg) {
+            continue;
+        }
+        if (subpath && subpath[0]) {
+            cr_join_rel(target_pkg->rel_dir, subpath, target_rel, sizeof(target_rel));
+        } else {
+            cr_join_rel(target_pkg->rel_dir, target_pkg->entry_rel, target_rel,
+                        sizeof(target_rel));
+        }
+        cr_collapse_relative(target_rel);
+        char target_file[CR_PATH_BUF] = {0};
+        int64_t target_id = cr_find_file_node(tgt_store, tgt_project, target_rel, target_file,
+                                              sizeof(target_file));
+        if (target_id == 0) {
+            continue;
+        }
+        char esc_package[CBM_SZ_512];
+        char esc_spec[CBM_SZ_1K];
+        char esc_src_project[CBM_SZ_512];
+        char esc_tgt_project[CBM_SZ_512];
+        char esc_source_file[CR_PATH_BUF];
+        char esc_target_file[CR_PATH_BUF];
+        cbm_json_escape(esc_package, sizeof(esc_package), target_pkg->name);
+        cbm_json_escape(esc_spec, sizeof(esc_spec), spec);
+        cbm_json_escape(esc_src_project, sizeof(esc_src_project), src_project);
+        cbm_json_escape(esc_tgt_project, sizeof(esc_tgt_project), tgt_project);
+        cbm_json_escape(esc_source_file, sizeof(esc_source_file), source_file ? source_file : "");
+        cbm_json_escape(esc_target_file, sizeof(esc_target_file), target_file);
+        char props_buf[CR_PROPS_BUF];
+        snprintf(props_buf, sizeof(props_buf),
+                 "{\"package\":\"%s\",\"specifier\":\"%s\","
+                 "\"source_project\":\"%s\",\"target_project\":\"%s\","
+                 "\"source_file\":\"%s\",\"target_file\":\"%s\"}",
+                 esc_package, esc_spec, esc_src_project, esc_tgt_project, esc_source_file,
+                 esc_target_file);
+        insert_cross_edge(src_store, src_project, source_id, target_id,
+                          "CROSS_PACKAGE_IMPORTS", props_buf);
+
+        /* The reverse dependency edge is stored in the target DB. Keep its
+         * target identity oriented from that project's perspective so the UI
+         * can resolve the satellite endpoint using the same metadata contract. */
+        char reverse_props[CR_PROPS_BUF];
+        snprintf(reverse_props, sizeof(reverse_props),
+                 "{\"package\":\"%s\",\"specifier\":\"%s\","
+                 "\"source_project\":\"%s\",\"target_project\":\"%s\","
+                 "\"source_file\":\"%s\",\"target_file\":\"%s\"}",
+                 esc_package, esc_spec, esc_tgt_project, esc_src_project, esc_target_file,
+                 esc_source_file);
+        insert_cross_edge(tgt_store, tgt_project, target_id, source_id,
+                          "CROSS_PROJECT_DEPENDS", reverse_props);
+        created++;
+    }
+    sqlite3_finalize(stmt);
+    return created;
+}
+
+/* Match local protocols declared in package.json even when no source import
+ * was indexed (for example a package re-exported by generated code). */
+static int cr_match_manifest_dependencies(cbm_store_t *src_store, const char *src_project,
+                                           const char *src_root, cbm_store_t *tgt_store,
+                                           const char *tgt_project,
+                                           const cr_package_list_t *src_packages,
+                                           const cr_package_list_t *tgt_packages) {
+    int created = 0;
+    static const char *const sections[] = {"dependencies", "devDependencies",
+                                           "peerDependencies", "optionalDependencies"};
+    for (int pi = 0; src_packages && pi < src_packages->count; pi++) {
+        const cr_package_t *src_pkg = &src_packages->items[pi];
+        char manifest_path[CR_PATH_BUF];
+        snprintf(manifest_path, sizeof(manifest_path), "%s/%s%s/package.json", src_root,
+                 src_pkg->rel_dir[0] ? src_pkg->rel_dir : "",
+                 src_pkg->rel_dir[0] ? "/" : "");
+        FILE *f = cbm_fopen(manifest_path, "rb");
+        if (!f) {
+            continue;
+        }
+        char source[CR_MANIFEST_BUF];
+        size_t len = fread(source, 1, sizeof(source) - 1U, f);
+        fclose(f);
+        source[len] = '\0';
+        yyjson_doc *doc = yyjson_read(source, len, 0);
+        yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+        if (!yyjson_is_obj(root)) {
+            yyjson_doc_free(doc);
+            continue;
+        }
+        char manifest_rel[CR_PATH_BUF];
+        snprintf(manifest_rel, sizeof(manifest_rel), "%s%s",
+                 src_pkg->rel_dir[0] ? src_pkg->rel_dir : "", src_pkg->rel_dir[0]
+                     ? "/package.json"
+                     : "package.json");
+        int64_t source_id = cr_find_file_node(src_store, src_project, manifest_rel, NULL, 0);
+        if (source_id == 0) {
+            /* package.json is intentionally excluded from normal source files
+             * in some index modes; keep the dependency visible from Project. */
+            source_id = cr_find_project_node(src_store, src_project);
+            if (source_id == 0) {
+                yyjson_doc_free(doc);
+                continue;
+            }
+        }
+        for (size_t si = 0; si < sizeof(sections) / sizeof(sections[0]); si++) {
+            yyjson_val *deps = yyjson_obj_get(root, sections[si]);
+            if (!yyjson_is_obj(deps)) {
+                continue;
+            }
+            yyjson_obj_iter it = yyjson_obj_iter_with(deps);
+            yyjson_val *key;
+            while ((key = yyjson_obj_iter_next(&it)) != NULL) {
+                yyjson_val *value = yyjson_obj_iter_get_val(key);
+                if (!yyjson_is_str(key) || !yyjson_is_str(value)) {
+                    continue;
+                }
+                const char *dep_name = yyjson_get_str(key);
+                const char *spec = yyjson_get_str(value);
+                if (!dep_name || !spec ||
+                    !(strncmp(spec, "file:", 5) == 0 || strncmp(spec, "link:", 5) == 0 ||
+                      strncmp(spec, "workspace:", 10) == 0)) {
+                    continue;
+                }
+                const char *path_spec = strchr(spec, ':') + 1;
+                while (*path_spec == '/') {
+                    path_spec++;
+                }
+                char target_rel[CR_PATH_BUF];
+                cr_join_rel(src_pkg->rel_dir, path_spec, target_rel, sizeof(target_rel));
+                cr_collapse_relative(target_rel);
+                const cr_package_t *target_pkg = cr_find_package_dir(tgt_packages, target_rel);
+                if (!target_pkg) {
+                    target_pkg = cr_find_package(tgt_packages, dep_name);
+                }
+                if (!target_pkg) {
+                    continue;
+                }
+                cr_join_rel(target_pkg->rel_dir, target_pkg->entry_rel, target_rel,
+                            sizeof(target_rel));
+                cr_collapse_relative(target_rel);
+                int64_t target_id = cr_find_file_node(tgt_store, tgt_project, target_rel, NULL, 0);
+                if (target_id == 0) {
+                    continue;
+                }
+                char esc_pkg[CBM_SZ_512], esc_spec[CBM_SZ_1K], esc_src[CBM_SZ_512],
+                    esc_tgt[CBM_SZ_512];
+                cbm_json_escape(esc_pkg, sizeof(esc_pkg), target_pkg->name);
+                cbm_json_escape(esc_spec, sizeof(esc_spec), spec);
+                cbm_json_escape(esc_src, sizeof(esc_src), src_project);
+                cbm_json_escape(esc_tgt, sizeof(esc_tgt), tgt_project);
+                char props[CR_PROPS_BUF];
+                snprintf(props, sizeof(props),
+                         "{\"package\":\"%s\",\"specifier\":\"%s\","
+                         "\"source_project\":\"%s\",\"target_project\":\"%s\","
+                         "\"resolution\":\"manifest\"}",
+                         esc_pkg, esc_spec, esc_src, esc_tgt);
+                insert_cross_edge(src_store, src_project, source_id, target_id,
+                                  "CROSS_PACKAGE_IMPORTS", props);
+                char reverse_props[CR_PROPS_BUF];
+                snprintf(reverse_props, sizeof(reverse_props),
+                         "{\"package\":\"%s\",\"specifier\":\"%s\","
+                         "\"source_project\":\"%s\",\"target_project\":\"%s\","
+                         "\"resolution\":\"manifest\"}",
+                         esc_pkg, esc_spec, esc_tgt, esc_src);
+                insert_cross_edge(tgt_store, tgt_project, target_id, source_id,
+                                  "CROSS_PROJECT_DEPENDS", reverse_props);
+                created++;
+            }
+        }
+        yyjson_doc_free(doc);
+    }
+    return created;
 }
 
 /* Build CROSS_* edge properties JSON. */
@@ -116,6 +656,8 @@ static void delete_cross_edges(cbm_store_t *store, const char *project) {
     cbm_store_delete_edges_by_type(store, project, "CROSS_GRPC_CALLS");
     cbm_store_delete_edges_by_type(store, project, "CROSS_GRAPHQL_CALLS");
     cbm_store_delete_edges_by_type(store, project, "CROSS_TRPC_CALLS");
+    cbm_store_delete_edges_by_type(store, project, "CROSS_PACKAGE_IMPORTS");
+    cbm_store_delete_edges_by_type(store, project, "CROSS_PROJECT_DEPENDS");
 }
 
 /* Insert a CROSS_* edge into a store. Idempotent by construction: the edges
@@ -814,6 +1356,12 @@ cbm_cross_repo_result_t cbm_cross_repo_match(const char *project, const char **t
 
     /* Clean existing CROSS_* edges for this project */
     delete_cross_edges(src_store, project);
+    cr_package_list_t src_packages = {0};
+    cbm_project_t src_info = {0};
+    if (cbm_store_get_project(src_store, project, &src_info) == CBM_STORE_OK &&
+        src_info.root_path) {
+        cr_scan_packages(src_info.root_path, "", 0, &src_packages);
+    }
 
     /* Resolve target projects */
     char **resolved = NULL;
@@ -844,6 +1392,31 @@ cbm_cross_repo_result_t cbm_cross_repo_match(const char *project, const char **t
             continue;
         }
 
+        cr_package_list_t tgt_packages = {0};
+        cbm_project_t tgt_info = {0};
+        if (cbm_store_get_project(tgt_store, tgt, &tgt_info) == CBM_STORE_OK &&
+            tgt_info.root_path) {
+            cr_scan_packages(tgt_info.root_path, "", 0, &tgt_packages);
+        }
+        int package_matches = cr_match_package_imports(src_store, project, tgt_store, tgt,
+                                                       &src_packages, &tgt_packages);
+        /* Run the reverse direction as well. Imports live in the consumer DB,
+         * so invoking the matcher from the provider side must still recreate
+         * both graph-visible directions. */
+        int reverse_package_matches = cr_match_package_imports(
+            tgt_store, tgt, src_store, project, &tgt_packages, &src_packages);
+        int manifest_matches = src_info.root_path
+                                   ? cr_match_manifest_dependencies(src_store, project,
+                                                                    src_info.root_path, tgt_store,
+                                                                    tgt, &src_packages,
+                                                                    &tgt_packages)
+                                   : 0;
+        result.package_import_edges += package_matches + reverse_package_matches + manifest_matches;
+        result.project_dependency_edges += package_matches + reverse_package_matches + manifest_matches;
+        if (tgt_info.root_path || tgt_info.name || tgt_info.indexed_at) {
+            cbm_project_free_fields(&tgt_info);
+        }
+
         result.http_edges += match_http_routes(src_store, project, tgt_store, tgt);
         /* Reverse direction: when this pass runs from the provider side, the
          * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
@@ -869,6 +1442,9 @@ cbm_cross_repo_result_t cbm_cross_repo_match(const char *project, const char **t
     }
 
     cbm_store_close(src_store);
+    if (src_info.root_path || src_info.name || src_info.indexed_at) {
+        cbm_project_free_fields(&src_info);
+    }
 
     if (own_list) {
         free_project_list(resolved, resolved_count);
@@ -880,7 +1456,8 @@ cbm_cross_repo_result_t cbm_cross_repo_match(const char *project, const char **t
                         ((double)(t1.tv_nsec - t0.tv_nsec) / CR_NS_PER_MS);
 
     int total = result.http_edges + result.async_edges + result.channel_edges + result.grpc_edges +
-                result.graphql_edges + result.trpc_edges;
+                result.graphql_edges + result.trpc_edges + result.package_import_edges +
+                result.project_dependency_edges;
     cbm_log_info("cross_repo.done", "project", project, "total", cr_itoa(total));
 
     return result;

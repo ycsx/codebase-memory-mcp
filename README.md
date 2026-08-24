@@ -85,7 +85,7 @@ codebase-memory-mcp cli trace_path '{"project":"my-project","function_name":"Pro
 codebase-memory-mcp cli build_context '{"project":"my-project","task":"修改订单校验并补齐相关测试","target":"ProcessOrder","token_budget":4000,"evidence_level":"analysis"}'
 ```
 
-索引模式：`fast` 适合快速结构索引，`moderate`（推荐）包含过滤文件和语义边，`full` 包含全部文件及相似/语义边；`cross-repo-intelligence` 用于已索引项目之间的路由和消息关联。
+索引模式：`fast` 适合快速结构索引，`moderate`（推荐）包含过滤文件和语义边，`full` 包含全部文件及相似/语义边；`cross-repo-intelligence` 用于已索引项目之间的路由、消息和本地 npm 包关联。两个项目都建立图谱后，运行该模式即可识别 `file:`、`link:`、`workspace:` 以及同名包入口，生成 `CROSS_PACKAGE_IMPORTS` / `CROSS_PROJECT_DEPENDS` 双向边；目标入口未进入图谱时会保留为未解析，不会猜测连接。
 
 普通会话不要重复索引：先调用 `list_projects`，再用 `index_status` 判断状态。开启 `auto_index` 后，新项目可以在 MCP 初始化时自动索引；已索引项目仍由 watcher 负责增量更新。
 

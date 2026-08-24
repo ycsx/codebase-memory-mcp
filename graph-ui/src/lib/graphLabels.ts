@@ -19,6 +19,7 @@ const NODE_LABELS_ZH: Record<string, string> = {
   Method: "方法",
   ExternalType: "外部类型",
   ExternalMethod: "外部方法",
+  ExternalPackage: "外部包",
   Constructor: "构造函数",
   Variable: "变量",
   Constant: "常量",
@@ -97,6 +98,8 @@ const RELATIONSHIP_LABELS_ZH: Record<string, string> = {
   INHERITED_BY: "由其继承",
   CROSS_REPO_CALLS: "跨仓库调用",
   CROSS_REPO_IMPORTS: "跨仓库导入",
+  CROSS_PACKAGE_IMPORTS: "跨项目包导入",
+  CROSS_PROJECT_DEPENDS: "跨项目依赖",
 };
 
 const STATUS_LABELS_ZH: Record<string, string> = {

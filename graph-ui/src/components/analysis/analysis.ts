@@ -88,6 +88,8 @@ const IMPACT_EDGE_TYPES = new Set([
   "CROSS_GRPC_CALLS",
   "CROSS_GRAPHQL_CALLS",
   "CROSS_TRPC_CALLS",
+  "CROSS_PACKAGE_IMPORTS",
+  "CROSS_PROJECT_DEPENDS",
 ]);
 
 function normalizePath(value: string | undefined): string {

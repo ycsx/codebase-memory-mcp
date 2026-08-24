@@ -324,7 +324,8 @@ static const tool_def_t TOOLS[] = {
     {"index_repository", "Index repository",
      "Index a repository into the knowledge graph. "
      "Special mode 'cross-repo-intelligence': skip extraction, only match Routes/Channels "
-     "across projects to create CROSS_HTTP_CALLS/CROSS_ASYNC_CALLS/CROSS_CHANNEL edges. "
+     "across projects to create CROSS_HTTP_CALLS/CROSS_ASYNC_CALLS/CROSS_CHANNEL and package "
+     "edges (CROSS_PACKAGE_IMPORTS/CROSS_PROJECT_DEPENDS). "
      "Requires target_projects param. Ensure target projects have fresh indexes first. "
      "COVERAGE: the response reports files that were NOT fully indexed — 'skipped' (not "
      "indexed at all: oversized/read/parse failures) and 'parse_partial' (indexed, but "
@@ -451,7 +452,7 @@ static const tool_def_t TOOLS[] = {
      "\"calls\",\"description\":\"calls: follow CALLS edges. data_flow: follow CALLS+DATA_FLOWS "
      "with arg expressions. cross_service: follow HTTP_CALLS+ASYNC_CALLS+DATA_FLOWS through "
      "Routes, plus CROSS_* cross-repo edges (CROSS_HTTP_CALLS/ASYNC_CALLS/CHANNEL/GRPC_CALLS/"
-     "GRAPHQL_CALLS/TRPC_CALLS) to hop into other services.\"},\"parameter_name\":{\"type\":"
+     "GRAPHQL_CALLS/TRPC_CALLS/PACKAGE_IMPORTS/PROJECT_DEPENDS) to hop into other services.\"},\"parameter_name\":{\"type\":"
      "\"string\",\"description\":\"For data_flow mode: "
      "scope trace to a specific parameter name\"},\"edge_types\":{\"type\":\"array\",\"items\":{"
      "\"type\":\"string\"}},\"risk_labels\":{\"type\":\"boolean\",\"default\":false,"
@@ -3959,7 +3960,8 @@ static void append_cross_repo_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
     yyjson_mut_val *cr = yyjson_mut_obj(doc);
     static const char *cross_types[] = {"CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS",
                                         "CROSS_CHANNEL",       "CROSS_GRPC_CALLS",
-                                        "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS"};
+                                        "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS",
+                                        "CROSS_PACKAGE_IMPORTS", "CROSS_PROJECT_DEPENDS"};
     for (int t = 0; t < (int)(sizeof(cross_types) / sizeof(cross_types[0])); t++) {
         for (int i = 0; i < schema->edge_type_count; i++) {
             if (strcmp(schema->edge_types[i].type, cross_types[t]) == 0) {
@@ -4422,7 +4424,8 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         {
             static const char *const cross_types[] = {"CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS",
                                                       "CROSS_CHANNEL",       "CROSS_GRPC_CALLS",
-                                                      "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS"};
+                                                      "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS",
+                                                      "CROSS_PACKAGE_IMPORTS", "CROSS_PROJECT_DEPENDS"};
             int cross_total = 0;
             for (int t = 0; t < (int)(sizeof(cross_types) / sizeof(cross_types[0])); t++) {
                 for (int i = 0; i < schema.edge_type_count; i++) {
@@ -4718,7 +4721,8 @@ static yyjson_doc *resolve_trace_edge_types(const char *args, const char *mode,
     static const char *mode_cross_svc[] = {
         "HTTP_CALLS",          "ASYNC_CALLS",       "DATA_FLOWS",    "CALLS",
         "CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS", "CROSS_CHANNEL", "CROSS_GRPC_CALLS",
-        "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS"};
+        "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS", "CROSS_PACKAGE_IMPORTS",
+        "CROSS_PROJECT_DEPENDS"};
 
     *out_count = 0;
 
@@ -5366,6 +5370,8 @@ static const char *IMPACT_EDGE_TYPES[] = {
     "CROSS_GRPC_CALLS",
     "CROSS_GRAPHQL_CALLS",
     "CROSS_TRPC_CALLS",
+    "CROSS_PACKAGE_IMPORTS",
+    "CROSS_PROJECT_DEPENDS",
     "GRPC_CALLS",
     "GRAPHQL_CALLS",
     "TRPC_CALLS",
@@ -6171,7 +6177,8 @@ static char *handle_cross_repo_mode(const char *repo_path, const char *name_over
     yyjson_doc_free(jdoc);
 
     int total = result.http_edges + result.async_edges + result.channel_edges + result.grpc_edges +
-                result.graphql_edges + result.trpc_edges;
+                result.graphql_edges + result.trpc_edges + result.package_import_edges +
+                result.project_dependency_edges;
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -6185,6 +6192,8 @@ static char *handle_cross_repo_mode(const char *repo_path, const char *name_over
     yyjson_mut_obj_add_int(doc, root, "cross_grpc_calls", result.grpc_edges);
     yyjson_mut_obj_add_int(doc, root, "cross_graphql_calls", result.graphql_edges);
     yyjson_mut_obj_add_int(doc, root, "cross_trpc_calls", result.trpc_edges);
+    yyjson_mut_obj_add_int(doc, root, "package_import_edges", result.package_import_edges);
+    yyjson_mut_obj_add_int(doc, root, "project_dependency_edges", result.project_dependency_edges);
     yyjson_mut_obj_add_int(doc, root, "total_cross_edges", total);
     yyjson_mut_obj_add_real(doc, root, "elapsed_ms", result.elapsed_ms);
 

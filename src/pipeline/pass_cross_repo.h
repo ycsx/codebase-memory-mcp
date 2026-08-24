@@ -15,6 +15,8 @@ typedef struct {
     int grpc_edges;    /* CROSS_GRPC_CALLS edges created */
     int graphql_edges; /* CROSS_GRAPHQL_CALLS edges created */
     int trpc_edges;    /* CROSS_TRPC_CALLS edges created */
+    int package_import_edges;     /* CROSS_PACKAGE_IMPORTS edges created */
+    int project_dependency_edges; /* CROSS_PROJECT_DEPENDS edges created */
     int projects_scanned;
     double elapsed_ms;
 } cbm_cross_repo_result_t;

@@ -81,6 +81,8 @@ export const messages = {
       grpc: "gRPC",
       graphql: "GraphQL",
       trpc: "tRPC",
+      packageImports: "Package imports",
+      projectDepends: "Project dependencies",
     },
     index: {
       newIndex: "New Index",
@@ -168,6 +170,8 @@ export const messages = {
       grpc: "gRPC",
       graphql: "GraphQL",
       trpc: "tRPC",
+      packageImports: "跨项目包导入",
+      projectDepends: "跨项目依赖",
     },
     tabs: {
       graph: "图谱",

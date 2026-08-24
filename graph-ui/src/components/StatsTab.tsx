@@ -751,6 +751,8 @@ interface CrossRepoResult {
   cross_grpc_calls: number;
   cross_graphql_calls: number;
   cross_trpc_calls: number;
+  package_import_edges?: number;
+  project_dependency_edges?: number;
   total_cross_edges: number;
   elapsed_ms: number;
 }
@@ -842,6 +844,12 @@ export function CrossRepositoryPanel({
     { label: t.crossRepo.grpc, value: result.cross_grpc_calls },
     { label: t.crossRepo.graphql, value: result.cross_graphql_calls },
     { label: t.crossRepo.trpc, value: result.cross_trpc_calls },
+    ...(result.package_import_edges !== undefined
+      ? [{ label: t.crossRepo.packageImports, value: result.package_import_edges }]
+      : []),
+    ...(result.project_dependency_edges !== undefined
+      ? [{ label: t.crossRepo.projectDepends, value: result.project_dependency_edges }]
+      : []),
   ] : [];
 
   return (
