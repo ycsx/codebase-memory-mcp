@@ -1,0 +1,23 @@
+{
+  "upstream_url": "https://github.com/DeusData/codebase-memory-mcp.git",
+  "upstream_remote": "upstream",
+  "upstream_ref": "main",
+  "state_file": "docs/upstream-sync-state.json",
+  "report_file": "docs/upstream-sync/latest.md",
+  "log_file": "docs/UPSTREAM_SYNC_LOG.md",
+  "policy": {
+    "mode": "selective-transplant",
+    "automatic_merge": false,
+    "preserve_local_features": true,
+    "review_shared_files": true,
+    "require_checks_before_record": true
+  },
+  "protected_paths": [
+    "graph-ui/",
+    "desktop/",
+    "src/mcp/",
+    "src/ui/",
+    "src/pipeline/pass_cross_repo.c",
+    "tests/"
+  ]
+}

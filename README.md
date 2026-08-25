@@ -14,6 +14,7 @@
 - **覆盖度可审计**：索引结果会区分 `parse_partial`、`skipped` 和按规则排除的 `not_indexed` 文件。没有记录缺口不等于证明仓库完整覆盖，重要结论应使用 `check_index_coverage` 并在必要时回退源码检查。
 - **可视化与桌面控制**：UI 只绑定 loopback，默认端口 `9749`，提供项目、图谱、影响、热点、文件风险、进程、日志和客户端接入计划视图。
 - **多客户端接入**：`install` 会按客户端实际存在的配置和平台条件生成 MCP 配置、说明、技能、Agent 或 Hook；支持 43 个自动/条件接入面，但不会擅自开启实验开关、YOLO 权限或未确认的配置路径。
+- **上游能力选择性移植且可审计**：以上游更新、优化、算法和特性为候选输入，以本仓库现有功能为基线，不做整体覆盖；通过定时审计和同步日志记录完整的上游与本地提交，见 [`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md) 和 [`docs/UPSTREAM_SYNC_LOG.md`](docs/UPSTREAM_SYNC_LOG.md)。
 
 ## 快速开始
 

@@ -1,0 +1,73 @@
+name: Upstream Sync Audit
+
+on:
+  schedule:
+    - cron: "30 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout fork history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Detect a newer upstream commit and generate report
+        id: upstream
+        run: |
+          PREVIOUS=$(python3 -c 'import json; print(json.load(open("docs/upstream-sync-state.json")).get("last_seen_commit") or "")')
+          STATUS=$(python3 scripts/upstream_sync.py status --fetch)
+          SOURCE=$(printf '%s\n' "$STATUS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["upstream_commit"])')
+          echo "upstream_commit=$SOURCE" >> "$GITHUB_OUTPUT"
+          if [ "$SOURCE" = "$PREVIOUS" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "upstream is unchanged at $SOURCE"
+            exit 0
+          fi
+          python3 scripts/upstream_sync.py report --source-ref FETCH_HEAD --write-state
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare report branch
+        id: changes
+        if: steps.upstream.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B automation/upstream-sync-audit
+          git add docs/upstream-sync-state.json docs/upstream-sync/latest.md
+          git commit -m "chore: refresh upstream sync audit"
+          git push --force origin automation/upstream-sync-audit
+
+      - name: Create or update report-only pull request
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          PR=$(gh pr list --repo "$REPO" --head automation/upstream-sync-audit --base main --state open --json number --jq '.[0].number // empty')
+          BODY=$(cat <<'EOF'
+          This pull request contains the generated upstream synchronization report only.
+
+          It does not merge upstream source code. Review `docs/upstream-sync/latest.md`,
+          select compatible commits or paths, run the relevant checks, and record any
+          deliberate integration with `scripts/upstream_sync.py record`.
+          EOF
+          )
+          if [ -n "$PR" ]; then
+            gh pr edit "$PR" --repo "$REPO" --title "chore: audit upstream changes" --body "$BODY"
+          else
+            gh pr create --repo "$REPO" --base main --head automation/upstream-sync-audit \
+              --title "chore: audit upstream changes" --body "$BODY"
+          fi

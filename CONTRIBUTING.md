@@ -46,6 +46,16 @@ list. This keeps formatting deterministic and prevents a formatting-only CI fail
 change. Run `scripts/lint.sh` as well when you need the full local clang-tidy check; all linters
 must pass before committing (also enforced by the pre-commit hook).
 
+## Sync Upstream Changes
+
+The fork tracks compatible changes from `DeusData/codebase-memory-mcp` through a review-first,
+selective-transplant workflow. The existing fork behavior and features must remain intact; an
+upstream commit is never a request to replace the whole tree. Run the audit locally with
+`python3 scripts/upstream_sync.py report --fetch --write-state`. Do not record a commit as
+integrated until the selected algorithms or features have been ported, reviewed, and the relevant
+checks pass. Record the full source and target SHAs with `scripts/upstream_sync.py record`; the
+ledger is `docs/UPSTREAM_SYNC_LOG.md`.
+
 ## Run Security Audit
 
 ```bash

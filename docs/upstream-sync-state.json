@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "upstream_url": "https://github.com/DeusData/codebase-memory-mcp.git",
+  "upstream_ref": "main",
+  "last_seen_commit": null,
+  "last_integrated_upstream_commit": null,
+  "last_integrated_target_commit": null,
+  "last_integrated_at": null,
+  "last_checked_at": null
+}
