@@ -5023,11 +5023,10 @@ static bool federated_evidence_duplicate(const cbm_federated_evidence_t *items, 
         const cbm_federated_evidence_t *item = &items[i];
         if (strcmp(item->relationship ? item->relationship : "",
                    relationship ? relationship : "") == 0 &&
-            strcmp(item->target_project ? item->target_project : "", project ? project : "") ==
-                0 &&
+            strcmp(item->target_project ? item->target_project : "", project ? project : "") == 0 &&
             strcmp(item->target_file ? item->target_file : "", file ? file : "") == 0 &&
-            strcmp(item->target.qualified_name ? item->target.qualified_name : "",
-                   qn ? qn : "") == 0) {
+            strcmp(item->target.qualified_name ? item->target.qualified_name : "", qn ? qn : "") ==
+                0) {
             return true;
         }
     }
@@ -5053,10 +5052,10 @@ static void federated_collect_source_edges(cbm_store_t *source_store, const char
         if (!federated_edge_type_for_direction(edge->type, direction)) {
             continue;
         }
-        yyjson_doc *props_doc = edge->properties_json
-                                    ? yyjson_read(edge->properties_json,
-                                                  strlen(edge->properties_json), 0)
-                                    : NULL;
+        yyjson_doc *props_doc =
+            edge->properties_json
+                ? yyjson_read(edge->properties_json, strlen(edge->properties_json), 0)
+                : NULL;
         yyjson_val *props = props_doc ? yyjson_doc_get_root(props_doc) : NULL;
         const char *target_project = federated_prop_string(props, "target_project");
         const char *target_file = federated_prop_string(props, "target_file");
@@ -5070,11 +5069,11 @@ static void federated_collect_source_edges(cbm_store_t *source_store, const char
         cbm_store_t *target_store =
             federated_open_store(target_project, source_project, source_store);
         cbm_node_t target = {0};
-        bool resolved = target_store &&
-                        federated_resolve_target_node(target_store, target_project, target_qn,
-                                                      target_file, edge->target_id, &target);
+        bool resolved =
+            target_store && federated_resolve_target_node(target_store, target_project, target_qn,
+                                                          target_file, edge->target_id, &target);
         if (federated_evidence_duplicate(items, *count, edge->type, target_project, target_file,
-                                          resolved ? target.qualified_name : "")) {
+                                         resolved ? target.qualified_name : "")) {
             free_node_contents(&target);
             if (target_store != source_store) {
                 cbm_store_close(target_store);
@@ -5157,8 +5156,7 @@ static yyjson_mut_val *federated_to_json_array(yyjson_mut_doc *doc,
                                item->relationship ? item->relationship : "");
         yyjson_mut_obj_add_str(doc, out, "source_project",
                                item->source_project ? item->source_project : "");
-        yyjson_mut_obj_add_str(doc, out, "source_file",
-                               item->source_file ? item->source_file : "");
+        yyjson_mut_obj_add_str(doc, out, "source_file", item->source_file ? item->source_file : "");
         yyjson_mut_obj_add_str(doc, out, "target_project",
                                item->target_project ? item->target_project : "");
         yyjson_mut_obj_add_str(doc, out, "target_file", item->target_file ? item->target_file : "");
@@ -6080,9 +6078,9 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
      * importer as a foreign target. Resolve that target against its own DB so
      * cross-project consumers count as real impact evidence. */
     cbm_federated_evidence_t *cross_impacts = NULL;
-    int cross_impact_count = federated_collect_evidence(
-        store, roots[0].project ? roots[0].project : "", roots, root_count, "inbound", limit,
-        &cross_impacts);
+    int cross_impact_count =
+        federated_collect_evidence(store, roots[0].project ? roots[0].project : "", roots,
+                                   root_count, "inbound", limit, &cross_impacts);
 
     int direct_count = 0;
     int indirect_count = 0;
@@ -6153,7 +6151,6 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     cbm_impact_summary_t risk_counts = cbm_build_impact_summary(
         traversal.visited, traversal.visited_count, traversal.edges, traversal.edge_count);
     risk_counts.critical += cross_impact_count;
-    risk_counts.total += cross_impact_count;
     cross_service = cross_service || risk_counts.has_cross_service;
 
     const char *risk = "low";
@@ -6267,8 +6264,7 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
             const cbm_federated_evidence_t *item = &cross_impacts[i];
             yyjson_mut_val *impact = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_bool(doc, impact, "external", true);
-            yyjson_mut_obj_add_str(doc, impact, "name",
-                                   item->target.name ? item->target.name : "");
+            yyjson_mut_obj_add_str(doc, impact, "name", item->target.name ? item->target.name : "");
             yyjson_mut_obj_add_str(doc, impact, "qualified_name",
                                    item->target.qualified_name ? item->target.qualified_name : "");
             yyjson_mut_obj_add_str(doc, impact, "label",
@@ -6276,9 +6272,9 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
             yyjson_mut_obj_add_str(doc, impact, "project",
                                    item->target_project ? item->target_project : "");
             yyjson_mut_obj_add_str(doc, impact, "file_path",
-                                   item->target.file_path ? item->target.file_path :
-                                                             (item->target_file ? item->target_file
-                                                                                : ""));
+                                   item->target.file_path
+                                       ? item->target.file_path
+                                       : (item->target_file ? item->target_file : ""));
             yyjson_mut_obj_add_int(doc, impact, "hop", 1);
             yyjson_mut_obj_add_strcpy(doc, impact, "risk", "critical");
             yyjson_mut_obj_add_bool(doc, impact, "is_test",
