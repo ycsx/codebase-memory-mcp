@@ -433,7 +433,9 @@ class ServiceManager extends EventEmitter {
           env: { ...this.env, CBM_DESKTOP_SERVICE_TOKEN: this.serviceToken },
           detached: true,
           windowsHide: true,
-          stdio: "ignore",
+          // Keep stdin detached, but capture the service streams so the Desktop
+          // console can display runtime diagnostics after startup.
+          stdio: ["ignore", "pipe", "pipe"],
         },
       );
     } catch (error) {

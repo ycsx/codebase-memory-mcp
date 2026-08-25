@@ -6,6 +6,7 @@ import test from "node:test";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 
 const require = createRequire(import.meta.url);
 const {
@@ -184,6 +185,8 @@ test("Desktop starts a detached console and persists its ownership token", async
   const directory = mkdtempSync(path.join(os.tmpdir(), "cbm-desktop-service-"));
   const statePath = path.join(directory, "service-state.json");
   const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
   child.pid = 9013;
   child.exitCode = 1;
   child.killed = false;
@@ -224,12 +227,36 @@ test("Desktop starts a detached console and persists its ownership token", async
     assert.equal(started.state, "running");
     assert.equal(started.managed, true);
     assert.equal(spawnOptions.detached, true);
-    assert.equal(spawnOptions.stdio, "ignore");
+    assert.deepEqual(spawnOptions.stdio, ["ignore", "pipe", "pipe"]);
     assert.equal(child.unrefCalled, true);
     assert.match(spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN, /^[a-f0-9]{64}$/);
     const saved = JSON.parse(readFileSync(statePath, "utf8"));
     assert.equal(saved.pid, child.pid);
     assert.equal(saved.token, spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN);
+
+    const outputReady = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        manager.off("logs", onLogs);
+        reject(new Error("service output was not forwarded to the Desktop log stream"));
+      }, 1000);
+      function onLogs(logs) {
+        const messages = logs.map((entry) => entry.message);
+        if (messages.includes("索引完成") && messages.includes("警告：跳过一个文件")) {
+          clearTimeout(timer);
+          manager.off("logs", onLogs);
+          resolve();
+        }
+      }
+      manager.on("logs", onLogs);
+    });
+    child.stdout.write("索引进度 50%\n索引完成\n");
+    child.stderr.write("警告：跳过一个文件\n");
+    await outputReady;
+    assert.deepEqual(manager.getLogs().slice(-3).map((entry) => [entry.stream, entry.message]), [
+      ["stdout", "索引进度 50%"],
+      ["stdout", "索引完成"],
+      ["stderr", "警告：跳过一个文件"],
+    ]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
