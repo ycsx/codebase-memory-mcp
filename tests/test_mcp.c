@@ -2104,6 +2104,103 @@ TEST(tool_trace_call_path_not_found) {
     PASS();
 }
 
+/* Cross-project package edges use node ids from two different SQLite files.
+ * The MCP response must resolve the target by project + file metadata rather
+ * than accidentally joining the foreign integer id against the source DB. */
+TEST(tool_cross_project_trace_and_impact_resolve_target_graph) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "%s/cbm-cross-mcp-XXXXXX", cbm_tmpdir());
+    ASSERT_TRUE(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    const char *source_project = "cross-source";
+    const char *target_project = "cross-target";
+    cbm_store_t *target_store = cbm_store_open(target_project);
+    ASSERT_NOT_NULL(target_store);
+    ASSERT_EQ(cbm_store_upsert_project(target_store, target_project, "/tmp/cross-target"),
+              CBM_STORE_OK);
+    cbm_node_t target_file = {.project = target_project,
+                              .label = "File",
+                              .name = "app.js",
+                              .qualified_name = "cross-target.src.app",
+                              .file_path = "src/app.js",
+                              .start_line = 1,
+                              .end_line = 80};
+    ASSERT_GT(cbm_store_upsert_node(target_store, &target_file), 0);
+    cbm_store_close(target_store);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *source_store = cbm_mcp_server_store(srv);
+    cbm_mcp_server_set_project(srv, source_project);
+    ASSERT_EQ(cbm_store_upsert_project(source_store, source_project, "/tmp/cross-source"),
+              CBM_STORE_OK);
+    cbm_node_t source_file = {.project = source_project,
+                              .label = "File",
+                              .name = "main.js",
+                              .qualified_name = "cross-source.src.main",
+                              .file_path = "src/main.js",
+                              .start_line = 1,
+                              .end_line = 40};
+    int64_t source_id = cbm_store_upsert_node(source_store, &source_file);
+    ASSERT_GT(source_id, 0);
+    const char *props = "{\"package\":\"@aikb\",\"specifier\":\"@aikb\","
+                        "\"source_project\":\"cross-source\","
+                        "\"target_project\":\"cross-target\","
+                        "\"source_file\":\"src/main.js\","
+                        "\"target_file\":\"src/app.js\"}";
+    cbm_edge_t forward = {.project = source_project,
+                          .source_id = source_id,
+                          .target_id = 1,
+                          .type = "CROSS_PACKAGE_IMPORTS",
+                          .properties_json = props};
+    cbm_edge_t reverse = {.project = source_project,
+                          .source_id = source_id,
+                          .target_id = 1,
+                          .type = "CROSS_PROJECT_DEPENDS",
+                          .properties_json = props};
+    ASSERT_GT(cbm_store_insert_edge(source_store, &forward), 0);
+    ASSERT_GT(cbm_store_insert_edge(source_store, &reverse), 0);
+
+    char *trace = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":701,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trace_path\",\"arguments\":{"
+             "\"function_name\":\"main.js\",\"project\":\"cross-source\","
+             "\"direction\":\"both\",\"format\":\"json\"}}}");
+    ASSERT_NOT_NULL(trace);
+    char *trace_inner = extract_text_content(trace);
+    ASSERT_NOT_NULL(trace_inner);
+    ASSERT_NOT_NULL(strstr(trace_inner, "cross_callees"));
+    ASSERT_NOT_NULL(strstr(trace_inner, "cross_callers"));
+    ASSERT_NOT_NULL(strstr(trace_inner, "cross-target"));
+    ASSERT_NOT_NULL(strstr(trace_inner, "src/app.js"));
+    ASSERT_NOT_NULL(strstr(trace_inner, "\"resolved\":true"));
+    free(trace_inner);
+    free(trace);
+
+    char *impact = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":702,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
+             "\"query\":\"main.js\",\"project\":\"cross-source\"}}}");
+    ASSERT_NOT_NULL(impact);
+    char *impact_inner = extract_text_content(impact);
+    ASSERT_NOT_NULL(impact_inner);
+    ASSERT_NOT_NULL(strstr(impact_inner, "cross_project_impacts"));
+    ASSERT_NOT_NULL(strstr(impact_inner, "\"external\":true"));
+    ASSERT_NOT_NULL(strstr(impact_inner, "\"cross_service\":true"));
+    free(impact_inner);
+    free(impact);
+
+    cbm_mcp_server_free(srv);
+    cleanup_project_db(cache, target_project);
+    cbm_rmdir(cache);
+    restore_cache_dir(saved_copy);
+    free(saved_copy);
+    PASS();
+}
+
 TEST(tool_trace_missing_function_name) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -7650,6 +7747,7 @@ SUITE(mcp) {
 
     /* Tool handlers with validation */
     RUN_TEST(tool_trace_call_path_not_found);
+    RUN_TEST(tool_cross_project_trace_and_impact_resolve_target_graph);
     RUN_TEST(tool_trace_missing_function_name);
     RUN_TEST(tool_explain_impact_exact_symbol);
     RUN_TEST(tool_explain_impact_ambiguous_candidates);

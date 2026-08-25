@@ -592,25 +592,29 @@ static int cr_match_manifest_dependencies(cbm_store_t *src_store, const char *sr
                     continue;
                 }
                 char esc_pkg[CBM_SZ_512], esc_spec[CBM_SZ_1K], esc_src[CBM_SZ_512],
-                    esc_tgt[CBM_SZ_512];
+                    esc_tgt[CBM_SZ_512], esc_source_file[CR_PATH_BUF], esc_target_file[CR_PATH_BUF];
                 cbm_json_escape(esc_pkg, sizeof(esc_pkg), target_pkg->name);
                 cbm_json_escape(esc_spec, sizeof(esc_spec), spec);
                 cbm_json_escape(esc_src, sizeof(esc_src), src_project);
                 cbm_json_escape(esc_tgt, sizeof(esc_tgt), tgt_project);
+                cbm_json_escape(esc_source_file, sizeof(esc_source_file), manifest_rel);
+                cbm_json_escape(esc_target_file, sizeof(esc_target_file), target_rel);
                 char props[CR_PROPS_BUF];
                 snprintf(props, sizeof(props),
                          "{\"package\":\"%s\",\"specifier\":\"%s\","
                          "\"source_project\":\"%s\",\"target_project\":\"%s\","
+                         "\"source_file\":\"%s\",\"target_file\":\"%s\","
                          "\"resolution\":\"manifest\"}",
-                         esc_pkg, esc_spec, esc_src, esc_tgt);
+                         esc_pkg, esc_spec, esc_src, esc_tgt, esc_source_file, esc_target_file);
                 insert_cross_edge(src_store, src_project, source_id, target_id,
                                   "CROSS_PACKAGE_IMPORTS", props);
                 char reverse_props[CR_PROPS_BUF];
                 snprintf(reverse_props, sizeof(reverse_props),
                          "{\"package\":\"%s\",\"specifier\":\"%s\","
                          "\"source_project\":\"%s\",\"target_project\":\"%s\","
+                         "\"source_file\":\"%s\",\"target_file\":\"%s\","
                          "\"resolution\":\"manifest\"}",
-                         esc_pkg, esc_spec, esc_tgt, esc_src);
+                         esc_pkg, esc_spec, esc_tgt, esc_src, esc_target_file, esc_source_file);
                 insert_cross_edge(tgt_store, tgt_project, target_id, source_id,
                                   "CROSS_PROJECT_DEPENDS", reverse_props);
                 created++;

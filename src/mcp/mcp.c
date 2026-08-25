@@ -444,7 +444,10 @@ static const tool_def_t TOOLS[] = {
      "Use INSTEAD OF grep for callers, dependencies, impact analysis, or data flow tracing. "
      "RESPONSE: compact TOON tables — `callees[N]{qn,hop}:`/`callers[N]{qn,hop}:` headers then "
      "one row per reached node (hop = BFS distance); risk/test/args columns appear when the "
-     "matching flags are set. Pass format=\"json\" for legacy verbose objects.",
+     "matching flags are set. Cross-project package relationships are resolved from the target "
+     "graph by project + file metadata and appear as `cross_callees`/`cross_callers` tables "
+     "(`cross_callees`/`cross_callers` arrays in format=\"json\"). Pass format=\"json\" for "
+     "verbose objects.",
      "{\"type\":\"object\",\"properties\":{\"function_name\":{\"type\":\"string\"},\"project\":{"
      "\"type\":\"string\"},\"direction\":{\"type\":\"string\",\"enum\":[\"inbound\",\"outbound\","
      "\"both\"],\"default\":\"both\"},\"depth\":{\"type\":\"integer\",\"default\":3},\"mode\":{"
@@ -475,7 +478,10 @@ static const tool_def_t TOOLS[] = {
      "a Chinese summary, direct and indirect impact counts, affected files, entry points, tests, "
      "and cross-service signals. Ambiguous searches return candidates; call again with a candidate "
      "target key to analyze the intended symbol. Static graph coverage is best-effort and cannot "
-     "guarantee discovery of dynamic calls, reflection, runtime registration, or event-bus wiring.",
+     "guarantee discovery of dynamic calls, reflection, runtime registration, or event-bus wiring. "
+     "When a dependency crosses an indexed local npm/Vue package boundary, `cross_project_impacts` "
+     "contains the target project's resolved node and the package/file evidence; an unresolved "
+     "target is retained with `resolved=false` so missing indexes are diagnosable.",
      "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"},"
      "\"query\":{\"type\":\"string\",\"description\":\"File path, component, function, "
@@ -4872,6 +4878,323 @@ static bool bfs_edge_evidence_for_hop(cbm_traverse_result_t *tr, int64_t hop_nod
     return false;
 }
 
+/* Cross-project edges deliberately carry the target project's identity and
+ * relative file path.  The node id on such an edge belongs to the target
+ * database and must never be looked up in the current store (ids are only
+ * unique inside one SQLite file).  These helpers resolve that identity into a
+ * real node in the target store for MCP callers. */
+typedef struct {
+    char *relationship;
+    char *source_project;
+    char *source_file;
+    char *target_project;
+    char *target_file;
+    char *package;
+    char *specifier;
+    cbm_node_t target;
+    bool target_resolved;
+} cbm_federated_evidence_t;
+
+static void federated_evidence_free(cbm_federated_evidence_t *item) {
+    if (!item) {
+        return;
+    }
+    free(item->relationship);
+    free(item->source_project);
+    free(item->source_file);
+    free(item->target_project);
+    free(item->target_file);
+    free(item->package);
+    free(item->specifier);
+    free_node_contents(&item->target);
+    memset(item, 0, sizeof(*item));
+}
+
+static void federated_evidence_array_free(cbm_federated_evidence_t *items, int count) {
+    if (!items) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        federated_evidence_free(&items[i]);
+    }
+    free(items);
+}
+
+static const char *federated_prop_string(yyjson_val *root, const char *key) {
+    yyjson_val *value = root && yyjson_is_obj(root) ? yyjson_obj_get(root, key) : NULL;
+    return yyjson_is_str(value) ? yyjson_get_str(value) : NULL;
+}
+
+static bool federated_edge_type_for_direction(const char *type, const char *direction) {
+    if (!type || !direction) {
+        return false;
+    }
+    if (strcmp(direction, "outbound") == 0) {
+        return strcmp(type, "CROSS_PACKAGE_IMPORTS") == 0;
+    }
+    if (strcmp(direction, "inbound") == 0) {
+        return strcmp(type, "CROSS_PROJECT_DEPENDS") == 0;
+    }
+    return false;
+}
+
+static cbm_store_t *federated_open_store(const char *project, const char *source_project,
+                                         cbm_store_t *source_store) {
+    if (!project || !project[0]) {
+        return NULL;
+    }
+    if (source_project && strcmp(project, source_project) == 0) {
+        return source_store;
+    }
+
+    char path[CBM_SZ_1K];
+    project_db_path(project, path, sizeof(path));
+    cbm_store_t *store = cbm_store_open_path_query(path);
+    if (store) {
+        cbm_project_t verify = {0};
+        if (cbm_store_get_project(store, project, &verify) == CBM_STORE_OK) {
+            cbm_project_free_fields(&verify);
+            return store;
+        }
+        cbm_project_free_fields(&verify);
+        cbm_store_close(store);
+    }
+
+    /* A renamed/copied database may not use <project>.db. Reuse the same
+     * internal-name scan as normal MCP project resolution. */
+    return resolve_store_fallback_scan(project);
+}
+
+static bool federated_resolve_target_node(cbm_store_t *store, const char *project,
+                                          const char *target_qn, const char *target_file,
+                                          int64_t target_id, cbm_node_t *out) {
+    if (!store || !project || !out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (target_qn && target_qn[0] &&
+        cbm_store_find_node_by_qn(store, project, target_qn, out) == CBM_STORE_OK) {
+        return true;
+    }
+    if (target_qn && target_qn[0]) {
+        cbm_node_t *matches = NULL;
+        int count = 0;
+        if (cbm_store_find_nodes_by_name(store, project, target_qn, &matches, &count) ==
+                CBM_STORE_OK &&
+            count > 0) {
+            *out = matches[0];
+            memset(&matches[0], 0, sizeof(matches[0]));
+            cbm_store_free_nodes(matches, count);
+            return true;
+        }
+        cbm_store_free_nodes(matches, count);
+    }
+    if (!target_file || !target_file[0]) {
+        /* Compatibility for edges written before target_file was persisted.
+         * This id is safe only after opening the target project's database. */
+        return target_id > 0 && cbm_store_find_node_by_id(store, target_id, out) == CBM_STORE_OK;
+    }
+    cbm_node_t *matches = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_file(store, project, target_file, &matches, &count) !=
+            CBM_STORE_OK ||
+        count == 0) {
+        cbm_store_free_nodes(matches, count);
+        return target_id > 0 && cbm_store_find_node_by_id(store, target_id, out) == CBM_STORE_OK;
+    }
+    int selected = 0;
+    for (int i = 0; i < count; i++) {
+        if (matches[i].label && strcmp(matches[i].label, "File") == 0) {
+            selected = i;
+            break;
+        }
+    }
+    *out = matches[selected];
+    memset(&matches[selected], 0, sizeof(matches[selected]));
+    cbm_store_free_nodes(matches, count);
+    return true;
+}
+
+static bool federated_evidence_duplicate(const cbm_federated_evidence_t *items, int count,
+                                         const char *relationship, const char *project,
+                                         const char *file, const char *qn) {
+    for (int i = 0; i < count; i++) {
+        const cbm_federated_evidence_t *item = &items[i];
+        if (strcmp(item->relationship ? item->relationship : "",
+                   relationship ? relationship : "") == 0 &&
+            strcmp(item->target_project ? item->target_project : "", project ? project : "") ==
+                0 &&
+            strcmp(item->target_file ? item->target_file : "", file ? file : "") == 0 &&
+            strcmp(item->target.qualified_name ? item->target.qualified_name : "",
+                   qn ? qn : "") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void federated_collect_source_edges(cbm_store_t *source_store, const char *source_project,
+                                           const cbm_node_t *source_node, int64_t source_id,
+                                           const char *direction, int max_items,
+                                           cbm_federated_evidence_t *items, int *count) {
+    if (*count >= max_items) {
+        return;
+    }
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_source(source_store, source_id, &edges, &edge_count) !=
+        CBM_STORE_OK) {
+        cbm_store_free_edges(edges, edge_count);
+        return;
+    }
+    for (int e = 0; e < edge_count && *count < max_items; e++) {
+        cbm_edge_t *edge = &edges[e];
+        if (!federated_edge_type_for_direction(edge->type, direction)) {
+            continue;
+        }
+        yyjson_doc *props_doc = edge->properties_json
+                                    ? yyjson_read(edge->properties_json,
+                                                  strlen(edge->properties_json), 0)
+                                    : NULL;
+        yyjson_val *props = props_doc ? yyjson_doc_get_root(props_doc) : NULL;
+        const char *target_project = federated_prop_string(props, "target_project");
+        const char *target_file = federated_prop_string(props, "target_file");
+        const char *target_qn = federated_prop_string(props, "target_function");
+        const char *package = federated_prop_string(props, "package");
+        const char *specifier = federated_prop_string(props, "specifier");
+        if (!target_project || !target_project[0]) {
+            yyjson_doc_free(props_doc);
+            continue;
+        }
+        cbm_store_t *target_store =
+            federated_open_store(target_project, source_project, source_store);
+        cbm_node_t target = {0};
+        bool resolved = target_store &&
+                        federated_resolve_target_node(target_store, target_project, target_qn,
+                                                      target_file, edge->target_id, &target);
+        if (federated_evidence_duplicate(items, *count, edge->type, target_project, target_file,
+                                          resolved ? target.qualified_name : "")) {
+            free_node_contents(&target);
+            if (target_store != source_store) {
+                cbm_store_close(target_store);
+            }
+            yyjson_doc_free(props_doc);
+            continue;
+        }
+        cbm_federated_evidence_t *item = &items[(*count)++];
+        item->relationship = heap_strdup(edge->type ? edge->type : "");
+        item->source_project = heap_strdup(source_project);
+        item->source_file = heap_strdup(source_node->file_path ? source_node->file_path : "");
+        item->target_project = heap_strdup(target_project);
+        item->target_file = heap_strdup(target_file ? target_file : "");
+        item->package = heap_strdup(package ? package : "");
+        item->specifier = heap_strdup(specifier ? specifier : "");
+        item->target = target;
+        item->target_resolved = resolved;
+        if (target_store != source_store) {
+            cbm_store_close(target_store);
+        }
+        yyjson_doc_free(props_doc);
+    }
+    cbm_store_free_edges(edges, edge_count);
+}
+
+static int federated_collect_evidence(cbm_store_t *source_store, const char *source_project,
+                                      const cbm_node_t *roots, int root_count,
+                                      const char *direction, int max_items,
+                                      cbm_federated_evidence_t **out_items) {
+    *out_items = NULL;
+    if (!source_store || !source_project || !roots || root_count <= 0 || max_items <= 0) {
+        return 0;
+    }
+
+    cbm_federated_evidence_t *items = calloc((size_t)max_items, sizeof(*items));
+    if (!items) {
+        return 0;
+    }
+    int count = 0;
+    for (int r = 0; r < root_count && count < max_items; r++) {
+        federated_collect_source_edges(source_store, source_project, &roots[r], roots[r].id,
+                                       direction, max_items, items, &count);
+
+        /* Package edges are normally attached to a File node. When a caller
+         * starts trace_path from a function inside that file, also inspect the
+         * file node so the cross-project relationship is not lost. */
+        if (count >= max_items || !roots[r].file_path || !roots[r].file_path[0]) {
+            continue;
+        }
+        cbm_node_t *file_nodes = NULL;
+        int file_count = 0;
+        if (cbm_store_find_nodes_by_file(source_store, source_project, roots[r].file_path,
+                                         &file_nodes, &file_count) == CBM_STORE_OK) {
+            for (int f = 0; f < file_count && count < max_items; f++) {
+                if (file_nodes[f].id != roots[r].id) {
+                    federated_collect_source_edges(source_store, source_project, &roots[r],
+                                                   file_nodes[f].id, direction, max_items, items,
+                                                   &count);
+                }
+            }
+        }
+        cbm_store_free_nodes(file_nodes, file_count);
+    }
+    if (count == 0) {
+        free(items);
+        items = NULL;
+    }
+    *out_items = items;
+    return count;
+}
+
+static yyjson_mut_val *federated_to_json_array(yyjson_mut_doc *doc,
+                                               const cbm_federated_evidence_t *items, int count) {
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    for (int i = 0; i < count; i++) {
+        const cbm_federated_evidence_t *item = &items[i];
+        yyjson_mut_val *out = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_bool(doc, out, "external", true);
+        yyjson_mut_obj_add_str(doc, out, "relationship",
+                               item->relationship ? item->relationship : "");
+        yyjson_mut_obj_add_str(doc, out, "source_project",
+                               item->source_project ? item->source_project : "");
+        yyjson_mut_obj_add_str(doc, out, "source_file",
+                               item->source_file ? item->source_file : "");
+        yyjson_mut_obj_add_str(doc, out, "target_project",
+                               item->target_project ? item->target_project : "");
+        yyjson_mut_obj_add_str(doc, out, "target_file", item->target_file ? item->target_file : "");
+        yyjson_mut_obj_add_str(doc, out, "package", item->package ? item->package : "");
+        yyjson_mut_obj_add_str(doc, out, "specifier", item->specifier ? item->specifier : "");
+        yyjson_mut_obj_add_bool(doc, out, "resolved", item->target_resolved);
+        yyjson_mut_obj_add_str(doc, out, "name", item->target.name ? item->target.name : "");
+        yyjson_mut_obj_add_str(doc, out, "qualified_name",
+                               item->target.qualified_name ? item->target.qualified_name : "");
+        yyjson_mut_obj_add_str(doc, out, "label", item->target.label ? item->target.label : "");
+        yyjson_mut_obj_add_str(doc, out, "file_path",
+                               item->target.file_path ? item->target.file_path : "");
+        yyjson_mut_obj_add_int(doc, out, "start_line", item->target.start_line);
+        yyjson_mut_obj_add_int(doc, out, "end_line", item->target.end_line);
+        yyjson_mut_arr_add_val(arr, out);
+    }
+    return arr;
+}
+
+static void federated_to_toon_table(cbm_sb_t *sb, const char *key,
+                                    const cbm_federated_evidence_t *items, int count) {
+    const char *cols[] = {"project", "file", "qn", "relationship", "package", "resolved"};
+    cbm_toon_table_header(sb, key, count, cols, (int)(sizeof(cols) / sizeof(cols[0])));
+    for (int i = 0; i < count; i++) {
+        const cbm_federated_evidence_t *item = &items[i];
+        cbm_toon_row_begin(sb);
+        cbm_toon_cell_str(sb, item->target_project, true);
+        cbm_toon_cell_str(sb, item->target_file, false);
+        cbm_toon_cell_str(sb, item->target.qualified_name, false);
+        cbm_toon_cell_str(sb, item->relationship, false);
+        cbm_toon_cell_str(sb, item->package, false);
+        cbm_toon_cell_bool(sb, item->target_resolved, false);
+        cbm_toon_row_end(sb);
+    }
+}
+
 static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_result_t *tr,
                                          bool risk_labels, bool include_tests, bool data_flow,
                                          bool include_evidence) {
@@ -5288,6 +5611,20 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
                             &tr_in);
     }
 
+    /* Cross-package edges are stored with a foreign target id.  Resolve them
+     * from their stable project/file metadata so the Agent receives a real
+     * target node instead of an unusable integer from another SQLite DB. */
+    cbm_federated_evidence_t *cross_out = NULL;
+    cbm_federated_evidence_t *cross_in = NULL;
+    int cross_out_count = do_outbound
+                              ? federated_collect_evidence(store, project, nodes, node_count,
+                                                           "outbound", MCP_BFS_LIMIT, &cross_out)
+                              : 0;
+    int cross_in_count = do_inbound
+                             ? federated_collect_evidence(store, project, nodes, node_count,
+                                                          "inbound", MCP_BFS_LIMIT, &cross_in)
+                             : 0;
+
     char *json = NULL;
     if (!trace_legacy_json) {
         cbm_sb_t sb;
@@ -5304,6 +5641,12 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         if (do_inbound) {
             bfs_to_toon_table(&sb, "callers", &tr_in, risk_labels, include_tests, data_flow,
                               include_evidence);
+        }
+        if (cross_out_count > 0) {
+            federated_to_toon_table(&sb, "cross_callees", cross_out, cross_out_count);
+        }
+        if (cross_in_count > 0) {
+            federated_to_toon_table(&sb, "cross_callers", cross_in, cross_in_count);
         }
         json = cbm_sb_finish(&sb);
     } else {
@@ -5326,6 +5669,14 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
                                    bfs_to_json_array(doc, &tr_in, risk_labels, include_tests,
                                                      data_flow, include_evidence));
         }
+        if (cross_out_count > 0) {
+            yyjson_mut_obj_add_val(doc, root, "cross_callees",
+                                   federated_to_json_array(doc, cross_out, cross_out_count));
+        }
+        if (cross_in_count > 0) {
+            yyjson_mut_obj_add_val(doc, root, "cross_callers",
+                                   federated_to_json_array(doc, cross_in, cross_in_count));
+        }
         /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */
         json = yy_doc_to_str(doc);
         yyjson_mut_doc_free(doc);
@@ -5338,6 +5689,8 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     if (do_inbound) {
         cbm_store_traverse_free(&tr_in);
     }
+    federated_evidence_array_free(cross_out, cross_out_count);
+    federated_evidence_array_free(cross_in, cross_in_count);
 
     cbm_store_free_nodes(nodes, node_count);
     free(func_name);
@@ -5722,6 +6075,15 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     bool truncated = false;
     impact_bfs_union(store, roots, root_count, depth, limit, &traversal, &truncated);
 
+    /* For an inbound impact query, CROSS_PROJECT_DEPENDS is materialized in
+     * the dependency project's database with the local node as source and the
+     * importer as a foreign target. Resolve that target against its own DB so
+     * cross-project consumers count as real impact evidence. */
+    cbm_federated_evidence_t *cross_impacts = NULL;
+    int cross_impact_count = federated_collect_evidence(
+        store, roots[0].project ? roots[0].project : "", roots, root_count, "inbound", limit,
+        &cross_impacts);
+
     int direct_count = 0;
     int indirect_count = 0;
     int test_count = 0;
@@ -5760,8 +6122,38 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
         }
     }
 
+    for (int i = 0; i < cross_impact_count; i++) {
+        const cbm_federated_evidence_t *item = &cross_impacts[i];
+        direct_count++;
+        cross_service = true;
+        if (item->target_resolved && impact_node_is_entry(&item->target)) {
+            entry_count++;
+        }
+        if (item->target_resolved && is_test_file(item->target.file_path)) {
+            test_count++;
+        }
+        const char *file = item->target.file_path && item->target.file_path[0]
+                               ? item->target.file_path
+                               : item->target_file;
+        if (file && file[0]) {
+            bool seen = false;
+            for (int j = 0; j < traversal.visited_count; j++) {
+                if (traversal.visited[j].node.file_path &&
+                    strcmp(traversal.visited[j].node.file_path, file) == 0) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                affected_files++;
+            }
+        }
+    }
+
     cbm_impact_summary_t risk_counts = cbm_build_impact_summary(
         traversal.visited, traversal.visited_count, traversal.edges, traversal.edge_count);
+    risk_counts.critical += cross_impact_count;
+    risk_counts.total += cross_impact_count;
     cross_service = cross_service || risk_counts.has_cross_service;
 
     const char *risk = "low";
@@ -5781,7 +6173,8 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
                                    ? target_key + strlen("file:")
                                    : (roots[0].name ? roots[0].name : target_key);
     char summary_text[CBM_SZ_1K];
-    if (traversal.visited_count == 0) {
+    int affected_node_count = traversal.visited_count + cross_impact_count;
+    if (affected_node_count == 0) {
         snprintf(
             summary_text, sizeof(summary_text),
             "当前图谱中没有发现依赖「%.240s」的节点。修改仍可能影响未被静态索引识别的动态关系。",
@@ -5822,7 +6215,7 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     yyjson_mut_obj_add_strcpy(doc, summary, "risk", risk);
     yyjson_mut_obj_add_strcpy(doc, summary, "risk_label_zh", risk_label);
     yyjson_mut_obj_add_strcpy(doc, summary, "text_zh", summary_text);
-    yyjson_mut_obj_add_int(doc, summary, "affected_nodes", traversal.visited_count);
+    yyjson_mut_obj_add_int(doc, summary, "affected_nodes", affected_node_count);
     yyjson_mut_obj_add_int(doc, summary, "direct_count", direct_count);
     yyjson_mut_obj_add_int(doc, summary, "indirect_count", indirect_count);
     yyjson_mut_obj_add_int(doc, summary, "affected_files", affected_files);
@@ -5867,12 +6260,58 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     }
     yyjson_mut_obj_add_val(doc, root, "impacts", impacts);
 
+    if (cross_impact_count > 0) {
+        yyjson_mut_obj_add_val(doc, root, "cross_project_impacts",
+                               federated_to_json_array(doc, cross_impacts, cross_impact_count));
+        for (int i = 0; i < cross_impact_count; i++) {
+            const cbm_federated_evidence_t *item = &cross_impacts[i];
+            yyjson_mut_val *impact = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_bool(doc, impact, "external", true);
+            yyjson_mut_obj_add_str(doc, impact, "name",
+                                   item->target.name ? item->target.name : "");
+            yyjson_mut_obj_add_str(doc, impact, "qualified_name",
+                                   item->target.qualified_name ? item->target.qualified_name : "");
+            yyjson_mut_obj_add_str(doc, impact, "label",
+                                   item->target.label ? item->target.label : "");
+            yyjson_mut_obj_add_str(doc, impact, "project",
+                                   item->target_project ? item->target_project : "");
+            yyjson_mut_obj_add_str(doc, impact, "file_path",
+                                   item->target.file_path ? item->target.file_path :
+                                                             (item->target_file ? item->target_file
+                                                                                : ""));
+            yyjson_mut_obj_add_int(doc, impact, "hop", 1);
+            yyjson_mut_obj_add_strcpy(doc, impact, "risk", "critical");
+            yyjson_mut_obj_add_bool(doc, impact, "is_test",
+                                    item->target_resolved && is_test_file(item->target.file_path));
+            yyjson_mut_obj_add_bool(doc, impact, "is_entry_point",
+                                    item->target_resolved && impact_node_is_entry(&item->target));
+            yyjson_mut_val *evidence = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, evidence, "relationship",
+                                   item->relationship ? item->relationship : "");
+            yyjson_mut_obj_add_str(doc, evidence, "source_project",
+                                   item->source_project ? item->source_project : "");
+            yyjson_mut_obj_add_str(doc, evidence, "target_project",
+                                   item->target_project ? item->target_project : "");
+            yyjson_mut_obj_add_str(doc, evidence, "package", item->package ? item->package : "");
+            yyjson_mut_obj_add_str(doc, evidence, "specifier",
+                                   item->specifier ? item->specifier : "");
+            yyjson_mut_obj_add_val(doc, impact, "evidence", evidence);
+            yyjson_mut_arr_add_val(impacts, impact);
+        }
+    }
+
     yyjson_mut_val *limitations = yyjson_mut_arr(doc);
     yyjson_mut_arr_add_strcpy(
         doc, limitations,
         "结果只覆盖已建立索引的静态关系；动态调用、反射、运行时注册和事件总线可能无法完整识别。");
     yyjson_mut_arr_add_strcpy(doc, limitations,
                               "间接影响表示图谱中存在依赖路径，不代表修改后一定会发生行为变化。");
+    if (cross_impact_count > 0) {
+        yyjson_mut_arr_add_strcpy(
+            doc, limitations,
+            "跨项目影响已按目标图谱的项目名和文件路径解析；若目标图谱未建立或已过期，"
+            "结果会保留关系但无法补充目标节点详情。");
+    }
     if (truncated) {
         yyjson_mut_arr_add_strcpy(doc, limitations,
                                   "结果已达到本次查询上限，请缩小目标或提高 limit 后重新分析。");
@@ -5882,6 +6321,7 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     cbm_store_traverse_free(&traversal);
+    federated_evidence_array_free(cross_impacts, cross_impact_count);
     char *result = cbm_mcp_text_result(json ? json : "out of memory", json == NULL);
     free(json);
     return result;
