@@ -520,7 +520,7 @@ PP_OBJ_TSAN = $(BUILD_DIR)/tsan_preprocessor.o
 
 # ── Targets ──────────────────────────────────────────────────────
 
-.PHONY: test test-repro test-foundation test-tsan cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-cppcheck lint-format security
+.PHONY: test test-repro test-foundation test-tsan cbm cbm-with-ui frontend embed clean-c lint lint-tidy lint-cppcheck lint-format format security
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -759,7 +759,7 @@ clean-c:
 # ── Linting ─────────────────────────────────────────────────────
 
 # clang-tidy and clang-format: use Homebrew LLVM on macOS, overridable via make args
-# e.g. make lint-format CLANG_FORMAT=clang-format-18
+# e.g. make lint-format CLANG_FORMAT=clang-format-20
 LLVM_BIN := $(shell brew --prefix llvm 2>/dev/null)/bin
 CLANG_TIDY ?= $(shell [ -x "$(LLVM_BIN)/clang-tidy" ] && echo "$(LLVM_BIN)/clang-tidy" || echo clang-tidy)
 CLANG_FORMAT ?= $(shell [ -x "$(LLVM_BIN)/clang-format" ] && echo "$(LLVM_BIN)/clang-format" || echo clang-format)
@@ -806,6 +806,13 @@ lint-cppcheck:
 lint-format:
 	@echo "=== clang-format ==="
 	@$(CLANG_FORMAT) --dry-run --Werror $(LINT_SRCS) $(LINT_HDRS)
+
+# clang-format: apply the repository's formatting rules to the exact same
+# source/header set checked by lint-format. Use scripts/format.sh as the
+# stable developer-facing entry point.
+format:
+	@echo "=== clang-format (apply) ==="
+	@$(CLANG_FORMAT) -i $(LINT_SRCS) $(LINT_HDRS)
 
 # Ban ALL NOLINT variants EXCEPT whitelisted NOLINT(misc-no-recursion).
 # The whitelist is in src/foundation/recursion_whitelist.h with documented reasoning.

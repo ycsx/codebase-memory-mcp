@@ -9,12 +9,12 @@
 
 /* Result of a cross-repo matching run. */
 typedef struct {
-    int http_edges;    /* CROSS_HTTP_CALLS edges created */
-    int async_edges;   /* CROSS_ASYNC_CALLS edges created */
-    int channel_edges; /* CROSS_CHANNEL edges created */
-    int grpc_edges;    /* CROSS_GRPC_CALLS edges created */
-    int graphql_edges; /* CROSS_GRAPHQL_CALLS edges created */
-    int trpc_edges;    /* CROSS_TRPC_CALLS edges created */
+    int http_edges;               /* CROSS_HTTP_CALLS edges created */
+    int async_edges;              /* CROSS_ASYNC_CALLS edges created */
+    int channel_edges;            /* CROSS_CHANNEL edges created */
+    int grpc_edges;               /* CROSS_GRPC_CALLS edges created */
+    int graphql_edges;            /* CROSS_GRAPHQL_CALLS edges created */
+    int trpc_edges;               /* CROSS_TRPC_CALLS edges created */
     int package_import_edges;     /* CROSS_PACKAGE_IMPORTS edges created */
     int project_dependency_edges; /* CROSS_PROJECT_DEPENDS edges created */
     int projects_scanned;

@@ -142,13 +142,11 @@ static void cr_join_rel(const char *base, const char *suffix, char *out, size_t 
     if (!suffix) {
         suffix = "";
     }
-    snprintf(out, outsz, "%s%s%s", base && base[0] ? base : "", base && base[0] ? "/" : "",
-             suffix);
+    snprintf(out, outsz, "%s%s%s", base && base[0] ? base : "", base && base[0] ? "/" : "", suffix);
     cr_slash_normalize(out);
 }
 
-static bool cr_read_package_manifest(const char *abs_path, const char *rel_dir,
-                                     cr_package_t *out) {
+static bool cr_read_package_manifest(const char *abs_path, const char *rel_dir, cr_package_t *out) {
     FILE *f = cbm_fopen(abs_path, "rb");
     if (!f) {
         return false;
@@ -337,8 +335,7 @@ static int64_t cr_find_project_node(cbm_store_t *store, const char *project) {
         return 0;
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db,
-                           "SELECT id FROM nodes WHERE project=?1 AND label='Project' LIMIT 1",
+    if (sqlite3_prepare_v2(db, "SELECT id FROM nodes WHERE project=?1 AND label='Project' LIMIT 1",
                            CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
         return 0;
     }
@@ -462,13 +459,12 @@ static int cr_match_package_imports(cbm_store_t *src_store, const char *src_proj
         if (subpath && subpath[0]) {
             cr_join_rel(target_pkg->rel_dir, subpath, target_rel, sizeof(target_rel));
         } else {
-            cr_join_rel(target_pkg->rel_dir, target_pkg->entry_rel, target_rel,
-                        sizeof(target_rel));
+            cr_join_rel(target_pkg->rel_dir, target_pkg->entry_rel, target_rel, sizeof(target_rel));
         }
         cr_collapse_relative(target_rel);
         char target_file[CR_PATH_BUF] = {0};
-        int64_t target_id = cr_find_file_node(tgt_store, tgt_project, target_rel, target_file,
-                                              sizeof(target_file));
+        int64_t target_id =
+            cr_find_file_node(tgt_store, tgt_project, target_rel, target_file, sizeof(target_file));
         if (target_id == 0) {
             continue;
         }
@@ -491,8 +487,8 @@ static int cr_match_package_imports(cbm_store_t *src_store, const char *src_proj
                  "\"source_file\":\"%s\",\"target_file\":\"%s\"}",
                  esc_package, esc_spec, esc_src_project, esc_tgt_project, esc_source_file,
                  esc_target_file);
-        insert_cross_edge(src_store, src_project, source_id, target_id,
-                          "CROSS_PACKAGE_IMPORTS", props_buf);
+        insert_cross_edge(src_store, src_project, source_id, target_id, "CROSS_PACKAGE_IMPORTS",
+                          props_buf);
 
         /* The reverse dependency edge is stored in the target DB. Keep its
          * target identity oriented from that project's perspective so the UI
@@ -504,8 +500,8 @@ static int cr_match_package_imports(cbm_store_t *src_store, const char *src_proj
                  "\"source_file\":\"%s\",\"target_file\":\"%s\"}",
                  esc_package, esc_spec, esc_tgt_project, esc_src_project, esc_target_file,
                  esc_source_file);
-        insert_cross_edge(tgt_store, tgt_project, target_id, source_id,
-                          "CROSS_PROJECT_DEPENDS", reverse_props);
+        insert_cross_edge(tgt_store, tgt_project, target_id, source_id, "CROSS_PROJECT_DEPENDS",
+                          reverse_props);
         created++;
     }
     sqlite3_finalize(stmt);
@@ -515,19 +511,18 @@ static int cr_match_package_imports(cbm_store_t *src_store, const char *src_proj
 /* Match local protocols declared in package.json even when no source import
  * was indexed (for example a package re-exported by generated code). */
 static int cr_match_manifest_dependencies(cbm_store_t *src_store, const char *src_project,
-                                           const char *src_root, cbm_store_t *tgt_store,
-                                           const char *tgt_project,
-                                           const cr_package_list_t *src_packages,
-                                           const cr_package_list_t *tgt_packages) {
+                                          const char *src_root, cbm_store_t *tgt_store,
+                                          const char *tgt_project,
+                                          const cr_package_list_t *src_packages,
+                                          const cr_package_list_t *tgt_packages) {
     int created = 0;
-    static const char *const sections[] = {"dependencies", "devDependencies",
-                                           "peerDependencies", "optionalDependencies"};
+    static const char *const sections[] = {"dependencies", "devDependencies", "peerDependencies",
+                                           "optionalDependencies"};
     for (int pi = 0; src_packages && pi < src_packages->count; pi++) {
         const cr_package_t *src_pkg = &src_packages->items[pi];
         char manifest_path[CR_PATH_BUF];
         snprintf(manifest_path, sizeof(manifest_path), "%s/%s%s/package.json", src_root,
-                 src_pkg->rel_dir[0] ? src_pkg->rel_dir : "",
-                 src_pkg->rel_dir[0] ? "/" : "");
+                 src_pkg->rel_dir[0] ? src_pkg->rel_dir : "", src_pkg->rel_dir[0] ? "/" : "");
         FILE *f = cbm_fopen(manifest_path, "rb");
         if (!f) {
             continue;
@@ -544,9 +539,8 @@ static int cr_match_manifest_dependencies(cbm_store_t *src_store, const char *sr
         }
         char manifest_rel[CR_PATH_BUF];
         snprintf(manifest_rel, sizeof(manifest_rel), "%s%s",
-                 src_pkg->rel_dir[0] ? src_pkg->rel_dir : "", src_pkg->rel_dir[0]
-                     ? "/package.json"
-                     : "package.json");
+                 src_pkg->rel_dir[0] ? src_pkg->rel_dir : "",
+                 src_pkg->rel_dir[0] ? "/package.json" : "package.json");
         int64_t source_id = cr_find_file_node(src_store, src_project, manifest_rel, NULL, 0);
         if (source_id == 0) {
             /* package.json is intentionally excluded from normal source files
@@ -1403,16 +1397,16 @@ cbm_cross_repo_result_t cbm_cross_repo_match(const char *project, const char **t
         /* Run the reverse direction as well. Imports live in the consumer DB,
          * so invoking the matcher from the provider side must still recreate
          * both graph-visible directions. */
-        int reverse_package_matches = cr_match_package_imports(
-            tgt_store, tgt, src_store, project, &tgt_packages, &src_packages);
-        int manifest_matches = src_info.root_path
-                                   ? cr_match_manifest_dependencies(src_store, project,
-                                                                    src_info.root_path, tgt_store,
-                                                                    tgt, &src_packages,
-                                                                    &tgt_packages)
-                                   : 0;
+        int reverse_package_matches = cr_match_package_imports(tgt_store, tgt, src_store, project,
+                                                               &tgt_packages, &src_packages);
+        int manifest_matches =
+            src_info.root_path
+                ? cr_match_manifest_dependencies(src_store, project, src_info.root_path, tgt_store,
+                                                 tgt, &src_packages, &tgt_packages)
+                : 0;
         result.package_import_edges += package_matches + reverse_package_matches + manifest_matches;
-        result.project_dependency_edges += package_matches + reverse_package_matches + manifest_matches;
+        result.project_dependency_edges +=
+            package_matches + reverse_package_matches + manifest_matches;
         if (tgt_info.root_path || tgt_info.name || tgt_info.indexed_at) {
             cbm_project_free_fields(&tgt_info);
         }

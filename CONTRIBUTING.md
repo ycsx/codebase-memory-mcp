@@ -34,11 +34,17 @@ This builds with ASan + UBSan and runs all tests (~2040 cases). Key test files:
 
 ## Run Linter
 
+Format changed C sources and headers first, then run the same formatter in check mode:
+
 ```bash
-scripts/lint.sh
+scripts/format.sh CLANG_FORMAT=clang-format-20
+scripts/lint.sh --ci CLANG_FORMAT=clang-format-20
 ```
 
-Runs clang-tidy, cppcheck, and clang-format. All must pass before committing (also enforced by pre-commit hook).
+`scripts/format.sh` and CI share the repository's `.clang-format` file and the same source/header
+list. This keeps formatting deterministic and prevents a formatting-only CI failure after a code
+change. Run `scripts/lint.sh` as well when you need the full local clang-tidy check; all linters
+must pass before committing (also enforced by the pre-commit hook).
 
 ## Run Security Audit
 
@@ -146,7 +152,7 @@ If in doubt, open an issue and ask.
 
 - **C code only** — this project was rewritten from Go to pure C in v0.5.0. Go PRs will be acknowledged and potentially ported, but cannot be merged directly.
 - Include tests for new functionality
-- Run `scripts/test.sh` and `scripts/lint.sh` before submitting
+- Run `scripts/format.sh`, `scripts/test.sh`, and `scripts/lint.sh` before submitting
 - Keep PRs focused — avoid unrelated reformatting or refactoring
 
 ## Security

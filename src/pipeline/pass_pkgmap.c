@@ -1255,24 +1255,21 @@ static const char *import_candidate_symbol(const char *module_path, char *out, s
  * Relative paths, aliases and URL imports are deliberately excluded: those
  * already have repository-local resolution strategies or are runtime data. */
 static bool is_js_package_import(const char *rel, const char *module_path) {
-    if (!rel || !module_path || !module_path[0] || module_path[0] == '.' ||
-        module_path[0] == '/' || strstr(module_path, "://") != NULL ||
-        module_path[0] == '#') {
+    if (!rel || !module_path || !module_path[0] || module_path[0] == '.' || module_path[0] == '/' ||
+        strstr(module_path, "://") != NULL || module_path[0] == '#') {
         return false;
     }
     const char *dot = strrchr(rel, '.');
     if (!dot) {
         return false;
     }
-    return strcmp(dot, ".js") == 0 || strcmp(dot, ".jsx") == 0 ||
-           strcmp(dot, ".mjs") == 0 || strcmp(dot, ".cjs") == 0 ||
-           strcmp(dot, ".ts") == 0 || strcmp(dot, ".tsx") == 0 ||
-           strcmp(dot, ".mts") == 0 || strcmp(dot, ".cts") == 0 ||
-           strcmp(dot, ".vue") == 0;
+    return strcmp(dot, ".js") == 0 || strcmp(dot, ".jsx") == 0 || strcmp(dot, ".mjs") == 0 ||
+           strcmp(dot, ".cjs") == 0 || strcmp(dot, ".ts") == 0 || strcmp(dot, ".tsx") == 0 ||
+           strcmp(dot, ".mts") == 0 || strcmp(dot, ".cts") == 0 || strcmp(dot, ".vue") == 0;
 }
 
 static const cbm_gbuf_node_t *create_external_package_reference(cbm_pipeline_ctx_t *ctx,
-                                                                 const CBMImport *imp) {
+                                                                const CBMImport *imp) {
     if (!ctx || !ctx->gbuf || !imp || !imp->module_path || !imp->module_path[0]) {
         return NULL;
     }
@@ -1280,8 +1277,8 @@ static const cbm_gbuf_node_t *create_external_package_reference(cbm_pipeline_ctx
     size_t n = 0;
     for (const char *p = imp->module_path; *p && n + 1 < sizeof(safe); p++) {
         unsigned char c = (unsigned char)*p;
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-' || c == '.') {
             safe[n++] = (char)c;
         } else {
             safe[n++] = '_';
@@ -1297,10 +1294,9 @@ static const cbm_gbuf_node_t *create_external_package_reference(cbm_pipeline_ctx
     cbm_json_escape(escaped, sizeof(escaped), imp->module_path);
     char props[CBM_SZ_2K];
     snprintf(props, sizeof(props),
-             "{\"external\":true,\"module_path\":\"%s\",\"resolution\":\"unresolved\"}",
-             escaped);
-    int64_t id = cbm_gbuf_upsert_node(ctx->gbuf, "ExternalPackage", imp->module_path, qn, "", 0,
-                                      0, props);
+             "{\"external\":true,\"module_path\":\"%s\",\"resolution\":\"unresolved\"}", escaped);
+    int64_t id =
+        cbm_gbuf_upsert_node(ctx->gbuf, "ExternalPackage", imp->module_path, qn, "", 0, 0, props);
     return id > 0 ? cbm_gbuf_find_by_id(ctx->gbuf, id) : NULL;
 }
 
@@ -1789,12 +1785,14 @@ static void format_import_edge_properties(const CBMImport *imp, bool symbol_bind
         char escaped_imported[CBM_SZ_256];
         cbm_json_escape(escaped_imported, sizeof(escaped_imported), imp->imported_name);
         snprintf(out, out_size,
-                 "{\"local_name\":\"%s\",\"imported_name\":\"%s\",\"module_path\":\"%s\",\"binding\":\"%s\"}",
-                 escaped_local, escaped_imported, escaped_module, symbol_binding ? "symbol" : "module");
+                 "{\"local_name\":\"%s\",\"imported_name\":\"%s\",\"module_path\":\"%s\","
+                 "\"binding\":\"%s\"}",
+                 escaped_local, escaped_imported, escaped_module,
+                 symbol_binding ? "symbol" : "module");
         return;
     }
-    snprintf(out, out_size, "{\"local_name\":\"%s\",\"module_path\":\"%s\"}",
-             escaped_local, escaped_module);
+    snprintf(out, out_size, "{\"local_name\":\"%s\",\"module_path\":\"%s\"}", escaped_local,
+             escaped_module);
 }
 
 static const cbm_gbuf_node_t *create_java_external_type(cbm_pipeline_ctx_t *ctx,

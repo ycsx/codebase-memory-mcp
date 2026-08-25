@@ -452,7 +452,8 @@ static const tool_def_t TOOLS[] = {
      "\"calls\",\"description\":\"calls: follow CALLS edges. data_flow: follow CALLS+DATA_FLOWS "
      "with arg expressions. cross_service: follow HTTP_CALLS+ASYNC_CALLS+DATA_FLOWS through "
      "Routes, plus CROSS_* cross-repo edges (CROSS_HTTP_CALLS/ASYNC_CALLS/CHANNEL/GRPC_CALLS/"
-     "GRAPHQL_CALLS/TRPC_CALLS/PACKAGE_IMPORTS/PROJECT_DEPENDS) to hop into other services.\"},\"parameter_name\":{\"type\":"
+     "GRAPHQL_CALLS/TRPC_CALLS/PACKAGE_IMPORTS/PROJECT_DEPENDS) to hop into other "
+     "services.\"},\"parameter_name\":{\"type\":"
      "\"string\",\"description\":\"For data_flow mode: "
      "scope trace to a specific parameter name\"},\"edge_types\":{\"type\":\"array\",\"items\":{"
      "\"type\":\"string\"}},\"risk_labels\":{\"type\":\"boolean\",\"default\":false,"
@@ -3958,9 +3959,9 @@ static void append_cross_repo_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
     /* Scan edge types for any CROSS_* edges and sum them */
     int cross_total = 0;
     yyjson_mut_val *cr = yyjson_mut_obj(doc);
-    static const char *cross_types[] = {"CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS",
-                                        "CROSS_CHANNEL",       "CROSS_GRPC_CALLS",
-                                        "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS",
+    static const char *cross_types[] = {"CROSS_HTTP_CALLS",      "CROSS_ASYNC_CALLS",
+                                        "CROSS_CHANNEL",         "CROSS_GRPC_CALLS",
+                                        "CROSS_GRAPHQL_CALLS",   "CROSS_TRPC_CALLS",
                                         "CROSS_PACKAGE_IMPORTS", "CROSS_PROJECT_DEPENDS"};
     for (int t = 0; t < (int)(sizeof(cross_types) / sizeof(cross_types[0])); t++) {
         for (int i = 0; i < schema->edge_type_count; i++) {
@@ -4422,10 +4423,10 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
         }
         /* Cross-repo edge summary (mirrors append_cross_repo_summary). */
         {
-            static const char *const cross_types[] = {"CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS",
-                                                      "CROSS_CHANNEL",       "CROSS_GRPC_CALLS",
-                                                      "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS",
-                                                      "CROSS_PACKAGE_IMPORTS", "CROSS_PROJECT_DEPENDS"};
+            static const char *const cross_types[] = {
+                "CROSS_HTTP_CALLS",      "CROSS_ASYNC_CALLS",    "CROSS_CHANNEL",
+                "CROSS_GRPC_CALLS",      "CROSS_GRAPHQL_CALLS",  "CROSS_TRPC_CALLS",
+                "CROSS_PACKAGE_IMPORTS", "CROSS_PROJECT_DEPENDS"};
             int cross_total = 0;
             for (int t = 0; t < (int)(sizeof(cross_types) / sizeof(cross_types[0])); t++) {
                 for (int i = 0; i < schema.edge_type_count; i++) {
@@ -4718,11 +4719,18 @@ static yyjson_doc *resolve_trace_edge_types(const char *args, const char *mode,
                                             const char **out_types, int *out_count) {
     static const char *mode_calls[] = {"CALLS"};
     static const char *mode_data_flow[] = {"CALLS", "DATA_FLOWS"};
-    static const char *mode_cross_svc[] = {
-        "HTTP_CALLS",          "ASYNC_CALLS",       "DATA_FLOWS",    "CALLS",
-        "CROSS_HTTP_CALLS",    "CROSS_ASYNC_CALLS", "CROSS_CHANNEL", "CROSS_GRPC_CALLS",
-        "CROSS_GRAPHQL_CALLS", "CROSS_TRPC_CALLS", "CROSS_PACKAGE_IMPORTS",
-        "CROSS_PROJECT_DEPENDS"};
+    static const char *mode_cross_svc[] = {"HTTP_CALLS",
+                                           "ASYNC_CALLS",
+                                           "DATA_FLOWS",
+                                           "CALLS",
+                                           "CROSS_HTTP_CALLS",
+                                           "CROSS_ASYNC_CALLS",
+                                           "CROSS_CHANNEL",
+                                           "CROSS_GRPC_CALLS",
+                                           "CROSS_GRAPHQL_CALLS",
+                                           "CROSS_TRPC_CALLS",
+                                           "CROSS_PACKAGE_IMPORTS",
+                                           "CROSS_PROJECT_DEPENDS"};
 
     *out_count = 0;
 
