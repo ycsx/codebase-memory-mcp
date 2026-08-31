@@ -50,6 +50,26 @@ static inline void *intptr_to_ptr(intptr_t v) {
     return p;
 }
 
+static bool pipeline_is_markdown_ext(const char *ext) {
+    if (!ext || ext[0] != '.') {
+        return false;
+    }
+    if ((ext[1] == 'm' || ext[1] == 'M') && (ext[2] == 'd' || ext[2] == 'D') && ext[3] == '\0') {
+        return true;
+    }
+    static const char markdown[] = ".markdown";
+    for (size_t i = 0; markdown[i]; i++) {
+        char c = ext[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c + ('a' - 'A'));
+        }
+        if (c != markdown[i]) {
+            return false;
+        }
+    }
+    return ext[9] == '\0';
+}
+
 /* ── Global index lock ─────────────────────────────────────────── */
 /* Prevents concurrent pipeline runs on the same DB file.
  * Atomic spinlock: 0 = free, 1 = locked. */
@@ -494,6 +514,23 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
         const char *qualified_name = file_qn;
         const char *file_path = rel;
         cbm_gbuf_upsert_node(p->gbuf, "File", basename, qualified_name, file_path, 0, 0, props);
+
+        /* Markdown files are first-class documents. Keep the File node for
+         * backwards compatibility, and attach a stable Document container so
+         * headings can be traversed independently from source symbols. */
+        bool is_markdown = pipeline_is_markdown_ext(ext);
+        if (is_markdown) {
+            char *doc_qn = cbm_pipeline_fqn_compute(p->project_name, rel, "__document__");
+            if (doc_qn) {
+                int64_t doc_id = cbm_gbuf_upsert_node(p->gbuf, "Document", basename, doc_qn,
+                                                      file_path, 1, 0, "{\"format\":\"markdown\"}");
+                const cbm_gbuf_node_t *fnode = cbm_gbuf_find_by_qn(p->gbuf, file_qn);
+                if (fnode && doc_id > 0) {
+                    cbm_gbuf_insert_edge(p->gbuf, fnode->id, doc_id, "HAS_DOCUMENT", "{}");
+                }
+                free(doc_qn);
+            }
+        }
 
         /* CONTAINS_FILE edge: parent dir -> file */
         char *dir = strdup(rel);

@@ -283,6 +283,9 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     if (opts->child_pid_out) {
         *opts->child_pid_out = (long)pi.dwProcessId;
     }
+    if (opts->on_child_pid) {
+        opts->on_child_pid((long)pi.dwProcessId, opts->child_pid_ud);
+    }
 
     long tail_pos = 0;
     uint64_t last_activity = cbm_now_ms();
@@ -332,9 +335,6 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         out->term_signal = 0;
         return -1;
     }
-    if (opts->child_pid_out) {
-        *opts->child_pid_out = (long)pid;
-    }
     if (pid == 0) {
         /* Child: redirect stdout+stderr to the log (or discard), then exec.
          * Use open()+dup2() (async-signal-safe, no malloc) rather than freopen():
@@ -356,6 +356,12 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         }
         execv(bin, (char *const *)argv);
         _exit(127); /* exec failed */
+    }
+    if (opts->child_pid_out) {
+        *opts->child_pid_out = (long)pid;
+    }
+    if (opts->on_child_pid) {
+        opts->on_child_pid((long)pid, opts->child_pid_ud);
     }
 
     long tail_pos = 0;

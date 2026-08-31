@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import type { GraphData } from "../lib/types";
+import { useCallback, useRef, useState } from "react";
+import type { GraphData, GraphEdge, GraphNode } from "../lib/types";
 
 export interface LoadProgress {
   receivedBytes: number;
@@ -39,6 +39,69 @@ export function clampNodeBudget(value: number): number {
 /** Which graph to lay out: the code graph (default) or the missed graph —
  *  only files the indexer could not fully cover, as their file structure. */
 export type GraphVariant = "code" | "missed";
+
+function primaryKey(project: string, id: number): string {
+  return `primary:${project}:${id}`;
+}
+
+function linkedKey(project: string, id: number): string {
+  return `linked:${project}:${id}`;
+}
+
+function scopeNodes(nodes: GraphNode[], keyFor: (id: number) => string, project: string): GraphNode[] {
+  return nodes.map((node) => ({
+    ...node,
+    graph_key: keyFor(node.id),
+    graph_project: project,
+  }));
+}
+
+function scopeEdges(edges: GraphEdge[], sourceKey: (id: number) => string, targetKey: (id: number) => string): GraphEdge[] {
+  return edges.map((edge) => ({
+    ...edge,
+    source_key: sourceKey(edge.source),
+    target_key: targetKey(edge.target),
+  }));
+}
+
+/** Attach stable, project-scoped identities to a federated layout response.
+ * SQLite node IDs restart at 1 in every project, so numeric IDs cannot be used
+ * as React/selection keys once linked projects are rendered together. */
+export function scopeGraphData(data: GraphData, project: string): GraphData {
+  const primaryNodes = scopeNodes(data.nodes, (id) => primaryKey(project, id), project);
+  const scopedLinked = data.linked_projects?.map((linked) => ({
+    ...linked,
+    nodes: scopeNodes(linked.nodes, (id) => linkedKey(linked.project, id), linked.project),
+    edges: scopeEdges(
+      linked.edges,
+      (id) => linkedKey(linked.project, id),
+      (id) => linkedKey(linked.project, id),
+    ),
+    cross_edges: scopeEdges(
+      linked.cross_edges,
+      (id) => primaryKey(project, id),
+      (id) => linkedKey(linked.project, id),
+    ),
+  }));
+  const scopedMissed = data.missed_graph
+    ? {
+        ...data.missed_graph,
+        nodes: scopeNodes(data.missed_graph.nodes, (id) => `missed:${project}:${id}`, project),
+        edges: scopeEdges(
+          data.missed_graph.edges,
+          (id) => `missed:${project}:${id}`,
+          (id) => `missed:${project}:${id}`,
+        ),
+      }
+    : undefined;
+  return {
+    ...data,
+    nodes: primaryNodes,
+    edges: scopeEdges(data.edges, (id) => primaryKey(project, id), (id) => primaryKey(project, id)),
+    linked_projects: scopedLinked,
+    missed_graph: scopedMissed,
+  };
+}
 
 export async function fetchLayout(
   project: string,
@@ -91,19 +154,30 @@ export function useGraphData(): UseGraphDataResult {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<LoadProgress>(NO_PROGRESS);
+  const requestSequence = useRef(0);
 
   const fetchOverview = useCallback(
     async (project: string, maxNodes?: number, graph: GraphVariant = "code") => {
+      const requestId = ++requestSequence.current;
       setLoading(true);
       setError(null);
       setProgress(NO_PROGRESS);
       try {
-        const result = await fetchLayout(project, maxNodes, setProgress, graph);
-        setData(result);
+        const result = await fetchLayout(
+          project,
+          maxNodes,
+          (nextProgress) => {
+            if (requestSequence.current === requestId) setProgress(nextProgress);
+          },
+          graph,
+        );
+        if (requestSequence.current === requestId) setData(scopeGraphData(result, project));
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to fetch layout");
+        if (requestSequence.current === requestId) {
+          setError(e instanceof Error ? e.message : "Failed to fetch layout");
+        }
       } finally {
-        setLoading(false);
+        if (requestSequence.current === requestId) setLoading(false);
       }
     },
     [],
@@ -111,17 +185,22 @@ export function useGraphData(): UseGraphDataResult {
 
   const fetchDetail = useCallback(
     async (project: string, _centerNode: string) => {
+      const requestId = ++requestSequence.current;
       setLoading(true);
       setError(null);
       setProgress(NO_PROGRESS);
       try {
         /* TODO: detail level with center_node filtering */
-        const result = await fetchLayout(project, undefined, setProgress);
-        setData(result);
+        const result = await fetchLayout(project, undefined, (nextProgress) => {
+          if (requestSequence.current === requestId) setProgress(nextProgress);
+        });
+        if (requestSequence.current === requestId) setData(scopeGraphData(result, project));
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to fetch layout");
+        if (requestSequence.current === requestId) {
+          setError(e instanceof Error ? e.message : "Failed to fetch layout");
+        }
       } finally {
-        setLoading(false);
+        if (requestSequence.current === requestId) setLoading(false);
       }
     },
     [],

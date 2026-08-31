@@ -3084,6 +3084,10 @@ static int query_neighbor_names(sqlite3 *db, const char *sql, int64_t node_id, i
 
     int cap = ST_INIT_CAP_8;
     char **names = malloc((size_t)cap * sizeof(char *));
+    if (!names) {
+        sqlite3_finalize(stmt);
+        return CBM_STORE_ERR;
+    }
     int count = 0;
     int scan_rc10;
     while ((scan_rc10 = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -3093,9 +3097,19 @@ static int query_neighbor_names(sqlite3 *db, const char *sql, int64_t node_id, i
         }
         if (count >= cap) {
             cap *= ST_GROWTH;
-            names = safe_realloc(names, (size_t)cap * sizeof(char *));
+            char **grown = realloc(names, (size_t)cap * sizeof(char *));
+            if (!grown) {
+                scan_rc10 = SQLITE_NOMEM;
+                break;
+            }
+            names = grown;
         }
-        names[count++] = strdup(name);
+        names[count] = heap_strdup(name);
+        if (!names[count]) {
+            scan_rc10 = SQLITE_NOMEM;
+            break;
+        }
+        count++;
     }
     if (scan_rc10 != SQLITE_DONE) { /* SCANCHK:10:stmt */
         /* No store handle here; neighbor names are include_connected
@@ -3107,7 +3121,7 @@ static int query_neighbor_names(sqlite3 *db, const char *sql, int64_t node_id, i
         free(names);
         *out = NULL;
         *out_count = 0;
-        return CBM_NOT_FOUND;
+        return scan_rc10 == SQLITE_NOMEM ? CBM_STORE_ERR : CBM_NOT_FOUND;
     }
     sqlite3_finalize(stmt);
     *out = names;
@@ -3125,21 +3139,33 @@ int cbm_store_node_neighbor_names(cbm_store_t *s, int64_t node_id, int limit, ch
     *out_callees = NULL;
     *callee_count = 0;
 
-    query_neighbor_names(
+    int rc = query_neighbor_names(
         s->db,
         "SELECT DISTINCT n.name FROM edges e JOIN nodes n ON e.source_id = n.id "
         "WHERE e.target_id = ?1 AND e.type IN ('CALLS','HTTP_CALLS','ASYNC_CALLS') "
         "ORDER BY n.name LIMIT ?2",
         node_id, limit, out_callers, caller_count);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
 
-    query_neighbor_names(
+    rc = query_neighbor_names(
         s->db,
         "SELECT DISTINCT n.name FROM edges e JOIN nodes n ON e.target_id = n.id "
         "WHERE e.source_id = ?1 AND e.type IN ('CALLS','HTTP_CALLS','ASYNC_CALLS') "
         "ORDER BY n.name LIMIT ?2",
         node_id, limit, out_callees, callee_count);
+    if (rc != CBM_STORE_OK) {
+        for (int i = 0; i < *caller_count; i++) {
+            free((*out_callers)[i]);
+        }
+        free(*out_callers);
+        *out_callers = NULL;
+        *caller_count = 0;
+        return rc;
+    }
 
-    return 0;
+    return CBM_STORE_OK;
 }
 
 static int count_degrees_direction(cbm_store_t *s, const int64_t *node_ids, int id_count,

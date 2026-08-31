@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchLayout,
+  scopeGraphData,
   clampNodeBudget,
   GRAPH_RENDER_NODE_LIMIT,
   GRAPH_NODE_BUDGET_STEP,
@@ -92,5 +93,33 @@ describe("clampNodeBudget", () => {
     expect(clampNodeBudget(-500)).toBe(5000);
     expect(clampNodeBudget(99_999_999)).toBe(10_000_000);
     expect(clampNodeBudget(Number.NaN)).toBe(GRAPH_RENDER_NODE_LIMIT);
+  });
+});
+
+describe("scopeGraphData", () => {
+  it("keeps duplicate numeric IDs distinct across linked projects", () => {
+    const scoped = scopeGraphData(
+      {
+        nodes: [{ id: 1, x: 0, y: 0, z: 0, label: "Function", name: "main", size: 1, color: "#fff" }],
+        edges: [{ source: 1, target: 1, type: "CALLS" }],
+        total_nodes: 1,
+        linked_projects: [
+          {
+            project: "dependency",
+            nodes: [{ id: 1, x: 1, y: 0, z: 0, label: "Function", name: "main", size: 1, color: "#fff" }],
+            edges: [{ source: 1, target: 1, type: "CALLS" }],
+            cross_edges: [{ source: 1, target: 1, type: "CROSS_PACKAGE_IMPORTS" }],
+            offset: { x: 0, y: 0, z: 0 },
+          },
+        ],
+      },
+      "app",
+    );
+
+    expect(scoped.nodes[0].graph_key).toBe("primary:app:1");
+    expect(scoped.linked_projects?.[0].nodes[0].graph_key).toBe("linked:dependency:1");
+    expect(scoped.edges[0].source_key).toBe("primary:app:1");
+    expect(scoped.linked_projects?.[0].edges[0].source_key).toBe("linked:dependency:1");
+    expect(scoped.linked_projects?.[0].cross_edges[0].target_key).toBe("linked:dependency:1");
   });
 });

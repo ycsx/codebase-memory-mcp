@@ -9,7 +9,7 @@
 
 - **本地优先**：索引、查询、向量语义搜索和 LSP 辅助解析均在本机执行；项目不内置大模型，也不要求 API Key、Docker 或语言运行时。
 - **结构化图谱**：包含 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource 等节点，以及 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等关系。
-- **18 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
+- **19 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Markdown 文档章节查询、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
 - **Tree-sitter + Hybrid LSP**：内置多语言、配置、模板和基础设施文件解析；对 Python、TypeScript/JavaScript/JSX/TSX、PHP、C#、Go、C/C++、Java、Kotlin、Rust、Perl 等语言提供类型和调用解析增强。具体结果以当前二进制的 `get_architecture` 和 `index_status` 为准。
 - **覆盖度可审计**：索引结果会区分 `parse_partial`、`skipped` 和按规则排除的 `not_indexed` 文件。没有记录缺口不等于证明仓库完整覆盖，重要结论应使用 `check_index_coverage` 并在必要时回退源码检查。
 - **可视化与桌面控制**：UI 只绑定 loopback，默认端口 `9749`，提供项目、图谱、影响、热点、文件风险、进程、日志和客户端接入计划视图。
@@ -190,7 +190,19 @@ bash scripts/eval-build-context.sh ./build/codebase-memory-mcp
 codebase-memory-mcp serve --bind=0.0.0.0 --port=9766
 ```
 
-远程模式要求设置 `CBM_MCP_AUTH_TOKEN` 和 `CBM_MCP_AUDIT_LOG`，默认使用 `analysis` 工具档位；请用 TLS 反向代理，不要把 Token 写进 Codex 的 `config.toml`。完整的 systemd、Nginx、可信代理和 Codex 配置见 [docs/REMOTE_MCP.md](docs/REMOTE_MCP.md)。
+远程模式要求设置 `CBM_MCP_AUDIT_LOG`，并选择一种鉴权方式：兼容现有部署的 `CBM_MCP_AUTH_TOKEN`（至少 32 字节），或使用托管 Key Store 的 `CBM_MCP_AUTH_STORE`。托管模式只在服务端保存 Key 的 SHA-256 哈希，支持 `user`、`ci`、`admin` 主体、`analysis`/`scout` 工具档位、项目 ACL，以及源码读取、索引、删除和管理权限。请用 TLS 反向代理，不要把 Token 或 Key 写进 Codex 的 `config.toml`。完整的 systemd、Nginx、可信代理和 Codex 配置见 [docs/REMOTE_MCP.md](docs/REMOTE_MCP.md)。
+
+托管 Key 的生命周期由 CLI 管理，明文只在创建或轮换时显示一次：
+
+```bash
+codebase-memory-mcp remote-key create --principal=alice --kind=user \
+  --projects=my-project --source-read
+codebase-memory-mcp remote-key list
+codebase-memory-mcp remote-key revoke <key-id>
+codebase-memory-mcp remote-key rotate <key-id>
+```
+
+未指定 `--store` 时，Key Store 使用缓存目录中的 `remote-auth.json`；生产部署建议显式设置 `CBM_MCP_AUTH_STORE`，并限制该文件仅服务账号可读。
 
 ## 配置
 

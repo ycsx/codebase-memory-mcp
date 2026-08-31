@@ -1,12 +1,12 @@
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
-import type { GraphNode, GraphEdge } from "../lib/types";
+import { graphEdgeEndpointKey, graphNodeKey, type GraphNode, type GraphEdge, type GraphNodeKey } from "../lib/types";
 import { edgeIntensityScale } from "../lib/density";
 
 interface EdgeLinesProps {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  highlightedIds: Set<number> | null;
+  highlightedIds: Set<GraphNodeKey> | null;
   opacity?: number;
   /* User edge-brightness multiplier (see DisplaySettings). Layered on top of
    * the automatic density scale. */
@@ -115,8 +115,16 @@ export function EdgeLines({
       const isSelectedEdge = selectionActive && edge === selectedEdge;
       if (selectionActive && !isSelectedEdge) continue;
 
-      const sHL = !hasHighlight || highlightedIds.has(s.id);
-      const tHL = !hasHighlight || highlightedIds.has(t.id);
+      const sHL =
+        !hasHighlight ||
+        highlightedIds.has(graphNodeKey(s)) ||
+        highlightedIds.has(s.id) ||
+        highlightedIds.has(graphEdgeEndpointKey(edge, "source"));
+      const tHL =
+        !hasHighlight ||
+        highlightedIds.has(graphNodeKey(t)) ||
+        highlightedIds.has(t.id) ||
+        highlightedIds.has(graphEdgeEndpointKey(edge, "target"));
       if (hasHighlight && !sHL && !tHL) continue;
 
       const sameCluster =

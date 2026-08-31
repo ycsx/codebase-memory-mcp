@@ -564,9 +564,8 @@ static void pin_required_nodes(cbm_store_t *store, const char *project, int max_
                 slot = out->count++;
             }
         } else {
-            while (replacement >= 0 &&
-                   required_node_contains(required_ids, required_count,
-                                          out->results[replacement].node.id))
+            while (replacement >= 0 && required_node_contains(required_ids, required_count,
+                                                              out->results[replacement].node.id))
                 replacement--;
             if (replacement >= 0) {
                 slot = replacement--;
@@ -584,8 +583,8 @@ static void pin_required_nodes(cbm_store_t *store, const char *project, int max_
 }
 
 int64_t cbm_layout_resolve_cross_target(cbm_store_t *store, const char *project,
-                                        const char *target_qualified_name,
-                                        const char *target_file, const char *target_function,
+                                        const char *target_qualified_name, const char *target_file,
+                                        const char *target_function,
                                         const char *route_qualified_name) {
     if (!store || !project)
         return 0;
@@ -618,6 +617,29 @@ int64_t cbm_layout_resolve_cross_target(cbm_store_t *store, const char *project,
             cbm_store_free_nodes(nodes, count);
             if (name_match)
                 return name_match;
+        }
+    }
+
+    /* Package/import edges identify a target file but do not always carry a
+     * symbol name. Resolve those edges to the file node itself so local npm
+     * and workspace dependencies remain visible in the UI. */
+    if (target_file && target_file[0]) {
+        cbm_node_t *nodes = NULL;
+        int count = 0;
+        if (cbm_store_find_nodes_by_file(store, project, target_file, &nodes, &count) ==
+            CBM_STORE_OK) {
+            int64_t file_id = 0;
+            for (int i = 0; i < count; i++) {
+                if (nodes[i].label && strcmp(nodes[i].label, "File") == 0) {
+                    file_id = nodes[i].id;
+                    break;
+                }
+                if (!file_id)
+                    file_id = nodes[i].id;
+            }
+            cbm_store_free_nodes(nodes, count);
+            if (file_id)
+                return file_id;
         }
     }
 

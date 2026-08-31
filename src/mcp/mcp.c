@@ -590,6 +590,13 @@ static const tool_def_t TOOLS[] = {
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
      "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
 
+    {"get_document", "Get document",
+     "Get an indexed Markdown document and its heading sections. Select by repository-relative "
+     "path or document name.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"path\":{\"type\":"
+     "\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"project\"],\"anyOf\":[{"
+     "\"required\":[\"path\"]},{\"required\":[\"name\"]}]}"},
+
     {"list_projects", "List projects", "List all indexed projects",
      "{\"type\":\"object\",\"properties\":{}}"},
     {"delete_project", "Delete project", "Delete a project from the index",
@@ -666,21 +673,22 @@ typedef struct {
  * repository/index domain, so none cross an open-world trust boundary. */
 static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"index_repository", false, false, true, false},
-    {"search_graph", false, true, true, false},
-    {"query_graph", false, true, true, false},
-    {"trace_path", false, true, true, false},
-    {"explain_impact", false, true, true, false},
-    {"build_context", false, true, true, false},
-    {"review_change", false, true, true, false},
-    {"get_code_snippet", false, true, true, false},
-    {"get_graph_schema", false, true, true, false},
-    {"get_architecture", false, true, true, false},
-    {"search_code", false, true, true, false},
+    {"search_graph", true, false, true, false},
+    {"query_graph", true, false, true, false},
+    {"trace_path", true, false, true, false},
+    {"explain_impact", true, false, true, false},
+    {"build_context", true, false, true, false},
+    {"review_change", true, false, true, false},
+    {"get_code_snippet", true, false, true, false},
+    {"get_graph_schema", true, false, true, false},
+    {"get_architecture", true, false, true, false},
+    {"search_code", true, false, true, false},
+    {"get_document", true, false, true, false},
     {"list_projects", true, false, true, false},
     {"delete_project", false, true, true, false},
-    {"index_status", false, true, true, false},
-    {"check_index_coverage", false, true, true, false},
-    {"detect_changes", false, true, true, false},
+    {"index_status", true, false, true, false},
+    {"check_index_coverage", true, false, true, false},
+    {"detect_changes", true, false, true, false},
     {"manage_adr", false, true, false, false},
     {"ingest_traces", false, false, false, false},
 };
@@ -732,11 +740,12 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         "search_graph",         "query_graph",    "trace_path",       "explain_impact",
         "build_context",        "review_change",  "get_code_snippet", "get_graph_schema",
         "get_architecture",     "search_code",    "list_projects",    "index_status",
-        "check_index_coverage", "detect_changes",
+        "check_index_coverage", "detect_changes", "get_document",
     };
     static const char *const scout_tools[] = {
-        "search_graph",     "trace_path",    "explain_impact", "get_code_snippet",
-        "get_architecture", "list_projects", "index_status",   "check_index_coverage",
+        "search_graph",     "trace_path",           "explain_impact",
+        "get_code_snippet", "get_architecture",     "list_projects",
+        "index_status",     "check_index_coverage", "get_document",
     };
     if (!name) {
         return false;
@@ -761,8 +770,43 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     return false;
 }
 
-static const char *mcp_tool_profile_name(cbm_mcp_tool_profile_t profile) {
-    return profile == CBM_MCP_TOOL_PROFILE_SCOUT ? "scout" : "analysis";
+static bool mcp_authz_tool_allowed(const cbm_mcp_authz_t *authz, const char *name) {
+    if (!authz || !authz->enabled || !name) {
+        return true;
+    }
+    if (strcmp(name, "get_code_snippet") == 0 || strcmp(name, "search_code") == 0 ||
+        strcmp(name, "get_document") == 0 || strcmp(name, "build_context") == 0 ||
+        strcmp(name, "review_change") == 0 || strcmp(name, "detect_changes") == 0) {
+        return authz->source_read;
+    }
+    if (strcmp(name, "index_repository") == 0 || strcmp(name, "ingest_traces") == 0 ||
+        strcmp(name, "manage_adr") == 0) {
+        return authz->index_write;
+    }
+    if (strcmp(name, "delete_project") == 0) {
+        return authz->delete_write;
+    }
+    return true;
+}
+
+static bool mcp_authz_project_allowed(const cbm_mcp_authz_t *authz, const char *project) {
+    if (!authz || !authz->enabled) {
+        return true;
+    }
+    if (!project || !project[0]) {
+        return false;
+    }
+    for (size_t i = 0; i < authz->project_count; i++) {
+        if (strcmp(authz->projects[i], "*") == 0 || strcmp(authz->projects[i], project) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool mcp_tool_allowed_for_authz(cbm_mcp_tool_profile_t profile, const cbm_mcp_authz_t *authz,
+                                       const char *name) {
+    return mcp_tool_allowed(profile, name) && mcp_authz_tool_allowed(authz, name);
 }
 
 int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
@@ -809,18 +853,18 @@ bool cbm_mcp_tool_profile_allows_http(cbm_mcp_tool_profile_t profile) {
     return profile == CBM_MCP_TOOL_PROFILE_ALL;
 }
 
-static int mcp_allowed_tool_count(cbm_mcp_tool_profile_t profile) {
+static int mcp_allowed_tool_count(cbm_mcp_tool_profile_t profile, const cbm_mcp_authz_t *authz) {
     int count = 0;
     for (int i = 0; i < TOOL_COUNT; i++) {
-        if (mcp_tool_allowed(profile, TOOLS[i].name)) {
+        if (mcp_tool_allowed_for_authz(profile, authz, TOOLS[i].name)) {
             count++;
         }
     }
     return count;
 }
 
-static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset, int limit,
-                                      bool include_next_cursor) {
+static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, const cbm_mcp_authz_t *authz,
+                                      int offset, int limit, bool include_next_cursor) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -830,7 +874,7 @@ static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset
     if (offset < 0) {
         offset = 0;
     }
-    int allowed_count = mcp_allowed_tool_count(profile);
+    int allowed_count = mcp_allowed_tool_count(profile, authz);
     if (offset > allowed_count) {
         offset = allowed_count;
     }
@@ -845,7 +889,7 @@ static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset
 
     int visible = 0;
     for (int i = 0; i < TOOL_COUNT && visible < end; i++) {
-        if (!mcp_tool_allowed(profile, TOOLS[i].name)) {
+        if (!mcp_tool_allowed_for_authz(profile, authz, TOOLS[i].name)) {
             continue;
         }
         if (visible >= offset) {
@@ -867,7 +911,7 @@ static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset
 }
 
 char *cbm_mcp_tools_list(void) {
-    return cbm_mcp_tools_list_range(CBM_MCP_TOOL_PROFILE_ALL, 0, TOOL_COUNT, false);
+    return cbm_mcp_tools_list_range(CBM_MCP_TOOL_PROFILE_ALL, NULL, 0, TOOL_COUNT, false);
 }
 
 /* Return the JSON input_schema string for a tool by name, or NULL if unknown.
@@ -923,13 +967,14 @@ static int mcp_tools_cursor_offset(const char *params_json, bool *has_cursor_out
     return offset;
 }
 
-static char *cbm_mcp_tools_list_page(cbm_mcp_tool_profile_t profile, const char *params_json) {
+static char *cbm_mcp_tools_list_page(cbm_mcp_tool_profile_t profile, const cbm_mcp_authz_t *authz,
+                                     const char *params_json) {
     bool has_cursor = false;
     int offset = mcp_tools_cursor_offset(params_json, &has_cursor);
     if (!has_cursor) {
-        return cbm_mcp_tools_list_range(profile, 0, TOOL_COUNT, false);
+        return cbm_mcp_tools_list_range(profile, authz, 0, TOOL_COUNT, false);
     }
-    return cbm_mcp_tools_list_range(profile, offset, MCP_TOOLS_PAGE_SIZE, true);
+    return cbm_mcp_tools_list_range(profile, authz, offset, MCP_TOOLS_PAGE_SIZE, true);
 }
 
 /* ── Prompt definitions ───────────────────────────────────────── */
@@ -1086,7 +1131,8 @@ static char *cbm_mcp_prompt_get(const char *params_json, char **error_json) {
     static const char REVIEW_TEMPLATE[] =
         "Review change impact in project \"%s\" for: %s\n\n"
         "Use review_change with since/base_branch \"%s\" for the deterministic diff, impact, "
-        "test, documentation, contract, and risk summary. Follow up with trace_path or "
+        "test, documentation, contract, and risk summary; keep include_docs and include_tests "
+        "enabled unless the caller explicitly narrows the review. Follow up with trace_path or "
         "get_code_snippet only when the returned evidence needs verification. Treat unknown or "
         "truncated results as insufficient, and do not modify files.";
 
@@ -1229,6 +1275,9 @@ char *cbm_mcp_initialize_response(const char *params_json) {
  * ══════════════════════════════════════════════════════════════════ */
 
 char *cbm_mcp_get_tool_name(const char *params_json) {
+    if (!params_json) {
+        return NULL;
+    }
     yyjson_doc *doc = yyjson_read(params_json, strlen(params_json), 0);
     if (!doc) {
         return NULL;
@@ -1244,6 +1293,9 @@ char *cbm_mcp_get_tool_name(const char *params_json) {
 }
 
 char *cbm_mcp_get_arguments(const char *params_json) {
+    if (!params_json) {
+        return heap_strdup("{}");
+    }
     yyjson_doc *doc = yyjson_read(params_json, strlen(params_json), 0);
     if (!doc) {
         return NULL;
@@ -1259,6 +1311,9 @@ char *cbm_mcp_get_arguments(const char *params_json) {
 }
 
 char *cbm_mcp_get_string_arg(const char *args_json, const char *key) {
+    if (!args_json || !key) {
+        return NULL;
+    }
     yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
     if (!doc) {
         return NULL;
@@ -1400,6 +1455,9 @@ static char *get_project_arg(const char *args_json) {
 }
 
 int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val) {
+    if (!args_json || !key) {
+        return default_val;
+    }
     yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
     if (!doc) {
         return default_val;
@@ -1415,6 +1473,9 @@ int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val)
 }
 
 bool cbm_mcp_get_bool_arg(const char *args_json, const char *key) {
+    if (!args_json || !key) {
+        return false;
+    }
     yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
     if (!doc) {
         return false;
@@ -1457,6 +1518,7 @@ struct cbm_mcp_server {
     int64_t active_request_id;       /* JSON-RPC id of the in-progress tool call */
     char *active_request_id_str;     /* string JSON-RPC id of the in-progress tool call */
     cbm_mcp_tool_profile_t tool_profile;
+    cbm_mcp_authz_t authz;
     cbm_usage_store_t *usage_store; /* shared persistent AI tool-call statistics */
     bool usage_enabled;             /* true only after an MCP initialize handshake */
 };
@@ -1485,6 +1547,57 @@ void cbm_mcp_server_set_tool_profile(cbm_mcp_server_t *srv, cbm_mcp_tool_profile
     if (srv) {
         srv->tool_profile = profile;
     }
+}
+
+static void mcp_authz_clear(cbm_mcp_authz_t *authz) {
+    if (!authz) {
+        return;
+    }
+    free((char *)authz->principal);
+    free((char *)authz->key_id);
+    if (authz->projects) {
+        for (size_t i = 0; i < authz->project_count; i++) {
+            free((char *)authz->projects[i]);
+        }
+    }
+    free((void *)authz->projects);
+    memset(authz, 0, sizeof(*authz));
+}
+
+bool cbm_mcp_server_set_authz(cbm_mcp_server_t *srv, const cbm_mcp_authz_t *authz) {
+    if (!srv) {
+        return false;
+    }
+    cbm_mcp_authz_t copy = {0};
+    if (authz && authz->enabled) {
+        copy = *authz;
+        copy.principal = heap_strdup(authz->principal ? authz->principal : "");
+        copy.key_id = heap_strdup(authz->key_id ? authz->key_id : "");
+        copy.projects = NULL;
+        copy.project_count = 0;
+        if (!copy.principal || !copy.key_id || !authz->projects || authz->project_count == 0) {
+            mcp_authz_clear(&copy);
+            return false;
+        }
+        const char **projects = calloc(authz->project_count, sizeof(*projects));
+        if (!projects) {
+            mcp_authz_clear(&copy);
+            return false;
+        }
+        copy.projects = projects;
+        for (size_t i = 0; i < authz->project_count; i++) {
+            projects[i] = heap_strdup(authz->projects[i]);
+            if (!projects[i]) {
+                copy.project_count = i;
+                mcp_authz_clear(&copy);
+                return false;
+            }
+        }
+        copy.project_count = authz->project_count;
+    }
+    mcp_authz_clear(&srv->authz);
+    srv->authz = copy;
+    return true;
 }
 
 cbm_store_t *cbm_mcp_server_store(cbm_mcp_server_t *srv) {
@@ -1525,6 +1638,7 @@ void cbm_mcp_server_free(cbm_mcp_server_t *srv) {
         cbm_store_close(srv->store);
     }
     cbm_usage_store_close(srv->usage_store);
+    mcp_authz_clear(&srv->authz);
     free(srv->current_project);
     free(srv->active_request_id_str);
     free(srv);
@@ -1633,27 +1747,13 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     project_db_path(project, path, sizeof(path));
     srv->store = cbm_store_open_path_query(path);
     if (srv->store) {
-        /* Check DB integrity — back up (never silently delete) a corrupt DB */
+        /* Query resolution must be strictly non-mutating. A damaged graph is
+         * left in place for explicit recovery or re-indexing. */
         if (!cbm_store_check_integrity(srv->store)) {
-            cbm_log_error("store.auto_clean", "project", project, "path", path, "action",
-                          "backing up corrupt db to .corrupt — re-index required");
+            cbm_log_error("store.integrity_failed", "project", project, "path", path, "action",
+                          "left unchanged; re-index required");
             cbm_store_close(srv->store);
             srv->store = NULL;
-            /* #557 (data loss): rename the corrupt DB to a .corrupt backup instead
-             * of unlinking it, so the user's graph is recoverable / reportable.
-             * Re-index rebuilds a fresh DB at `path`. WAL/SHM are transient. */
-            char bak_path[MCP_FIELD_SIZE];
-            snprintf(bak_path, sizeof(bak_path), "%s.corrupt", path);
-            cbm_unlink(bak_path); /* clear any prior backup so rename succeeds on Windows */
-            if (rename(path, bak_path) != 0) {
-                cbm_unlink(path); /* rename failed (e.g. cross-device) — fall back to delete */
-            }
-            char wal_path[MCP_FIELD_SIZE];
-            char shm_path[MCP_FIELD_SIZE];
-            snprintf(wal_path, sizeof(wal_path), "%s-wal", path);
-            snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
-            cbm_unlink(wal_path);
-            cbm_unlink(shm_path);
             return NULL;
         }
 
@@ -1954,9 +2054,9 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
 
 /* Open a .db file briefly, collect node/edge counts and root_path,
  * then append a JSON entry to arr. */
-static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
-                                     const char *name, size_t name_len, int64_t size_bytes,
-                                     bool metadata_only) {
+static void build_project_json_entry(cbm_mcp_server_t *srv, yyjson_mut_doc *doc,
+                                     yyjson_mut_val *arr, const char *dir_path, const char *name,
+                                     size_t name_len, int64_t size_bytes, bool metadata_only) {
     (void)name_len;
 
     char full_path[CBM_SZ_2K];
@@ -1971,6 +2071,10 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     cbm_store_t *pstore = NULL;
     if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
         return; /* ghost / unreadable — not a resolvable project */
+    }
+    if (srv && !mcp_authz_project_allowed(&srv->authz, project_name)) {
+        cbm_store_close(pstore);
+        return;
     }
 
     int nodes = 0;
@@ -2020,7 +2124,6 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
-    (void)srv;
     bool metadata_only = false;
     yyjson_doc *args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
     yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
@@ -2064,7 +2167,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         if (size_bytes < 0) {
             continue;
         }
-        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, metadata_only);
+        build_project_json_entry(srv, doc, arr, dir_path, name, len, size_bytes, metadata_only);
     }
     cbm_closedir(d);
 
@@ -3004,7 +3107,6 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *project = get_project_arg(args);
-    cbm_store_t *store = resolve_store(srv, project);
     int max_rows = cbm_mcp_get_int_arg(args, "max_rows", 0);
 
     /* graph="missed" (#963): run the SAME cypher against the derived
@@ -3018,10 +3120,11 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
         free(project);
         return cbm_mcp_text_result("query is required", true);
     }
-    if (missed_graph && !project) {
+    if (!project) {
         free(query);
-        return cbm_mcp_text_result("project is required when graph=\"missed\"", true);
+        return cbm_mcp_text_result("project is required", true);
     }
+    cbm_store_t *store = resolve_store(srv, project);
     if (!store) {
         char *_err = build_project_list_error("project not found or not indexed");
         char *_res = cbm_mcp_text_result(_err, true);
@@ -4777,6 +4880,38 @@ static yyjson_doc *resolve_trace_edge_types(const char *args, const char *mode,
     return NULL;
 }
 
+/* Package dependency edges are persisted in the source database with a
+ * target_id that belongs to a different project's SQLite file.  They must be
+ * resolved through their project/file metadata (see federated_collect_evidence)
+ * instead of being passed to the local numeric-ID BFS. */
+static bool edge_type_uses_foreign_node_ids(const char *type) {
+    return type && (strcmp(type, "CROSS_PACKAGE_IMPORTS") == 0 ||
+                    strcmp(type, "CROSS_PROJECT_DEPENDS") == 0);
+}
+
+static int filter_local_edge_types(const char *const *types, int type_count, const char **out_types,
+                                   int out_capacity) {
+    int count = 0;
+    for (int i = 0; i < type_count && count < out_capacity; i++) {
+        if (!edge_type_uses_foreign_node_ids(types[i])) {
+            out_types[count++] = types[i];
+        }
+    }
+    return count;
+}
+
+static bool edge_type_requested(const char *const *types, int type_count, const char *wanted) {
+    if (!wanted) {
+        return false;
+    }
+    for (int i = 0; i < type_count; i++) {
+        if (types[i] && strcmp(types[i], wanted) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Check if a file path looks like a test file. */
 static bool is_test_file(const char *path) {
     if (!path) {
@@ -5036,6 +5171,7 @@ static bool federated_evidence_duplicate(const cbm_federated_evidence_t *items, 
 static void federated_collect_source_edges(cbm_store_t *source_store, const char *source_project,
                                            const cbm_node_t *source_node, int64_t source_id,
                                            const char *direction, int max_items,
+                                           const cbm_mcp_authz_t *authz,
                                            cbm_federated_evidence_t *items, int *count) {
     if (*count >= max_items) {
         return;
@@ -5059,10 +5195,17 @@ static void federated_collect_source_edges(cbm_store_t *source_store, const char
         yyjson_val *props = props_doc ? yyjson_doc_get_root(props_doc) : NULL;
         const char *target_project = federated_prop_string(props, "target_project");
         const char *target_file = federated_prop_string(props, "target_file");
-        const char *target_qn = federated_prop_string(props, "target_function");
+        const char *target_qn = federated_prop_string(props, "target_qualified_name");
+        if (!target_qn || !target_qn[0]) {
+            target_qn = federated_prop_string(props, "target_function");
+        }
         const char *package = federated_prop_string(props, "package");
         const char *specifier = federated_prop_string(props, "specifier");
         if (!target_project || !target_project[0]) {
+            yyjson_doc_free(props_doc);
+            continue;
+        }
+        if (authz && authz->enabled && !mcp_authz_project_allowed(authz, target_project)) {
             yyjson_doc_free(props_doc);
             continue;
         }
@@ -5102,6 +5245,7 @@ static void federated_collect_source_edges(cbm_store_t *source_store, const char
 static int federated_collect_evidence(cbm_store_t *source_store, const char *source_project,
                                       const cbm_node_t *roots, int root_count,
                                       const char *direction, int max_items,
+                                      const cbm_mcp_authz_t *authz,
                                       cbm_federated_evidence_t **out_items) {
     *out_items = NULL;
     if (!source_store || !source_project || !roots || root_count <= 0 || max_items <= 0) {
@@ -5115,7 +5259,7 @@ static int federated_collect_evidence(cbm_store_t *source_store, const char *sou
     int count = 0;
     for (int r = 0; r < root_count && count < max_items; r++) {
         federated_collect_source_edges(source_store, source_project, &roots[r], roots[r].id,
-                                       direction, max_items, items, &count);
+                                       direction, max_items, authz, items, &count);
 
         /* Package edges are normally attached to a File node. When a caller
          * starts trace_path from a function inside that file, also inspect the
@@ -5130,8 +5274,8 @@ static int federated_collect_evidence(cbm_store_t *source_store, const char *sou
             for (int f = 0; f < file_count && count < max_items; f++) {
                 if (file_nodes[f].id != roots[r].id) {
                     federated_collect_source_edges(source_store, source_project, &roots[r],
-                                                   file_nodes[f].id, direction, max_items, items,
-                                                   &count);
+                                                   file_nodes[f].id, direction, max_items, authz,
+                                                   items, &count);
                 }
             }
         }
@@ -5424,6 +5568,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
                                 int depth, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
     int vcap = 0, ecap = 0;
+    bool allocation_failed = false;
     for (int k = 0; k < node_count; k++) {
         cbm_traverse_result_t tr = {0};
         cbm_store_bfs(store, nodes[k].id, direction, edge_types, edge_type_count, depth,
@@ -5440,21 +5585,42 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
                 continue;
             }
             if (out->visited_count >= vcap) {
-                vcap = vcap ? vcap * 2 : 8;
-                out->visited = safe_realloc(out->visited, vcap * sizeof(cbm_node_hop_t));
+                int new_cap = vcap ? vcap * 2 : 8;
+                cbm_node_hop_t *grown =
+                    realloc(out->visited, (size_t)new_cap * sizeof(cbm_node_hop_t));
+                if (!grown) {
+                    allocation_failed = true;
+                    break;
+                }
+                out->visited = grown;
+                vcap = new_cap;
             }
             out->visited[out->visited_count++] = tr.visited[i];
             memset(&tr.visited[i], 0, sizeof(tr.visited[i])); /* ownership moved */
         }
+        if (allocation_failed) {
+            cbm_store_traverse_free(&tr);
+            break;
+        }
         for (int i = 0; i < tr.edge_count; i++) {
             if (out->edge_count >= ecap) {
-                ecap = ecap ? ecap * 2 : 8;
-                out->edges = safe_realloc(out->edges, ecap * sizeof(cbm_edge_info_t));
+                int new_cap = ecap ? ecap * 2 : 8;
+                cbm_edge_info_t *grown =
+                    realloc(out->edges, (size_t)new_cap * sizeof(cbm_edge_info_t));
+                if (!grown) {
+                    allocation_failed = true;
+                    break;
+                }
+                out->edges = grown;
+                ecap = new_cap;
             }
             out->edges[out->edge_count++] = tr.edges[i];
             memset(&tr.edges[i], 0, sizeof(tr.edges[i])); /* ownership moved */
         }
         cbm_store_traverse_free(&tr); /* frees only the un-moved (root + dup) fields */
+        if (allocation_failed) {
+            break;
+        }
     }
 }
 
@@ -5586,6 +5752,10 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     const char *edge_types[MCP_COL_16];
     int edge_type_count = 0;
     yyjson_doc *et_doc_keep = resolve_trace_edge_types(args, mode, edge_types, &edge_type_count);
+    bool explicit_edge_types = et_doc_keep != NULL;
+    const char *local_edge_types[MCP_COL_16];
+    int local_edge_type_count =
+        filter_local_edge_types(edge_types, edge_type_count, local_edge_types, MCP_COL_16);
 
     /* Run BFS for each requested direction.
      * IMPORTANT: emitters borrow node-string pointers — traversal results
@@ -5601,12 +5771,12 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     (void)sel; /* union across all same-name nodes — see bfs_union_same_name (#546) */
 
     if (do_outbound) {
-        bfs_union_same_name(store, nodes, node_count, "outbound", edge_types, edge_type_count,
-                            depth, &tr_out);
+        bfs_union_same_name(store, nodes, node_count, "outbound", local_edge_types,
+                            local_edge_type_count, depth, &tr_out);
     }
     if (do_inbound) {
-        bfs_union_same_name(store, nodes, node_count, "inbound", edge_types, edge_type_count, depth,
-                            &tr_in);
+        bfs_union_same_name(store, nodes, node_count, "inbound", local_edge_types,
+                            local_edge_type_count, depth, &tr_in);
     }
 
     /* Cross-package edges are stored with a foreign target id.  Resolve them
@@ -5614,14 +5784,18 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
      * target node instead of an unusable integer from another SQLite DB. */
     cbm_federated_evidence_t *cross_out = NULL;
     cbm_federated_evidence_t *cross_in = NULL;
-    int cross_out_count = do_outbound
-                              ? federated_collect_evidence(store, project, nodes, node_count,
-                                                           "outbound", MCP_BFS_LIMIT, &cross_out)
-                              : 0;
-    int cross_in_count = do_inbound
-                             ? federated_collect_evidence(store, project, nodes, node_count,
-                                                          "inbound", MCP_BFS_LIMIT, &cross_in)
-                             : 0;
+    int cross_out_count =
+        do_outbound && (!explicit_edge_types ||
+                        edge_type_requested(edge_types, edge_type_count, "CROSS_PACKAGE_IMPORTS"))
+            ? federated_collect_evidence(store, project, nodes, node_count, "outbound",
+                                         MCP_BFS_LIMIT, &srv->authz, &cross_out)
+            : 0;
+    int cross_in_count =
+        do_inbound && (!explicit_edge_types ||
+                       edge_type_requested(edge_types, edge_type_count, "CROSS_PROJECT_DEPENDS"))
+            ? federated_collect_evidence(store, project, nodes, node_count, "inbound",
+                                         MCP_BFS_LIMIT, &srv->authz, &cross_in)
+            : 0;
 
     char *json = NULL;
     if (!trace_legacy_json) {
@@ -5729,8 +5903,6 @@ static const char *IMPACT_EDGE_TYPES[] = {
     "CROSS_GRPC_CALLS",
     "CROSS_GRAPHQL_CALLS",
     "CROSS_TRPC_CALLS",
-    "CROSS_PACKAGE_IMPORTS",
-    "CROSS_PROJECT_DEPENDS",
     "GRPC_CALLS",
     "GRAPHQL_CALLS",
     "TRPC_CALLS",
@@ -5816,8 +5988,17 @@ static void impact_add_candidate(impact_candidate_t **items, int *count, int *ca
         return;
     }
     if (*count >= *capacity) {
-        *capacity = *capacity ? *capacity * 2 : 8;
-        *items = safe_realloc(*items, (size_t)*capacity * sizeof(**items));
+        int new_capacity = *capacity ? *capacity * 2 : 8;
+        if (new_capacity > IMPACT_CANDIDATE_LIMIT) {
+            new_capacity = IMPACT_CANDIDATE_LIMIT;
+        }
+        impact_candidate_t *grown = realloc(*items, (size_t)new_capacity * sizeof(**items));
+        if (!grown) {
+            free(key);
+            return;
+        }
+        *items = grown;
+        *capacity = new_capacity;
     }
     impact_candidate_t *item = &(*items)[(*count)++];
     memset(item, 0, sizeof(*item));
@@ -5959,6 +6140,7 @@ static void impact_bfs_union(cbm_store_t *store, const cbm_node_t *roots, int ro
     int edge_capacity = 0;
     int edge_limit = max_results * IMPACT_EDGE_FACTOR;
     *truncated = false;
+    bool allocation_failed = false;
     for (int root_index = 0; root_index < root_count; root_index++) {
         cbm_traverse_result_t current = {0};
         cbm_store_bfs(store, roots[root_index].id, "inbound", IMPACT_EDGE_TYPES,
@@ -5981,15 +6163,26 @@ static void impact_bfs_union(cbm_store_t *store, const cbm_node_t *roots, int ro
                 continue;
             }
             if (out->visited_count >= visited_capacity) {
-                visited_capacity = visited_capacity ? visited_capacity * 2 : 16;
-                if (visited_capacity > max_results) {
-                    visited_capacity = max_results;
+                int new_capacity = visited_capacity ? visited_capacity * 2 : 16;
+                if (new_capacity > max_results) {
+                    new_capacity = max_results;
                 }
-                out->visited =
-                    safe_realloc(out->visited, (size_t)visited_capacity * sizeof(cbm_node_hop_t));
+                cbm_node_hop_t *grown =
+                    realloc(out->visited, (size_t)new_capacity * sizeof(cbm_node_hop_t));
+                if (!grown) {
+                    allocation_failed = true;
+                    *truncated = true;
+                    break;
+                }
+                out->visited = grown;
+                visited_capacity = new_capacity;
             }
             out->visited[out->visited_count++] = *hop;
             memset(hop, 0, sizeof(*hop));
+        }
+        if (allocation_failed) {
+            cbm_store_traverse_free(&current);
+            break;
         }
         for (int i = 0; i < current.edge_count; i++) {
             cbm_edge_info_t *edge = &current.edges[i];
@@ -6001,17 +6194,27 @@ static void impact_bfs_union(cbm_store_t *store, const cbm_node_t *roots, int ro
                 continue;
             }
             if (out->edge_count >= edge_capacity) {
-                edge_capacity = edge_capacity ? edge_capacity * 2 : 32;
-                if (edge_capacity > edge_limit) {
-                    edge_capacity = edge_limit;
+                int new_capacity = edge_capacity ? edge_capacity * 2 : 32;
+                if (new_capacity > edge_limit) {
+                    new_capacity = edge_limit;
                 }
-                out->edges =
-                    safe_realloc(out->edges, (size_t)edge_capacity * sizeof(cbm_edge_info_t));
+                cbm_edge_info_t *grown =
+                    realloc(out->edges, (size_t)new_capacity * sizeof(cbm_edge_info_t));
+                if (!grown) {
+                    allocation_failed = true;
+                    *truncated = true;
+                    break;
+                }
+                out->edges = grown;
+                edge_capacity = new_capacity;
             }
             out->edges[out->edge_count++] = *edge;
             memset(edge, 0, sizeof(*edge));
         }
         cbm_store_traverse_free(&current);
+        if (allocation_failed) {
+            break;
+        }
     }
 }
 
@@ -6068,7 +6271,8 @@ static const char *impact_risk_code(cbm_risk_level_t risk) {
 
 static char *impact_analysis_result(cbm_store_t *store, const char *query, const char *target_key,
                                     const char *target_type, const cbm_node_t *roots,
-                                    int root_count, int depth, int limit) {
+                                    int root_count, int depth, int limit,
+                                    const cbm_mcp_authz_t *authz) {
     cbm_traverse_result_t traversal = {0};
     bool truncated = false;
     impact_bfs_union(store, roots, root_count, depth, limit, &traversal, &truncated);
@@ -6080,7 +6284,7 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     cbm_federated_evidence_t *cross_impacts = NULL;
     int cross_impact_count =
         federated_collect_evidence(store, roots[0].project ? roots[0].project : "", roots,
-                                   root_count, "inbound", limit, &cross_impacts);
+                                   root_count, "inbound", limit, authz, &cross_impacts);
 
     int direct_count = 0;
     int indirect_count = 0;
@@ -6324,9 +6528,13 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
 }
 
 static char *impact_analyze_target(cbm_store_t *store, const char *project, const char *query,
-                                   const char *target, int depth, int limit) {
+                                   const char *target, int depth, int limit,
+                                   const cbm_mcp_authz_t *authz) {
     if (strncmp(target, "file:", strlen("file:")) == 0) {
         char *file_path = impact_normalize_path(target + strlen("file:"));
+        if (!file_path) {
+            return cbm_mcp_text_result("out of memory", true);
+        }
         cbm_node_t *roots = NULL;
         int root_count = 0;
         cbm_store_find_nodes_by_file(store, project, file_path, &roots, &root_count);
@@ -6338,9 +6546,14 @@ static char *impact_analyze_target(cbm_store_t *store, const char *project, cons
         }
         size_t key_len = strlen(file_path) + 6;
         char *normalized_target = malloc(key_len);
+        if (!normalized_target) {
+            cbm_store_free_nodes(roots, root_count);
+            free(file_path);
+            return cbm_mcp_text_result("out of memory", true);
+        }
         snprintf(normalized_target, key_len, "file:%s", file_path);
         char *result = impact_analysis_result(store, query, normalized_target, "file", roots,
-                                              root_count, depth, limit);
+                                              root_count, depth, limit, authz);
         free(normalized_target);
         cbm_store_free_nodes(roots, root_count);
         free(file_path);
@@ -6352,7 +6565,8 @@ static char *impact_analyze_target(cbm_store_t *store, const char *project, cons
         impact_candidate_t *none = NULL;
         return impact_candidates_result(query, none, 0);
     }
-    char *result = impact_analysis_result(store, query, target, "symbol", &node, 1, depth, limit);
+    char *result =
+        impact_analysis_result(store, query, target, "symbol", &node, 1, depth, limit, authz);
     free_node_contents(&node);
     return result;
 }
@@ -6395,7 +6609,8 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     }
 
     if (target && target[0]) {
-        char *result = impact_analyze_target(store, project, query, target, depth, limit);
+        char *result =
+            impact_analyze_target(store, project, query, target, depth, limit, &srv->authz);
         free(project);
         free(query);
         free(target);
@@ -6405,7 +6620,7 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     cbm_node_t exact_qn = {0};
     if (cbm_store_find_node_by_qn(store, project, query, &exact_qn) == CBM_STORE_OK) {
         char *result = impact_analysis_result(store, query, exact_qn.qualified_name, "symbol",
-                                              &exact_qn, 1, depth, limit);
+                                              &exact_qn, 1, depth, limit, &srv->authz);
         free_node_contents(&exact_qn);
         free(project);
         free(query);
@@ -6414,15 +6629,29 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     }
 
     char *normalized_query = impact_normalize_path(query);
+    if (!normalized_query) {
+        free(project);
+        free(query);
+        free(target);
+        return cbm_mcp_text_result("out of memory", true);
+    }
     cbm_node_t *file_nodes = NULL;
     int file_node_count = 0;
     cbm_store_find_nodes_by_file(store, project, normalized_query, &file_nodes, &file_node_count);
     if (file_node_count > 0) {
         size_t key_len = strlen(normalized_query) + 6;
         char *file_key = malloc(key_len);
+        if (!file_key) {
+            cbm_store_free_nodes(file_nodes, file_node_count);
+            free(normalized_query);
+            free(project);
+            free(query);
+            free(target);
+            return cbm_mcp_text_result("out of memory", true);
+        }
         snprintf(file_key, key_len, "file:%s", normalized_query);
         char *result = impact_analysis_result(store, query, file_key, "file", file_nodes,
-                                              file_node_count, depth, limit);
+                                              file_node_count, depth, limit, &srv->authz);
         free(file_key);
         cbm_store_free_nodes(file_nodes, file_node_count);
         free(normalized_query);
@@ -6438,7 +6667,7 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     cbm_store_find_nodes_by_name(store, project, query, &name_nodes, &name_node_count);
     if (name_node_count == 1 && !impact_label_is_documentation(name_nodes[0].label)) {
         char *result = impact_analysis_result(store, query, name_nodes[0].qualified_name, "symbol",
-                                              name_nodes, 1, depth, limit);
+                                              name_nodes, 1, depth, limit, &srv->authz);
         cbm_store_free_nodes(name_nodes, name_node_count);
         free(normalized_query);
         free(project);
@@ -6492,7 +6721,8 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
 
     char *result = NULL;
     if (candidate_count == 1) {
-        result = impact_analyze_target(store, project, query, candidates[0].key, depth, limit);
+        result = impact_analyze_target(store, project, query, candidates[0].key, depth, limit,
+                                       &srv->authz);
     } else {
         result = impact_candidates_result(query, candidates, candidate_count);
     }
@@ -6526,6 +6756,10 @@ static char *read_file_lines(const char *path, int start, int end) {
 
     size_t cap = CBM_SZ_4K;
     char *buf = malloc(cap);
+    if (!buf) {
+        (void)fclose(fp);
+        return NULL;
+    }
     size_t len = 0;
     buf[0] = '\0';
 
@@ -6541,8 +6775,20 @@ static char *read_file_lines(const char *path, int start, int end) {
         }
         size_t ll = strlen(line);
         while (len + ll + SKIP_ONE > cap) {
-            cap *= PAIR_LEN;
-            buf = safe_realloc(buf, cap);
+            if (cap > SIZE_MAX / PAIR_LEN) {
+                free(buf);
+                (void)fclose(fp);
+                return NULL;
+            }
+            size_t new_cap = cap * PAIR_LEN;
+            char *grown = realloc(buf, new_cap);
+            if (!grown) {
+                free(buf);
+                (void)fclose(fp);
+                return NULL;
+            }
+            buf = grown;
+            cap = new_cap;
         }
         memcpy(buf + len, line, ll);
         len += ll;
@@ -6569,6 +6815,7 @@ static char *get_project_root(cbm_mcp_server_t *srv, const char *project) {
     }
     cbm_project_t proj = {0};
     if (cbm_store_get_project(store, project, &proj) != CBM_STORE_OK) {
+        cbm_project_free_fields(&proj);
         return NULL;
     }
     char *root = heap_strdup(proj.root_path);
@@ -6581,16 +6828,24 @@ static char *get_project_root(cbm_mcp_server_t *srv, const char *project) {
 /* ── index_repository ─────────────────────────────────────────── */
 
 /* Handle mode="cross-repo-intelligence" — extract to reduce complexity. */
-static char *handle_cross_repo_mode(const char *repo_path, const char *name_override,
-                                    const char *args) {
-    const char *project_name =
-        (name_override && name_override[0]) ? name_override : cbm_project_name_from_path(repo_path);
+static char *handle_cross_repo_mode(cbm_mcp_server_t *srv, const char *repo_path,
+                                    const char *name_override, const char *args) {
+    char *derived_name = NULL;
+    const char *project_name = name_override && name_override[0]
+                                   ? (derived_name = cbm_project_name_from_path(name_override))
+                                   : (derived_name = cbm_project_name_from_path(repo_path));
     if (!cbm_validate_project_name(project_name)) {
+        free(derived_name);
         return cbm_mcp_text_result("invalid project name", true);
     }
     char *project = heap_strdup(project_name);
+    free(derived_name);
     if (!project) {
         return cbm_mcp_text_result("cannot derive project name", true);
+    }
+    if (srv && srv->authz.enabled && !mcp_authz_project_allowed(&srv->authz, project)) {
+        free(project);
+        return cbm_mcp_text_result("project is unavailable for this remote identity", true);
     }
 
     yyjson_doc *jdoc = yyjson_read(args, strlen(args), 0);
@@ -6606,14 +6861,53 @@ static char *handle_cross_repo_mode(const char *repo_path, const char *name_over
             true);
     }
 
-    int tp_count = (int)yyjson_arr_size(tp_arr);
+    enum { CROSS_REPO_TARGET_MAX = 256 };
+    size_t tp_size = yyjson_arr_size(tp_arr);
+    if (tp_size > CROSS_REPO_TARGET_MAX) {
+        yyjson_doc_free(jdoc);
+        free(project);
+        return cbm_mcp_text_result("target_projects contains too many projects (maximum 256)",
+                                   true);
+    }
+    int tp_count = (int)tp_size;
     const char **targets = malloc((size_t)tp_count * sizeof(char *));
+    if (!targets) {
+        yyjson_doc_free(jdoc);
+        free(project);
+        return cbm_mcp_text_result("unable to allocate target project list", true);
+    }
     size_t idx;
     size_t max;
     yyjson_val *val;
     int ti = 0;
     yyjson_arr_foreach(tp_arr, idx, max, val) {
-        targets[ti++] = yyjson_get_str(val);
+        const char *target = yyjson_get_str(val);
+        if (!target || !target[0] ||
+            (strcmp(target, "*") != 0 && !cbm_validate_project_name(target))) {
+            free(targets);
+            yyjson_doc_free(jdoc);
+            free(project);
+            return cbm_mcp_text_result(
+                "target_projects must contain non-empty valid project names or [\"*\"]", true);
+        }
+        if (srv && srv->authz.enabled && !mcp_authz_project_allowed(&srv->authz, target)) {
+            free(targets);
+            yyjson_doc_free(jdoc);
+            free(project);
+            return cbm_mcp_text_result("target project is unavailable for this remote identity",
+                                       true);
+        }
+        targets[ti++] = target;
+    }
+    if (tp_count > 1) {
+        for (int i = 0; i < tp_count; i++) {
+            if (strcmp(targets[i], "*") == 0) {
+                free(targets);
+                yyjson_doc_free(jdoc);
+                free(project);
+                return cbm_mcp_text_result("wildcard target_projects must be used alone", true);
+            }
+        }
     }
 
     cbm_cross_repo_result_t result = cbm_cross_repo_match(project, targets, tp_count);
@@ -7378,9 +7672,26 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(boundary_err, true);
     }
 
+    /* Project ACLs must cover index_repository's repo_path/name schema too;
+     * the generic dispatcher only sees the project aliases used by query tools. */
+    if (srv && srv->authz.enabled) {
+        char *index_project = name_override && name_override[0]
+                                  ? cbm_project_name_from_path(name_override)
+                                  : cbm_project_name_from_path(repo_path);
+        bool allowed = index_project && cbm_validate_project_name(index_project) &&
+                       mcp_authz_project_allowed(&srv->authz, index_project);
+        free(index_project);
+        if (!allowed) {
+            free(mode_str);
+            free(name_override);
+            free(repo_path);
+            return cbm_mcp_text_result("project is unavailable for this remote identity", true);
+        }
+    }
+
     if (mode_str && strcmp(mode_str, "cross-repo-intelligence") == 0) {
         free(mode_str);
-        char *result = handle_cross_repo_mode(repo_path, name_override, args);
+        char *result = handle_cross_repo_mode(srv, repo_path, name_override, args);
         free(name_override);
         free(repo_path);
         return result;
@@ -7950,6 +8261,22 @@ typedef struct {
     char content[CBM_SZ_1K];
 } grep_match_t;
 
+static int grep_match_cmp(const void *left, const void *right) {
+    const grep_match_t *a = left;
+    const grep_match_t *b = right;
+    int file_cmp = strcmp(a->file, b->file);
+    if (file_cmp != 0) {
+        return file_cmp;
+    }
+    if (a->line < b->line) {
+        return -1;
+    }
+    if (a->line > b->line) {
+        return 1;
+    }
+    return strcmp(a->content, b->content);
+}
+
 /* Deduped result: one per containing graph node */
 typedef struct {
     int64_t node_id; /* 0 = raw match (no containing node) */
@@ -8442,6 +8769,10 @@ static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_
     int gm_cap = CBM_SZ_64;
     int gm_count = 0;
     grep_match_t *gm = malloc(gm_cap * sizeof(grep_match_t));
+    if (!gm) {
+        *out_count = 0;
+        return NULL;
+    }
     char line[CBM_SZ_2K];
 
     while (fgets(line, sizeof(line), fp) && gm_count < grep_limit) {
@@ -8481,7 +8812,15 @@ static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_
             continue;
         }
 
-        safe_grow(gm, gm_count, gm_cap, PAIR_LEN);
+        if (gm_count >= gm_cap) {
+            int new_cap = gm_cap > 0 ? gm_cap * PAIR_LEN : CBM_SZ_64;
+            grep_match_t *grown = realloc(gm, (size_t)new_cap * sizeof(*gm));
+            if (!grown) {
+                break;
+            }
+            gm = grown;
+            gm_cap = new_cap;
+        }
         snprintf(gm[gm_count].file, sizeof(gm[0].file), "%s", file);
         gm[gm_count].line = (int)strtol(sep1 + SKIP_ONE, NULL, CBM_DECIMAL_BASE);
         snprintf(gm[gm_count].content, sizeof(gm[0].content), "%s", sep2 + SKIP_ONE);
@@ -8521,9 +8860,17 @@ static void add_to_search_results(search_result_t **sr, int *sr_count, int *sr_c
         }
     }
     if (*sr_count >= *sr_cap) {
-        *sr_cap *= PAIR_LEN;
-        *sr = safe_realloc(*sr, *sr_cap * sizeof(search_result_t));
-        memset(&(*sr)[*sr_count], 0, (*sr_cap - *sr_count) * sizeof(search_result_t));
+        int new_cap = *sr_cap > 0 ? *sr_cap * PAIR_LEN : CBM_SZ_32;
+        if (new_cap <= *sr_cap) {
+            return;
+        }
+        search_result_t *grown = realloc(*sr, (size_t)new_cap * sizeof(search_result_t));
+        if (!grown) {
+            return;
+        }
+        memset(grown + *sr_cap, 0, (size_t)(new_cap - *sr_cap) * sizeof(search_result_t));
+        *sr = grown;
+        *sr_cap = new_cap;
     }
     search_result_t *r = &(*sr)[*sr_count];
     r->node_id = n->id;
@@ -8548,8 +8895,16 @@ static void classify_grep_hit(grep_match_t *hit, cbm_node_t *file_nodes, int fil
         add_to_search_results(sr, sr_count, sr_cap, &file_nodes[best], hit->line);
     } else {
         if (*raw_count >= *raw_cap) {
-            *raw_cap = (*raw_cap == 0) ? CBM_SZ_32 : *raw_cap * PAIR_LEN;
-            *raw = safe_realloc(*raw, *raw_cap * sizeof(grep_match_t));
+            int new_cap = (*raw_cap == 0) ? CBM_SZ_32 : *raw_cap * PAIR_LEN;
+            if (new_cap <= *raw_cap) {
+                return;
+            }
+            grep_match_t *grown = realloc(*raw, (size_t)new_cap * sizeof(grep_match_t));
+            if (!grown) {
+                return;
+            }
+            *raw = grown;
+            *raw_cap = new_cap;
         }
         if (*raw) {
             (*raw)[(*raw_count)++] = *hit;
@@ -8574,7 +8929,10 @@ static void free_file_nodes(cbm_node_t *nodes, int count) {
 static void classify_all_grep_hits(grep_match_t *gm, int gm_count, cbm_store_t *store,
                                    const char *project, search_result_t **sr, int *sr_count,
                                    int *sr_cap, grep_match_t **raw, int *raw_count, int *raw_cap) {
-    qsort(gm, gm_count, sizeof(grep_match_t), (int (*)(const void *, const void *))strcmp);
+    if (!gm || gm_count <= 0) {
+        return;
+    }
+    qsort(gm, (size_t)gm_count, sizeof(*gm), grep_match_cmp);
     int i = 0;
     while (i < gm_count) {
         const char *cur_file = gm[i].file;
@@ -8716,7 +9074,7 @@ static bool validate_search_path_arg(const char *s) {
 }
 
 static bool validate_search_args(const char *root_path, const char *file_pattern) {
-    if (!validate_search_path_arg(root_path)) {
+    if (!cbm_validate_shell_path_arg(root_path)) {
         return false;
     }
     if (file_pattern && !validate_search_path_arg(file_pattern)) {
@@ -8944,8 +9302,24 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     int raw_count = 0;
     grep_match_t *raw = malloc(raw_cap * sizeof(grep_match_t));
 
+    if (!sr || !raw || (gm_count > 0 && !gm)) {
+        free(gm);
+        free(sr);
+        free(raw);
+        free(root_path);
+        free(pattern);
+        free(project);
+        free(file_pattern);
+        if (has_path_filter) {
+            cbm_regfree(&path_regex);
+        }
+        return cbm_mcp_text_result("search failed: out of memory", true);
+    }
+
     /* Sort matches by file path for contiguous per-file processing */
-    qsort(gm, gm_count, sizeof(grep_match_t), (int (*)(const void *, const void *))strcmp);
+    if (gm_count > 1) {
+        qsort(gm, (size_t)gm_count, sizeof(*gm), grep_match_cmp);
+    }
 
     classify_all_grep_hits(gm, gm_count, store, project, &sr, &sr_count, &sr_cap, &raw, &raw_count,
                            &raw_cap);
@@ -8955,14 +9329,16 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         int64_t *ids = malloc(sr_count * sizeof(int64_t));
         int *in_degs = malloc(sr_count * sizeof(int));
         int *out_degs = malloc(sr_count * sizeof(int));
-        for (int j = 0; j < sr_count; j++) {
-            ids[j] = sr[j].node_id;
-        }
-        if (cbm_store_batch_count_degrees(store, ids, sr_count, "CALLS", in_degs, out_degs) ==
-            CBM_STORE_OK) {
+        if (ids && in_degs && out_degs) {
             for (int j = 0; j < sr_count; j++) {
-                sr[j].in_degree = in_degs[j];
-                sr[j].out_degree = out_degs[j];
+                ids[j] = sr[j].node_id;
+            }
+            if (cbm_store_batch_count_degrees(store, ids, sr_count, "CALLS", in_degs, out_degs) ==
+                CBM_STORE_OK) {
+                for (int j = 0; j < sr_count; j++) {
+                    sr[j].in_degree = in_degs[j];
+                    sr[j].out_degree = out_degs[j];
+                }
             }
         }
         free(ids);
@@ -9014,6 +9390,21 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── detect_changes ───────────────────────────────────────────── */
 
+static bool detect_ref_is_shell_safe(const char *ref) {
+    if (!cbm_validate_shell_arg(ref)) {
+        return false;
+    }
+#ifdef _WIN32
+    /* cmd.exe expands these even inside the double quotes used below. */
+    for (const char *p = ref; *p; p++) {
+        if (*p == '%' || *p == '!' || *p == '^') {
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
 bool cbm_detect_node_in_hunks(const cbm_node_t *node, const cbm_changed_hunk_t *hunks,
                               int hunk_count, const char *file) {
     if (!node || !hunks || !file) {
@@ -9042,7 +9433,7 @@ static cbm_changed_hunk_t *detect_read_changed_hunks(const char *root_path, cons
     char cmd[CBM_SZ_2K];
 #ifdef _WIN32
     int cmd_len = snprintf(cmd, sizeof(cmd),
-                           "git -C \"%s\" diff --unified=0 --relative %s...HEAD -- . 2>NUL & "
+                           "git -C \"%s\" diff --unified=0 --relative \"%s...HEAD\" -- . 2>NUL & "
                            "git -C \"%s\" diff --unified=0 --relative -- . 2>NUL",
                            root_path, base_branch, root_path);
 #else
@@ -9065,6 +9456,10 @@ static cbm_changed_hunk_t *detect_read_changed_hunks(const char *root_path, cons
     size_t cap = CBM_SZ_4K;
     size_t len = 0;
     char *text = malloc(cap);
+    if (!text) {
+        (void)cbm_pclose(fp);
+        return NULL;
+    }
     char chunk[CBM_SZ_4K];
     size_t got;
     while ((got = fread(chunk, SKIP_ONE, sizeof(chunk), fp)) > 0) {
@@ -9077,9 +9472,20 @@ static cbm_changed_hunk_t *detect_read_changed_hunks(const char *root_path, cons
         if (keep > 0) {
             size_t need = len + keep + SKIP_ONE;
             while (cap < need) {
+                if (cap > SIZE_MAX / PAIR_LEN) {
+                    free(text);
+                    (void)cbm_pclose(fp);
+                    return NULL;
+                }
                 cap *= PAIR_LEN;
             }
-            text = safe_realloc(text, cap);
+            char *grown = realloc(text, cap);
+            if (!grown) {
+                free(text);
+                (void)cbm_pclose(fp);
+                return NULL;
+            }
+            text = grown;
             memcpy(text + len, chunk, keep);
             len += keep;
         }
@@ -9192,7 +9598,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
      * a value starting with '-' would be read by git as an
      * option rather than a ref (e.g. `--output=<path>` writes the diff to an
      * arbitrary file). A real git ref never begins with '-'. */
-    if (!cbm_validate_shell_arg(base_branch) || base_branch[0] == '-') {
+    if (!detect_ref_is_shell_safe(base_branch) || base_branch[0] == '-') {
         free(project);
         free(base_branch);
         free(scope);
@@ -9210,7 +9616,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         return res;
     }
 
-    if (!validate_search_path_arg(root_path)) {
+    if (!cbm_validate_shell_path_arg(root_path)) {
         free(root_path);
         free(project);
         free(base_branch);
@@ -9290,7 +9696,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
      * ("?? path", "A  path"); the prefix is stripped when parsing below. */
 #ifdef _WIN32
     snprintf(cmd, sizeof(cmd),
-             "git -C \"%s\" diff --name-only --relative %s...HEAD -- . 2>NUL & "
+             "git -C \"%s\" diff --name-only --relative \"%s...HEAD\" -- . 2>NUL & "
              "git -C \"%s\" diff --name-only --relative -- . 2>NUL & "
              "git --no-optional-locks -c status.relativePaths=true -C \"%s\" status --short "
              "--untracked-files=normal -- . 2>NUL",
@@ -9842,12 +10248,21 @@ static bool review_is_doc_path(const char *path) {
 
 static void review_add_rule(yyjson_mut_doc *doc, yyjson_mut_val *rules, const char *id,
                             const char *status, const char *message) {
+    if (!doc || !rules || !id || !status || !message) {
+        return;
+    }
     yyjson_mut_val *rule = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_strcpy(doc, rule, "id", id);
-    yyjson_mut_obj_add_strcpy(doc, rule, "status", status);
-    yyjson_mut_obj_add_strcpy(doc, rule, "message", message);
-    yyjson_mut_obj_add_val(doc, rule, "evidence", yyjson_mut_arr(doc));
-    yyjson_mut_arr_add_val(rules, rule);
+    yyjson_mut_val *evidence = yyjson_mut_arr(doc);
+    if (!rule || !evidence) {
+        return;
+    }
+    bool ok = yyjson_mut_obj_add_strcpy(doc, rule, "id", id);
+    ok = ok && yyjson_mut_obj_add_strcpy(doc, rule, "status", status);
+    ok = ok && yyjson_mut_obj_add_strcpy(doc, rule, "message", message);
+    ok = ok && yyjson_mut_obj_add_val(doc, rule, "evidence", evidence);
+    if (ok) {
+        (void)yyjson_mut_arr_add_val(rules, rule);
+    }
 }
 
 /* A non-pass rule must point back to something the caller can inspect. Keep
@@ -9967,6 +10382,10 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
         free(evidence_level);
         evidence_level = heap_strdup("analysis");
     }
+    if (!evidence_level) {
+        free(project);
+        return cbm_mcp_text_result("out of memory", true);
+    }
     if (strcmp(evidence_level, "scout") != 0 && strcmp(evidence_level, "analysis") != 0 &&
         strcmp(evidence_level, "audit") != 0) {
         free(project);
@@ -9983,9 +10402,16 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
     yyjson_val *detected = review_payload(detect_response, &detect_doc, &detect_error);
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
+    if (!doc || !root) {
+        yyjson_mut_doc_free(doc);
+        yyjson_doc_free(detect_doc);
+        free(detect_response);
+        free(project);
+        free(evidence_level);
+        return cbm_mcp_text_result("out of memory", true);
+    }
     yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_obj_add_strcpy(doc, root, "project", project);
 
     yyjson_mut_val *changed_files_out = yyjson_mut_arr(doc);
     yyjson_mut_val *changed_symbols_out = yyjson_mut_arr(doc);
@@ -9993,12 +10419,23 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_val *tests_out = yyjson_mut_arr(doc);
     yyjson_mut_val *docs_out = yyjson_mut_arr(doc);
     yyjson_mut_val *rules_out = yyjson_mut_arr(doc);
-    yyjson_mut_obj_add_val(doc, root, "changed_files", changed_files_out);
-    yyjson_mut_obj_add_val(doc, root, "changed_symbols", changed_symbols_out);
-    yyjson_mut_obj_add_val(doc, root, "impacts", impacts_out);
-    yyjson_mut_obj_add_val(doc, root, "tests", tests_out);
-    yyjson_mut_obj_add_val(doc, root, "documentation", docs_out);
-    yyjson_mut_obj_add_val(doc, root, "rules", rules_out);
+    bool json_ok = changed_files_out && changed_symbols_out && impacts_out && tests_out &&
+                   docs_out && rules_out &&
+                   yyjson_mut_obj_add_strcpy(doc, root, "project", project);
+    json_ok = json_ok && yyjson_mut_obj_add_val(doc, root, "changed_files", changed_files_out);
+    json_ok = json_ok && yyjson_mut_obj_add_val(doc, root, "changed_symbols", changed_symbols_out);
+    json_ok = json_ok && yyjson_mut_obj_add_val(doc, root, "impacts", impacts_out);
+    json_ok = json_ok && yyjson_mut_obj_add_val(doc, root, "tests", tests_out);
+    json_ok = json_ok && yyjson_mut_obj_add_val(doc, root, "documentation", docs_out);
+    json_ok = json_ok && yyjson_mut_obj_add_val(doc, root, "rules", rules_out);
+    if (!json_ok) {
+        yyjson_mut_doc_free(doc);
+        yyjson_doc_free(detect_doc);
+        free(detect_response);
+        free(project);
+        free(evidence_level);
+        return cbm_mcp_text_result("out of memory", true);
+    }
 
     int changed_count = 0;
     int changed_test_count = 0;
@@ -10028,8 +10465,16 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
                 continue;
             }
             char *copy = heap_strdup(path);
-            changed_paths = safe_realloc(changed_paths,
-                                         (size_t)(changed_path_count + 1) * sizeof(*changed_paths));
+            if (!copy) {
+                continue;
+            }
+            char **grown_paths =
+                realloc(changed_paths, (size_t)(changed_path_count + 1) * sizeof(*changed_paths));
+            if (!grown_paths) {
+                free(copy);
+                break;
+            }
+            changed_paths = grown_paths;
             changed_paths[changed_path_count++] = copy;
             yyjson_mut_arr_add_strcpy(doc, changed_files_out, path);
             changed_count++;
@@ -10095,7 +10540,13 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
                 if (root_seen) {
                     continue;
                 }
-                root_ids = safe_realloc(root_ids, (size_t)(root_count + 1) * sizeof(*root_ids));
+                int64_t *grown_root_ids =
+                    realloc(root_ids, (size_t)(root_count + 1) * sizeof(*root_ids));
+                if (!grown_root_ids) {
+                    impact_truncated = true;
+                    break;
+                }
+                root_ids = grown_root_ids;
                 root_ids[root_count++] = node->id;
                 yyjson_mut_val *symbol = yyjson_mut_obj(doc);
                 yyjson_mut_obj_add_int(doc, symbol, "id", node->id);
@@ -10144,8 +10595,13 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
                     if (seen) {
                         continue;
                     }
-                    impact_ids = safe_realloc(impact_ids,
-                                              (size_t)(impact_id_count + 1) * sizeof(*impact_ids));
+                    int64_t *grown_impact_ids =
+                        realloc(impact_ids, (size_t)(impact_id_count + 1) * sizeof(*impact_ids));
+                    if (!grown_impact_ids) {
+                        impact_truncated = true;
+                        break;
+                    }
+                    impact_ids = grown_impact_ids;
                     impact_ids[impact_id_count++] = hop->node.id;
                     if (hop->hop == 1) {
                         direct_count++;
@@ -10173,11 +10629,20 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
                             }
                         }
                         if (!file_seen) {
-                            affected_files =
-                                safe_realloc(affected_files, (size_t)(affected_file_names + 1) *
-                                                                 sizeof(*affected_files));
-                            affected_files[affected_file_names++] =
-                                heap_strdup(hop->node.file_path);
+                            char **grown_files =
+                                realloc(affected_files, (size_t)(affected_file_names + 1) *
+                                                            sizeof(*affected_files));
+                            if (!grown_files) {
+                                impact_truncated = true;
+                                break;
+                            }
+                            affected_files = grown_files;
+                            affected_files[affected_file_names] = heap_strdup(hop->node.file_path);
+                            if (!affected_files[affected_file_names]) {
+                                impact_truncated = true;
+                                break;
+                            }
+                            affected_file_names++;
                         }
                     }
                     yyjson_mut_val *impact = yyjson_mut_obj(doc);
@@ -10465,15 +10930,192 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── Tool dispatch ────────────────────────────────────────────── */
 
+static char *mcp_raw_project_arg(const char *args_json) {
+    static const char *const keys[] = {"project", "project_name", "project_id", "projectName"};
+    if (!args_json) {
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        char *value = cbm_mcp_get_string_arg(args_json, keys[i]);
+        if (value && value[0]) {
+            return value;
+        }
+        free(value);
+    }
+    return NULL;
+}
+
+static int compare_document_sections(const void *left, const void *right) {
+    const cbm_node_t *a = (const cbm_node_t *)left;
+    const cbm_node_t *b = (const cbm_node_t *)right;
+    if (a->start_line != b->start_line) {
+        return a->start_line < b->start_line ? -1 : 1;
+    }
+    if (a->end_line != b->end_line) {
+        return a->end_line < b->end_line ? -1 : 1;
+    }
+    if (!a->qualified_name || !b->qualified_name) {
+        return a->qualified_name ? 1 : (b->qualified_name ? -1 : 0);
+    }
+    return strcmp(a->qualified_name, b->qualified_name);
+}
+
+/* Return a Markdown document node and its ordered heading sections. */
+static char *handle_get_document(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    cbm_store_t *store = resolve_store(srv, project);
+    REQUIRE_STORE(store, project);
+    char *path = cbm_mcp_get_string_arg(args, "path");
+    char *name = cbm_mcp_get_string_arg(args, "name");
+    cbm_node_t *docs = NULL;
+    int doc_count = 0;
+    if (cbm_store_find_nodes_by_label(store, project, "Document", &docs, &doc_count) !=
+            CBM_STORE_OK ||
+        doc_count == 0) {
+        free(project);
+        free(path);
+        free(name);
+        return cbm_mcp_text_result("no Markdown documents are indexed", true);
+    }
+    cbm_node_t *doc = NULL;
+    for (int i = 0; i < doc_count; i++) {
+        if ((path && docs[i].file_path && strcmp(path, docs[i].file_path) == 0) ||
+            (name && docs[i].name && strcmp(name, docs[i].name) == 0)) {
+            doc = &docs[i];
+            break;
+        }
+    }
+    if (!doc) {
+        cbm_store_free_nodes(docs, doc_count);
+        free(project);
+        free(path);
+        free(name);
+        return cbm_mcp_text_result("document not found; use search_graph(label=\"Document\")",
+                                   true);
+    }
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    cbm_store_find_edges_by_source_type(store, doc->id, "CONTAINS_SECTION", &edges, &edge_count);
+    cbm_node_t *sections_found =
+        edge_count > 0 ? calloc((size_t)edge_count, sizeof(*sections_found)) : NULL;
+    if (edge_count > 0 && !sections_found) {
+        cbm_store_free_edges(edges, edge_count);
+        cbm_store_free_nodes(docs, doc_count);
+        free(project);
+        free(path);
+        free(name);
+        return cbm_mcp_text_result("out of memory", true);
+    }
+    int section_count = 0;
+    for (int i = 0; i < edge_count; i++) {
+        if (cbm_store_find_node_by_id(store, edges[i].target_id, &sections_found[section_count]) ==
+            CBM_STORE_OK) {
+            section_count++;
+        }
+    }
+    /* SQLite does not promise row order for edge lookups. Sort by source line
+     * so the API always returns the document outline in reading order. */
+    if (section_count > 1) {
+        qsort(sections_found, (size_t)section_count, sizeof(*sections_found),
+              compare_document_sections);
+    }
+    yyjson_mut_doc *ydoc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = ydoc ? yyjson_mut_obj(ydoc) : NULL;
+    yyjson_mut_val *sections = NULL;
+    char *json = NULL;
+    bool json_oom = ydoc == NULL || root == NULL;
+    if (!json_oom) {
+        yyjson_mut_doc_set_root(ydoc, root);
+        bool root_ok = yyjson_mut_obj_add_str(ydoc, root, "project", project);
+        root_ok = root_ok &&
+                  yyjson_mut_obj_add_str(ydoc, root, "path", doc->file_path ? doc->file_path : "");
+        root_ok = root_ok && yyjson_mut_obj_add_str(ydoc, root, "name", doc->name ? doc->name : "");
+        sections = yyjson_mut_arr(ydoc);
+        json_oom = !root_ok || sections == NULL;
+    }
+    for (int i = 0; !json_oom && i < section_count; i++) {
+        cbm_node_t *section = &sections_found[i];
+        yyjson_mut_val *item = yyjson_mut_obj(ydoc);
+        if (!item) {
+            json_oom = true;
+            break;
+        }
+        bool item_ok =
+            yyjson_mut_obj_add_str(ydoc, item, "title", section->name ? section->name : "");
+        item_ok = item_ok &&
+                  yyjson_mut_obj_add_str(ydoc, item, "qualified_name",
+                                         section->qualified_name ? section->qualified_name : "");
+        item_ok = item_ok && yyjson_mut_obj_add_int(ydoc, item, "start_line", section->start_line);
+        item_ok = item_ok && yyjson_mut_obj_add_int(ydoc, item, "end_line", section->end_line);
+        yyjson_doc *prop_doc =
+            section->properties_json
+                ? yyjson_read(section->properties_json, strlen(section->properties_json), 0)
+                : NULL;
+        yyjson_mut_val *prop_val = prop_doc
+                                       ? yyjson_val_mut_copy(ydoc, yyjson_doc_get_root(prop_doc))
+                                       : yyjson_mut_obj(ydoc);
+        if (!prop_val) {
+            if (prop_doc) {
+                yyjson_doc_free(prop_doc);
+            }
+            json_oom = true;
+            break;
+        }
+        item_ok = item_ok && yyjson_mut_obj_add_val(ydoc, item, "properties", prop_val);
+        if (prop_doc) {
+            yyjson_doc_free(prop_doc);
+        }
+        item_ok = item_ok && yyjson_mut_arr_add_val(sections, item);
+        if (!item_ok) {
+            json_oom = true;
+            break;
+        }
+    }
+    if (!json_oom) {
+        json_oom = !yyjson_mut_obj_add_val(ydoc, root, "sections", sections);
+        if (!json_oom) {
+            json = yy_doc_to_str(ydoc);
+            json_oom = json == NULL;
+        }
+    }
+    if (ydoc) {
+        yyjson_mut_doc_free(ydoc);
+    }
+    cbm_store_free_edges(edges, edge_count);
+    for (int i = 0; i < section_count; i++) {
+        cbm_node_free_fields(&sections_found[i]);
+    }
+    free(sections_found);
+    cbm_store_free_nodes(docs, doc_count);
+    free(project);
+    free(path);
+    free(name);
+    char *result = cbm_mcp_text_result(json_oom ? "out of memory" : json, json_oom);
+    free(json);
+    return result;
+}
+
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
     if (!tool_name) {
         return cbm_mcp_text_result("missing tool name", true);
     }
-    if (srv && !mcp_tool_allowed(srv->tool_profile, tool_name)) {
+    if (!args_json) {
+        args_json = "{}";
+    }
+    if (srv && !mcp_tool_allowed_for_authz(srv->tool_profile, &srv->authz, tool_name)) {
         char message[CBM_SZ_256];
-        snprintf(message, sizeof(message), "tool '%s' is not available in the %s tool profile",
-                 tool_name, mcp_tool_profile_name(srv->tool_profile));
+        snprintf(message, sizeof(message),
+                 "tool '%s' is not available for this remote identity or tool profile", tool_name);
         return cbm_mcp_text_result(message, true);
+    }
+    if (srv && srv->authz.enabled && strcmp(tool_name, "list_projects") != 0) {
+        char *project = mcp_raw_project_arg(args_json);
+        if (project && !mcp_authz_project_allowed(&srv->authz, project)) {
+            free(project);
+            return cbm_mcp_text_result(
+                "{\"error\":\"project is unavailable for this remote identity\"}", true);
+        }
+        free(project);
     }
 
     if (strcmp(tool_name, "list_projects") == 0) {
@@ -10522,6 +11164,9 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "search_code") == 0) {
         return handle_search_code(srv, args_json);
+    }
+    if (strcmp(tool_name, "get_document") == 0) {
+        return handle_get_document(srv, args_json);
     }
     if (strcmp(tool_name, "detect_changes") == 0) {
         return handle_detect_changes(srv, args_json);
@@ -10871,7 +11516,7 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     } else if (strcmp(req.method, "prompts/get") == 0) {
         result_json = cbm_mcp_prompt_get(req.params_raw, &request_error_json);
     } else if (strcmp(req.method, "tools/list") == 0) {
-        result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
+        result_json = cbm_mcp_tools_list_page(srv->tool_profile, &srv->authz, req.params_raw);
     } else if (strcmp(req.method, "tools/call") == 0) {
         char *tool_name = req.params_raw ? cbm_mcp_get_tool_name(req.params_raw) : NULL;
         char *tool_args =

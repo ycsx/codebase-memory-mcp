@@ -1,0 +1,24 @@
+
+  codebase-memory-mcp  C test suite
+
+=== mcp_http ===
+  mcp_http_bearer_auth_is_strict                         PASS
+  mcp_http_proxy_ip_requires_trusted_peer                PASS
+  mcp_http_config_fails_closed                           level=error msg=mcp_http.config.invalid reason=missing_or_out_of_range
+level=error msg=mcp_http.config.invalid reason=missing_or_out_of_range
+PASS
+  mcp_remote_auth_key_lifecycle_and_fail_closed_reload   PASS
+  mcp_http_managed_key_is_bound_to_session_and_acl       level=info msg=session.root.cwd path=C:\Users\����\Desktop\project\codebase-memory-mcp\source
+level=info msg=mcp.request protocol=jsonrpc method=initialize status=ok duration_ms=3
+level=info msg=mcp.request protocol=jsonrpc method=tools/list status=ok duration_ms=0
+level=warn msg=mcp.request protocol=jsonrpc method=tools/call tool=search_graph status=error duration_ms=0
+PASS
+  mcp_http_live_auth_session_tools_and_audit             level=info msg=session.root.cwd path=C:\Users\����\Desktop\project\codebase-memory-mcp\source
+level=info msg=mcp.request protocol=jsonrpc method=initialize status=ok duration_ms=2
+level=info msg=mcp.request protocol=jsonrpc method=tools/list status=ok duration_ms=0
+PASS
+
+────────────────────────────────────────────
+  6 passed
+────────────────────────────────────────────
+

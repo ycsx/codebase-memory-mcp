@@ -219,6 +219,9 @@ typedef struct {
     bool is_entry_point;
     const char *structural_profile; // AST structural profile (arena-allocated) or NULL
     const char *body_tokens; // space-separated raw identifier tokens from body (arena) or NULL
+    /* Markdown-only section metadata. Zero/NULL for other definition kinds. */
+    int heading_level;
+    const char *anchor;
 } CBMDefinition;
 
 /* Argument captured from a call expression */

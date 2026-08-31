@@ -1,0 +1,4 @@
+/bin/sh: line 1: grep: command not found
+/bin/sh: line 1: grep: command not found
+cd /c/Users/王骁/Desktop/project/codebase-memory-mcp/source && build/c/test-runner pipeline
+make: *** [Makefile.cbm:655: test-focused] Error 127

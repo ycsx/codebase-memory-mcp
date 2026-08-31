@@ -2673,6 +2673,45 @@ TEST(markdown_heading_content) {
     PASS();
 }
 
+TEST(markdown_heading_metadata_and_duplicate_identity) {
+    CBMFileResult *r = extract("# Installation Guide!\n## 中文标题\n## Installation Guide!\n",
+                               CBM_LANG_MARKDOWN, "t", "docs/README.md");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    CBMDefinition *first = NULL;
+    CBMDefinition *unicode = NULL;
+    CBMDefinition *duplicate = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        CBMDefinition *def = &r->defs.items[i];
+        if (strcmp(def->label, "Section") != 0) {
+            continue;
+        }
+        if (strcmp(def->name, "Installation Guide!") == 0 && !first) {
+            first = def;
+        } else if (strcmp(def->name, "中文标题") == 0) {
+            unicode = def;
+        } else if (strcmp(def->name, "Installation Guide!") == 0) {
+            duplicate = def;
+        }
+    }
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(unicode);
+    ASSERT_NOT_NULL(duplicate);
+    ASSERT_EQ(first->heading_level, 1);
+    ASSERT_EQ(unicode->heading_level, 2);
+    ASSERT_EQ(duplicate->heading_level, 2);
+    ASSERT_STR_EQ(first->anchor, "installation-guide");
+    ASSERT_STR_EQ(unicode->anchor, "中文标题");
+    ASSERT_STR_EQ(duplicate->anchor, "installation-guide");
+    ASSERT_NEQ(strcmp(first->qualified_name, duplicate->qualified_name), 0);
+    ASSERT_EQ(first->start_line, 1);
+    ASSERT_EQ(unicode->start_line, 2);
+    ASSERT_EQ(duplicate->start_line, 3);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(markdown_no_headings) {
     CBMFileResult *r =
         extract("Just a paragraph\n\nAnother paragraph\n", CBM_LANG_MARKDOWN, "t", "README.md");
@@ -4757,6 +4796,7 @@ SUITE(extraction) {
     RUN_TEST(markdown_atx_headings);
     RUN_TEST(markdown_setext_headings);
     RUN_TEST(markdown_heading_content);
+    RUN_TEST(markdown_heading_metadata_and_duplicate_identity);
     RUN_TEST(markdown_no_headings);
 
     /* __init__.py / index.ts Module QN collision regression */

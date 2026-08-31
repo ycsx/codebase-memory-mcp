@@ -124,7 +124,7 @@
 - `complete_no_known_gap/partial/unknown` 覆盖状态。
 - 分页、上限、截断和置信度字段。
 - 新鲜、过期、dirty、无 Git、部分索引和截断黄金样本。
-- 当前 18 个 MCP 工具、README 和 CLI help 差异清单。
+- 当前 19 个 MCP 工具、README 和 CLI help 差异清单。
 
 验收门槛：
 

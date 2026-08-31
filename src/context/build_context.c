@@ -35,6 +35,23 @@ typedef struct {
     unsigned reasons;
 } context_rank_t;
 
+typedef struct {
+    cbm_node_t node;
+    context_rank_t rank;
+} context_ranked_node_t;
+
+typedef struct {
+    cbm_node_t *candidates;
+    context_rank_t *ranks;
+    int candidate_count;
+    int evidence_limit;
+    int neighbor_limit;
+    cbm_node_t selected[CONTEXT_DEFAULT_LIMIT * 2];
+    int selected_count;
+    int evidence_count;
+    int estimated_tokens;
+} context_emit_state_t;
+
 static char *context_strdup(const char *value) {
     if (!value) {
         return NULL;
@@ -150,63 +167,74 @@ static bool node_seen(const cbm_node_t *nodes, int count, int64_t id) {
     return false;
 }
 
-static void add_nullable_string(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
+static bool add_nullable_string(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
                                 const char *value) {
     if (value) {
-        yyjson_mut_obj_add_strcpy(doc, obj, key, value);
-    } else {
-        yyjson_mut_obj_add_null(doc, obj, key);
+        return yyjson_mut_obj_add_strcpy(doc, obj, key, value);
     }
+    return yyjson_mut_obj_add_null(doc, obj, key);
 }
 
-static void add_node_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const cbm_node_t *node,
+static bool add_node_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const cbm_node_t *node,
                           int in_degree, int out_degree) {
-    yyjson_mut_obj_add_int(doc, obj, "id", node->id);
-    add_nullable_string(doc, obj, "qualified_name", node->qualified_name);
-    add_nullable_string(doc, obj, "label", node->label);
-    add_nullable_string(doc, obj, "name", node->name);
+    bool ok = yyjson_mut_obj_add_int(doc, obj, "id", node->id);
+    ok = ok && add_nullable_string(doc, obj, "qualified_name", node->qualified_name);
+    ok = ok && add_nullable_string(doc, obj, "label", node->label);
+    ok = ok && add_nullable_string(doc, obj, "name", node->name);
     /* Keep the response aligned with the graph/search contracts so the UI can
      * resolve an evidence item back to its loaded GraphNode. */
-    add_nullable_string(doc, obj, "file_path", node->file_path);
-    yyjson_mut_obj_add_int(doc, obj, "start_line", node->start_line);
-    yyjson_mut_obj_add_int(doc, obj, "end_line", node->end_line);
-    yyjson_mut_obj_add_int(doc, obj, "in_degree", in_degree);
-    yyjson_mut_obj_add_int(doc, obj, "out_degree", out_degree);
+    ok = ok && add_nullable_string(doc, obj, "file_path", node->file_path);
+    ok = ok && yyjson_mut_obj_add_int(doc, obj, "start_line", node->start_line);
+    ok = ok && yyjson_mut_obj_add_int(doc, obj, "end_line", node->end_line);
+    ok = ok && yyjson_mut_obj_add_int(doc, obj, "in_degree", in_degree);
+    ok = ok && yyjson_mut_obj_add_int(doc, obj, "out_degree", out_degree);
+    return ok;
 }
 
-static void add_rank_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const context_rank_t *rank,
+static bool add_rank_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const context_rank_t *rank,
                           int rank_number) {
-    yyjson_mut_obj_add_int(doc, obj, "rank", rank_number);
-    yyjson_mut_obj_add_int(doc, obj, "score", rank->score);
+    bool ok = yyjson_mut_obj_add_int(doc, obj, "rank", rank_number);
+    ok = ok && yyjson_mut_obj_add_int(doc, obj, "score", rank->score);
     yyjson_mut_val *reasons = yyjson_mut_arr(doc);
-    if (rank->reasons & CONTEXT_REASON_EXACT_TARGET) {
-        yyjson_mut_arr_add_str(doc, reasons, "exact_target");
+    if (!ok || !reasons) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_TARGET_NAME) {
-        yyjson_mut_arr_add_str(doc, reasons, "target_name_match");
+    if ((rank->reasons & CONTEXT_REASON_EXACT_TARGET) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "exact_target")) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_TARGET_FILE) {
-        yyjson_mut_arr_add_str(doc, reasons, "target_file_match");
+    if ((rank->reasons & CONTEXT_REASON_TARGET_NAME) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "target_name_match")) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_TASK_TOKEN) {
-        yyjson_mut_arr_add_str(doc, reasons, "task_token_match");
+    if ((rank->reasons & CONTEXT_REASON_TARGET_FILE) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "target_file_match")) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_INBOUND) {
-        yyjson_mut_arr_add_str(doc, reasons, "inbound_degree");
+    if ((rank->reasons & CONTEXT_REASON_TASK_TOKEN) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "task_token_match")) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_OUTBOUND) {
-        yyjson_mut_arr_add_str(doc, reasons, "outbound_degree");
+    if ((rank->reasons & CONTEXT_REASON_INBOUND) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "inbound_degree")) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_DIFF_UNRESOLVED) {
-        yyjson_mut_arr_add_str(doc, reasons, "diff_ref_unresolved");
+    if ((rank->reasons & CONTEXT_REASON_OUTBOUND) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "outbound_degree")) {
+        return false;
     }
-    if (rank->reasons & CONTEXT_REASON_RELATED_TEST) {
-        yyjson_mut_arr_add_str(doc, reasons, "related_test");
+    if ((rank->reasons & CONTEXT_REASON_DIFF_UNRESOLVED) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "diff_ref_unresolved")) {
+        return false;
     }
-    if (rank->reasons == 0U) {
-        yyjson_mut_arr_add_str(doc, reasons, "graph_fallback");
+    if ((rank->reasons & CONTEXT_REASON_RELATED_TEST) &&
+        !yyjson_mut_arr_add_str(doc, reasons, "related_test")) {
+        return false;
     }
-    yyjson_mut_obj_add_val(doc, obj, "reasons", reasons);
+    if (rank->reasons == 0U && !yyjson_mut_arr_add_str(doc, reasons, "graph_fallback")) {
+        return false;
+    }
+    return yyjson_mut_obj_add_val(doc, obj, "reasons", reasons);
 }
 
 static int compare_rank(const cbm_node_t *left_node, const context_rank_t *left,
@@ -235,19 +263,29 @@ static int compare_rank(const cbm_node_t *left_node, const context_rank_t *left,
     return 0;
 }
 
-static void add_name_array(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key, char **names,
+static int compare_ranked_nodes(const void *left, const void *right) {
+    const context_ranked_node_t *a = left;
+    const context_ranked_node_t *b = right;
+    return compare_rank(&a->node, &a->rank, &b->node, &b->rank);
+}
+
+static bool add_name_array(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key, char **names,
                            int count) {
     yyjson_mut_val *array = yyjson_mut_arr(doc);
-    for (int i = 0; i < count; i++) {
-        yyjson_mut_arr_add_strcpy(doc, array, names[i]);
+    if (!array) {
+        return false;
     }
-    yyjson_mut_obj_add_val(doc, obj, key, array);
+    bool ok = true;
+    for (int i = 0; i < count; i++) {
+        ok = ok && yyjson_mut_arr_add_strcpy(doc, array, names[i]);
+    }
+    return ok && yyjson_mut_obj_add_val(doc, obj, key, array);
 }
 
 /* Emit one bounded evidence item. Keeping neighbor lookup and ownership in one
  * place prevents candidates and related tests from drifting into different
  * response shapes. */
-static void add_evidence_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mut_val *evidence,
+static bool add_evidence_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mut_val *evidence,
                               const cbm_node_t *node, const context_rank_t *rank, int rank_number,
                               int neighbor_limit, const char *evidence_kind) {
     int in_degree = 0;
@@ -264,18 +302,20 @@ static void add_evidence_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mu
     char **callees = NULL;
     int caller_count = 0;
     int callee_count = 0;
-    (void)cbm_store_node_neighbor_names(store, node->id, neighbor_limit, &callers, &caller_count,
-                                        &callees, &callee_count);
+    int neighbor_rc = cbm_store_node_neighbor_names(store, node->id, neighbor_limit, &callers,
+                                                    &caller_count, &callees, &callee_count);
 
     yyjson_mut_val *item = yyjson_mut_obj(doc);
-    add_node_json(doc, item, node, in_degree, out_degree);
+    bool ok = item && add_node_json(doc, item, node, in_degree, out_degree);
     if (rank) {
-        add_rank_json(doc, item, rank, rank_number);
+        ok = ok && add_rank_json(doc, item, rank, rank_number);
     }
-    add_name_array(doc, item, "callers", callers, caller_count);
-    add_name_array(doc, item, "callees", callees, callee_count);
-    yyjson_mut_obj_add_strcpy(doc, item, "evidence", evidence_kind);
-    yyjson_mut_arr_add_val(evidence, item);
+    ok = ok && add_name_array(doc, item, "callers", callers, caller_count);
+    ok = ok && add_name_array(doc, item, "callees", callees, callee_count);
+    ok =
+        ok && yyjson_mut_obj_add_bool(doc, item, "neighbors_complete", neighbor_rc == CBM_STORE_OK);
+    ok = ok && yyjson_mut_obj_add_strcpy(doc, item, "evidence", evidence_kind);
+    ok = ok && yyjson_mut_arr_add_val(evidence, item);
     for (int i = 0; i < caller_count; i++) {
         free(callers[i]);
     }
@@ -284,6 +324,7 @@ static void add_evidence_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mu
     }
     free(callers);
     free(callees);
+    return ok;
 }
 
 static char *first_task_token(const char *task) {
@@ -353,6 +394,263 @@ static int resolve_candidates(cbm_store_t *store, const char *project, const cha
     return count;
 }
 
+static void free_emit_state(context_emit_state_t *state) {
+    if (!state) {
+        return;
+    }
+    cbm_store_free_nodes(state->candidates, state->candidate_count);
+    free(state->ranks);
+    state->candidates = NULL;
+    state->ranks = NULL;
+}
+
+static bool prepare_candidates(cbm_store_t *store, const cbm_context_request_t *request,
+                               context_emit_state_t *state) {
+    state->candidate_count = resolve_candidates(store, request->project, request->target,
+                                                request->task, &state->candidates);
+    if (state->candidate_count == 0) {
+        return true;
+    }
+    state->ranks = calloc((size_t)state->candidate_count, sizeof(*state->ranks));
+    if (!state->ranks) {
+        return false;
+    }
+    for (int i = 0; i < state->candidate_count; i++) {
+        int in_degree = 0;
+        int out_degree = 0;
+        cbm_store_node_degree(store, state->candidates[i].id, &in_degree, &out_degree);
+        state->ranks[i] = rank_node(&state->candidates[i], request, in_degree, out_degree);
+    }
+    if (state->candidate_count < 2) {
+        return true;
+    }
+
+    context_ranked_node_t *ranked = malloc((size_t)state->candidate_count * sizeof(*ranked));
+    if (!ranked) {
+        return false;
+    }
+    for (int i = 0; i < state->candidate_count; i++) {
+        ranked[i].node = state->candidates[i];
+        ranked[i].rank = state->ranks[i];
+    }
+    qsort(ranked, (size_t)state->candidate_count, sizeof(*ranked), compare_ranked_nodes);
+    for (int i = 0; i < state->candidate_count; i++) {
+        state->candidates[i] = ranked[i].node;
+        state->ranks[i] = ranked[i].rank;
+    }
+    free(ranked);
+    return true;
+}
+
+static bool add_resolved_target_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                     const context_emit_state_t *state) {
+    if (state->candidate_count != 1) {
+        return yyjson_mut_obj_add_null(doc, root, "resolved_target");
+    }
+    int in_degree = 0;
+    int out_degree = 0;
+    cbm_store_node_degree(store, state->candidates[0].id, &in_degree, &out_degree);
+    yyjson_mut_val *resolved = yyjson_mut_obj(doc);
+    return resolved && add_node_json(doc, resolved, &state->candidates[0], in_degree, out_degree) &&
+           add_rank_json(doc, resolved, &state->ranks[0], 1) &&
+           yyjson_mut_obj_add_val(doc, root, "resolved_target", resolved);
+}
+
+static bool add_candidates_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                const cbm_context_request_t *request,
+                                const context_emit_state_t *state, int candidate_limit) {
+    yyjson_mut_val *array = yyjson_mut_arr(doc);
+    if (!array) {
+        return false;
+    }
+    for (int i = 0; i < candidate_limit; i++) {
+        if (!request->include_tests && is_test_node(&state->candidates[i])) {
+            continue;
+        }
+        int in_degree = 0;
+        int out_degree = 0;
+        cbm_store_node_degree(store, state->candidates[i].id, &in_degree, &out_degree);
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        if (!item || !add_node_json(doc, item, &state->candidates[i], in_degree, out_degree) ||
+            !add_rank_json(doc, item, &state->ranks[i], i + 1) ||
+            !yyjson_mut_arr_add_val(array, item)) {
+            return false;
+        }
+    }
+    return yyjson_mut_obj_add_val(doc, root, "candidates", array);
+}
+
+static bool add_candidate_evidence(cbm_store_t *store, yyjson_mut_doc *doc,
+                                   yyjson_mut_val *evidence, const cbm_context_request_t *request,
+                                   context_emit_state_t *state) {
+    int selected_capacity = (int)(sizeof(state->selected) / sizeof(state->selected[0]));
+    for (int i = 0; i < state->candidate_count && state->evidence_count < state->evidence_limit;
+         i++) {
+        cbm_node_t *node = &state->candidates[i];
+        if ((!request->include_tests && is_test_node(node)) ||
+            node_seen(state->selected, state->selected_count, node->id)) {
+            continue;
+        }
+        if (state->selected_count >= selected_capacity) {
+            break;
+        }
+        state->selected[state->selected_count++] = *node;
+        if (!add_evidence_json(store, doc, evidence, node, &state->ranks[i], i + 1,
+                               state->neighbor_limit, "graph_node_and_direct_neighbors")) {
+            return false;
+        }
+        state->evidence_count++;
+        state->estimated_tokens += CONTEXT_ESTIMATE_PER_NODE;
+    }
+    return true;
+}
+
+static bool add_related_test_evidence(cbm_store_t *store, yyjson_mut_doc *doc,
+                                      yyjson_mut_val *evidence,
+                                      const cbm_context_request_t *request,
+                                      context_emit_state_t *state) {
+    int selected_capacity = (int)(sizeof(state->selected) / sizeof(state->selected[0]));
+    if (!request->include_tests || state->evidence_count >= state->evidence_limit) {
+        return true;
+    }
+    for (int i = 0; i < state->candidate_count && state->evidence_count < state->evidence_limit;
+         i++) {
+        const char *name = state->candidates[i].name;
+        if (!name || !name[0]) {
+            continue;
+        }
+        char test_names[3][CBM_SZ_256];
+        snprintf(test_names[0], sizeof(test_names[0]), "test_%s", name);
+        snprintf(test_names[1], sizeof(test_names[1]), "%s_test", name);
+        snprintf(test_names[2], sizeof(test_names[2]), "Test%s", name);
+        for (int pattern = 0; pattern < 3 && state->evidence_count < state->evidence_limit;
+             pattern++) {
+            cbm_node_t *test_nodes = NULL;
+            int test_count = 0;
+            if (cbm_store_find_nodes_by_name(store, request->project, test_names[pattern],
+                                             &test_nodes, &test_count) != CBM_STORE_OK) {
+                continue;
+            }
+            for (int j = 0; j < test_count && state->evidence_count < state->evidence_limit; j++) {
+                cbm_node_t *test = &test_nodes[j];
+                if (!is_test_node(test) ||
+                    node_seen(state->selected, state->selected_count, test->id)) {
+                    continue;
+                }
+                if (state->selected_count >= selected_capacity) {
+                    cbm_store_free_nodes(test_nodes, test_count);
+                    return true;
+                }
+                int in_degree = 0;
+                int out_degree = 0;
+                cbm_store_node_degree(store, test->id, &in_degree, &out_degree);
+                context_rank_t test_rank = {
+                    .score = 0,
+                    .in_degree = in_degree,
+                    .out_degree = out_degree,
+                    .reasons = CONTEXT_REASON_RELATED_TEST,
+                };
+                state->selected[state->selected_count++] = *test;
+                if (!add_evidence_json(store, doc, evidence, test, &test_rank,
+                                       state->candidate_count + state->evidence_count + 1,
+                                       state->neighbor_limit,
+                                       "related_test_and_direct_neighbors")) {
+                    cbm_store_free_nodes(test_nodes, test_count);
+                    return false;
+                }
+                state->evidence_count++;
+                state->estimated_tokens += CONTEXT_ESTIMATE_PER_NODE;
+            }
+            cbm_store_free_nodes(test_nodes, test_count);
+        }
+    }
+    return true;
+}
+
+static bool add_documentation_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                   const cbm_context_request_t *request, int evidence_limit,
+                                   bool *truncated) {
+    yyjson_mut_val *documentation = yyjson_mut_arr(doc);
+    if (!documentation) {
+        return false;
+    }
+    *truncated = false;
+    if (request->include_docs) {
+        char **doc_paths = NULL;
+        int doc_count = 0;
+        if (cbm_store_find_architecture_docs(store, request->project, &doc_paths, &doc_count) ==
+            CBM_STORE_OK) {
+            int doc_limit = evidence_limit;
+            *truncated = doc_count > doc_limit;
+            bool ok = true;
+            for (int i = 0; i < doc_count; i++) {
+                if (i < doc_limit && doc_paths[i]) {
+                    ok = ok && yyjson_mut_arr_add_strcpy(doc, documentation, doc_paths[i]);
+                }
+                free(doc_paths[i]);
+            }
+            free(doc_paths);
+            if (!ok) {
+                return false;
+            }
+        }
+    }
+    return yyjson_mut_obj_add_val(doc, root, "documentation", documentation);
+}
+
+static bool add_budget_json(yyjson_mut_doc *doc, yyjson_mut_val *root, int budget,
+                            const context_emit_state_t *state, bool truncated) {
+    yyjson_mut_val *budget_obj = yyjson_mut_obj(doc);
+    return budget_obj && yyjson_mut_obj_add_int(doc, budget_obj, "requested_tokens", budget) &&
+           yyjson_mut_obj_add_int(doc, budget_obj, "estimated_tokens", state->estimated_tokens) &&
+           yyjson_mut_obj_add_int(doc, budget_obj, "evidence_limit", state->evidence_limit) &&
+           yyjson_mut_obj_add_int(doc, budget_obj, "neighbor_limit", state->neighbor_limit) &&
+           yyjson_mut_obj_add_bool(doc, budget_obj, "truncated", truncated) &&
+           yyjson_mut_obj_add_val(doc, root, "budget", budget_obj);
+}
+
+static bool add_limitations_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                 const cbm_context_request_t *request, int candidate_count,
+                                 bool budget_truncated, bool documentation_truncated) {
+    yyjson_mut_val *limitations = yyjson_mut_arr(doc);
+    bool ok = limitations &&
+              yyjson_mut_arr_add_str(
+                  doc, limitations,
+                  "Graph evidence is deterministic but best-effort; dynamic calls and reflection "
+                  "may be absent.");
+    if (candidate_count == 0) {
+        ok = ok && yyjson_mut_arr_add_str(
+                       doc, limitations,
+                       "No unique target was resolved; use search_graph to find an exact qualified "
+                       "name.");
+    } else if (candidate_count > 1) {
+        ok = ok && yyjson_mut_arr_add_str(
+                       doc, limitations,
+                       "The target is ambiguous; choose one candidate before relying on impact "
+                       "conclusions.");
+    }
+    if (!request->include_docs) {
+        ok = ok &&
+             yyjson_mut_arr_add_str(doc, limitations, "Documentation evidence was not requested.");
+    }
+    if (request->diff_ref && request->diff_ref[0]) {
+        ok = ok && yyjson_mut_arr_add_str(
+                       doc, limitations,
+                       "The diff reference is recorded for this context; use detect_changes for "
+                       "full Git diff evidence.");
+    }
+    if (budget_truncated) {
+        ok = ok && yyjson_mut_arr_add_str(doc, limitations,
+                                          "Evidence was trimmed to the requested token budget.");
+    }
+    if (documentation_truncated) {
+        ok = ok && yyjson_mut_arr_add_str(
+                       doc, limitations,
+                       "Documentation evidence was trimmed to the requested token budget.");
+    }
+    return ok && yyjson_mut_obj_add_val(doc, root, "limitations", limitations);
+}
+
 char *cbm_context_build_json(cbm_store_t *store, const cbm_context_request_t *request,
                              cbm_context_stats_t *stats) {
     if (stats) {
@@ -383,234 +681,93 @@ char *cbm_context_build_json(cbm_store_t *store, const cbm_context_request_t *re
         neighbor_limit = 16;
     }
 
-    cbm_node_t *candidates = NULL;
-    int candidate_count =
-        resolve_candidates(store, request->project, request->target, request->task, &candidates);
-    context_rank_t *ranks =
-        candidate_count > 0 ? calloc((size_t)candidate_count, sizeof(*ranks)) : NULL;
-    if (candidate_count > 0 && !ranks) {
-        cbm_store_free_nodes(candidates, candidate_count);
+    context_emit_state_t state = {
+        .evidence_limit = evidence_limit,
+        .neighbor_limit = neighbor_limit,
+    };
+    if (!prepare_candidates(store, request, &state)) {
+        free_emit_state(&state);
         return context_strdup("{\"error\":\"unable to allocate context ranking\"}");
-    }
-    for (int i = 0; i < candidate_count; i++) {
-        int in_degree = 0;
-        int out_degree = 0;
-        cbm_store_node_degree(store, candidates[i].id, &in_degree, &out_degree);
-        ranks[i] = rank_node(&candidates[i], request, in_degree, out_degree);
-    }
-    /* Insertion sort keeps the original order for exact ties; the comparator's
-     * qualified-name/file/id fallback makes that order deterministic even when
-     * SQLite changes its row traversal plan. */
-    for (int i = 1; i < candidate_count; i++) {
-        cbm_node_t node_key = candidates[i];
-        context_rank_t rank_key = ranks[i];
-        int j = i;
-        while (j > 0 && compare_rank(&node_key, &rank_key, &candidates[j - 1], &ranks[j - 1]) < 0) {
-            candidates[j] = candidates[j - 1];
-            ranks[j] = ranks[j - 1];
-            j--;
-        }
-        candidates[j] = node_key;
-        ranks[j] = rank_key;
     }
     int candidate_budget_limit = evidence_limit > 0 ? evidence_limit : 1;
     if (candidate_budget_limit > CONTEXT_DEFAULT_LIMIT) {
         candidate_budget_limit = CONTEXT_DEFAULT_LIMIT;
     }
-    int candidate_limit =
-        candidate_count < candidate_budget_limit ? candidate_count : candidate_budget_limit;
+    int candidate_limit = state.candidate_count < candidate_budget_limit ? state.candidate_count
+                                                                         : candidate_budget_limit;
     /* Even with a tiny budget, preserve two ambiguous candidates so callers
      * can disambiguate instead of receiving an arbitrary single choice. */
-    if (candidate_count > 1 && candidate_limit < 2) {
+    if (state.candidate_count > 1 && candidate_limit < 2) {
         candidate_limit = 2;
     }
-    bool ambiguous = candidate_count > 1;
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) {
+        free_emit_state(&state);
+        return context_strdup("{\"error\":\"out of memory\"}");
+    }
     yyjson_mut_val *root = yyjson_mut_obj(doc);
+    if (!root) {
+        goto json_oom;
+    }
     yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_obj_add_strcpy(doc, root, "project", request->project);
-    yyjson_mut_obj_add_strcpy(doc, root, "task", request->task);
-    add_nullable_string(doc, root, "target", request->target);
-    add_nullable_string(doc, root, "diff_ref", request->diff_ref);
-    add_nullable_string(doc, root, "evidence_level",
-                        request->evidence_level ? request->evidence_level : "analysis");
-
-    yyjson_mut_val *resolved = yyjson_mut_obj(doc);
-    if (candidate_count == 1) {
-        int in_degree = 0;
-        int out_degree = 0;
-        cbm_store_node_degree(store, candidates[0].id, &in_degree, &out_degree);
-        add_node_json(doc, resolved, &candidates[0], in_degree, out_degree);
-        add_rank_json(doc, resolved, &ranks[0], 1);
-        yyjson_mut_obj_add_val(doc, root, "resolved_target", resolved);
-    } else {
-        yyjson_mut_obj_add_null(doc, root, "resolved_target");
+    bool json_ok = yyjson_mut_obj_add_strcpy(doc, root, "project", request->project);
+    json_ok = json_ok && yyjson_mut_obj_add_strcpy(doc, root, "task", request->task);
+    json_ok = json_ok && add_nullable_string(doc, root, "target", request->target);
+    json_ok = json_ok && add_nullable_string(doc, root, "diff_ref", request->diff_ref);
+    json_ok = json_ok &&
+              add_nullable_string(doc, root, "evidence_level",
+                                  request->evidence_level ? request->evidence_level : "analysis");
+    if (!json_ok) {
+        goto json_oom;
     }
 
-    yyjson_mut_val *candidate_json = yyjson_mut_arr(doc);
-    for (int i = 0; i < candidate_limit; i++) {
-        if (!request->include_tests && is_test_node(&candidates[i])) {
-            continue;
-        }
-        int in_degree = 0;
-        int out_degree = 0;
-        cbm_store_node_degree(store, candidates[i].id, &in_degree, &out_degree);
-        yyjson_mut_val *item = yyjson_mut_obj(doc);
-        add_node_json(doc, item, &candidates[i], in_degree, out_degree);
-        add_rank_json(doc, item, &ranks[i], i + 1);
-        yyjson_mut_arr_add_val(candidate_json, item);
+    if (!add_resolved_target_json(store, doc, root, &state) ||
+        !add_candidates_json(store, doc, root, request, &state, candidate_limit)) {
+        goto json_oom;
     }
-    yyjson_mut_obj_add_val(doc, root, "candidates", candidate_json);
 
     yyjson_mut_val *evidence = yyjson_mut_arr(doc);
-    cbm_node_t selected[CONTEXT_DEFAULT_LIMIT];
-    int selected_count = 0;
-    int evidence_count = 0;
-    int estimated_tokens = 0;
-    for (int i = 0; i < candidate_count && evidence_count < evidence_limit; i++) {
-        cbm_node_t *node = &candidates[i];
-        if (!request->include_tests && is_test_node(node)) {
-            continue;
-        }
-        if (node_seen(selected, selected_count, node->id)) {
-            continue;
-        }
-        selected[selected_count++] = *node;
-        add_evidence_json(store, doc, evidence, node, &ranks[i], i + 1, neighbor_limit,
-                          "graph_node_and_direct_neighbors");
-        evidence_count++;
-        estimated_tokens += CONTEXT_ESTIMATE_PER_NODE;
+    if (!evidence || !add_candidate_evidence(store, doc, evidence, request, &state) ||
+        !add_related_test_evidence(store, doc, evidence, request, &state) ||
+        !yyjson_mut_obj_add_val(doc, root, "evidence", evidence)) {
+        goto json_oom;
     }
 
-    /* Test discovery is intentionally conservative and deterministic. It
-     * supplements graph evidence with conventional test symbol names without
-     * treating a naming match as proof of coverage. */
-    if (request->include_tests && evidence_count < evidence_limit) {
-        for (int i = 0; i < candidate_count && evidence_count < evidence_limit; i++) {
-            const char *name = candidates[i].name;
-            if (!name || !name[0]) {
-                continue;
-            }
-            char test_names[3][CBM_SZ_256];
-            snprintf(test_names[0], sizeof(test_names[0]), "test_%s", name);
-            snprintf(test_names[1], sizeof(test_names[1]), "%s_test", name);
-            snprintf(test_names[2], sizeof(test_names[2]), "Test%s", name);
-            for (int pattern = 0; pattern < 3 && evidence_count < evidence_limit; pattern++) {
-                cbm_node_t *test_nodes = NULL;
-                int test_count = 0;
-                if (cbm_store_find_nodes_by_name(store, request->project, test_names[pattern],
-                                                 &test_nodes, &test_count) != CBM_STORE_OK) {
-                    continue;
-                }
-                for (int j = 0; j < test_count && evidence_count < evidence_limit; j++) {
-                    cbm_node_t *test = &test_nodes[j];
-                    if (!is_test_node(test) || node_seen(selected, selected_count, test->id)) {
-                        continue;
-                    }
-                    int in_degree = 0;
-                    int out_degree = 0;
-                    cbm_store_node_degree(store, test->id, &in_degree, &out_degree);
-                    context_rank_t test_rank = {
-                        .score = 0,
-                        .in_degree = in_degree,
-                        .out_degree = out_degree,
-                        .reasons = CONTEXT_REASON_RELATED_TEST,
-                    };
-                    selected[selected_count++] = *test;
-                    add_evidence_json(store, doc, evidence, test, &test_rank,
-                                      candidate_count + evidence_count + 1, neighbor_limit,
-                                      "related_test_and_direct_neighbors");
-                    evidence_count++;
-                    estimated_tokens += CONTEXT_ESTIMATE_PER_NODE;
-                }
-                cbm_store_free_nodes(test_nodes, test_count);
-            }
-        }
-    }
-    yyjson_mut_obj_add_val(doc, root, "evidence", evidence);
-
-    yyjson_mut_val *documentation = yyjson_mut_arr(doc);
     bool documentation_truncated = false;
-    if (request->include_docs) {
-        char **doc_paths = NULL;
-        int doc_count = 0;
-        if (cbm_store_find_architecture_docs(store, request->project, &doc_paths, &doc_count) ==
-            CBM_STORE_OK) {
-            int doc_limit = evidence_limit;
-            if (doc_count > doc_limit) {
-                documentation_truncated = true;
-            }
-            for (int i = 0; i < doc_count && i < doc_limit; i++) {
-                if (doc_paths[i]) {
-                    yyjson_mut_arr_add_strcpy(doc, documentation, doc_paths[i]);
-                    free(doc_paths[i]);
-                }
-            }
-            for (int i = doc_limit; i < doc_count; i++) {
-                free(doc_paths[i]);
-            }
-            free(doc_paths);
-        }
+    if (!add_documentation_json(store, doc, root, request, evidence_limit,
+                                &documentation_truncated)) {
+        goto json_oom;
     }
-    yyjson_mut_obj_add_val(doc, root, "documentation", documentation);
 
-    bool budget_truncated = candidate_count > candidate_limit || evidence_count < candidate_count ||
-                            documentation_truncated;
-    bool resolution_incomplete = candidate_count != 1;
-    yyjson_mut_val *budget_obj = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_int(doc, budget_obj, "requested_tokens", budget);
-    yyjson_mut_obj_add_int(doc, budget_obj, "estimated_tokens", estimated_tokens);
-    yyjson_mut_obj_add_int(doc, budget_obj, "evidence_limit", evidence_limit);
-    yyjson_mut_obj_add_int(doc, budget_obj, "neighbor_limit", neighbor_limit);
-    yyjson_mut_obj_add_bool(doc, budget_obj, "truncated", budget_truncated);
-    yyjson_mut_obj_add_val(doc, root, "budget", budget_obj);
-
-    yyjson_mut_val *limitations = yyjson_mut_arr(doc);
-    yyjson_mut_arr_add_str(
-        doc, limitations,
-        "Graph evidence is deterministic but best-effort; dynamic calls and reflection may be "
-        "absent.");
-    if (candidate_count == 0) {
-        yyjson_mut_arr_add_str(
-            doc, limitations,
-            "No unique target was resolved; use search_graph to find an exact qualified name.");
-    } else if (ambiguous) {
-        yyjson_mut_arr_add_str(
-            doc, limitations,
-            "The target is ambiguous; choose one candidate before relying on impact conclusions.");
+    bool budget_truncated = state.candidate_count > candidate_limit ||
+                            state.evidence_count < state.candidate_count || documentation_truncated;
+    bool resolution_incomplete = state.candidate_count != 1;
+    if (!add_budget_json(doc, root, budget, &state, budget_truncated) ||
+        !add_limitations_json(doc, root, request, state.candidate_count, budget_truncated,
+                              documentation_truncated)) {
+        goto json_oom;
     }
-    if (!request->include_docs) {
-        yyjson_mut_arr_add_str(doc, limitations, "Documentation evidence was not requested.");
-    }
-    if (request->diff_ref && request->diff_ref[0]) {
-        yyjson_mut_arr_add_str(
-            doc, limitations,
-            "The diff reference is recorded for this context; use detect_changes for full Git "
-            "diff evidence.");
-    }
-    if (budget_truncated) {
-        yyjson_mut_arr_add_str(doc, limitations,
-                               "Evidence was trimmed to the requested token budget.");
-    }
-    if (documentation_truncated) {
-        yyjson_mut_arr_add_str(doc, limitations,
-                               "Documentation evidence was trimmed to the requested token budget.");
-    }
-    yyjson_mut_obj_add_val(doc, root, "limitations", limitations);
 
     size_t length = 0;
     char *json = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, &length);
+    if (!json) {
+        goto json_oom;
+    }
     yyjson_mut_doc_free(doc);
-    cbm_store_free_nodes(candidates, candidate_count);
-    free(ranks);
+    free_emit_state(&state);
     if (stats) {
-        stats->returned = evidence_count;
-        stats->total = candidate_count;
-        stats->estimated_tokens = estimated_tokens;
+        stats->returned = state.evidence_count;
+        stats->total = state.candidate_count;
+        stats->estimated_tokens = state.estimated_tokens;
         stats->budget_truncated = budget_truncated;
         stats->resolution_incomplete = resolution_incomplete;
         stats->truncated = budget_truncated || resolution_incomplete;
     }
     return json;
+
+json_oom:
+    yyjson_mut_doc_free(doc);
+    free_emit_state(&state);
+    return context_strdup("{\"error\":\"out of memory\"}");
 }

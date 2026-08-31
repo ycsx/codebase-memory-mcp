@@ -14,6 +14,7 @@ typedef struct {
     const char *bind_addr;
     int port;
     const char *auth_token;
+    const char *auth_store_path;
     const char *audit_log_path;
     const char *trusted_proxies;
     int session_ttl_sec;

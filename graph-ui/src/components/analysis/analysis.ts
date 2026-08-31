@@ -1,4 +1,10 @@
-import type { GraphData, GraphEdge, GraphNode } from "../../lib/types";
+import {
+  graphEdgeEndpointKey,
+  graphNodeKey,
+  type GraphData,
+  type GraphEdge,
+  type GraphNode,
+} from "../../lib/types";
 
 export type ImpactRisk = "changed" | "critical" | "high" | "medium";
 
@@ -128,7 +134,13 @@ function riskForRatio(value: number, max: number): Exclude<ImpactRisk, "changed"
 
 function incomingCallCount(node: GraphNode, edges: GraphEdge[]): number {
   if (typeof node.in_calls === "number") return node.in_calls;
-  return edges.filter((edge) => edge.type === "CALLS" && edge.target === node.id).length;
+  const key = graphNodeKey(node);
+  return edges.filter(
+    (edge) =>
+      edge.type === "CALLS" &&
+      (graphEdgeEndpointKey(edge, "target") === key ||
+        (!edge.target_key && edge.target === node.id)),
+  ).length;
 }
 
 export function buildImpactModel(
@@ -138,21 +150,27 @@ export function buildImpactModel(
   maxNodes = Number.POSITIVE_INFINITY,
 ): ImpactModel {
   const { nodes, edges } = flattenGraph(data);
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const incoming = new Map<number, GraphEdge[]>();
+  const nodesById = new Map(nodes.map((node) => [graphNodeKey(node), node]));
+  const nodesByName = new Map<string, GraphNode[]>();
+  for (const node of nodes) {
+    const candidates = nodesByName.get(node.name) ?? [];
+    candidates.push(node);
+    nodesByName.set(node.name, candidates);
+  }
+  const incoming = new Map<string, GraphEdge[]>();
 
   for (const edge of edges) {
     if (!IMPACT_EDGE_TYPES.has(edge.type)) continue;
-    const list = incoming.get(edge.target) ?? [];
+    const list = incoming.get(graphEdgeEndpointKey(edge, "target")) ?? [];
     list.push(edge);
-    incoming.set(edge.target, list);
+    incoming.set(graphEdgeEndpointKey(edge, "target"), list);
   }
 
   const layers: ImpactNode[][] = Array.from(
     { length: Math.max(1, requestedDepth + 1) },
     () => [],
   );
-  const visited = new Set<number>();
+  const visited = new Set<string>();
   const queue: Array<{ node: GraphNode; layer: number; key: string }> = [];
   let syntheticIndex = 0;
   let totalNodes = 0;
@@ -163,16 +181,13 @@ export function buildImpactModel(
       skippedSeeds = true;
       break;
     }
-    const graphNode = nodes.find(
-      (node) =>
-        node.name === symbol.name &&
-        pathsMatch(node.file_path, symbol.file) &&
-        !STRUCTURAL_LABELS.has(node.label),
+    const graphNode = (nodesByName.get(symbol.name) ?? []).find(
+      (node) => pathsMatch(node.file_path, symbol.file) && !STRUCTURAL_LABELS.has(node.label),
     );
 
-    if (graphNode && !visited.has(graphNode.id)) {
-      const key = `node:${graphNode.id}`;
-      visited.add(graphNode.id);
+    if (graphNode && !visited.has(graphNodeKey(graphNode))) {
+      const key = `node:${graphNodeKey(graphNode)}`;
+      visited.add(graphNodeKey(graphNode));
       layers[0].push({
         key,
         graphNode,
@@ -223,20 +238,20 @@ export function buildImpactModel(
     const current = queue.shift()!;
     if (current.layer >= requestedDepth) continue;
 
-    const candidateEdges = [...(incoming.get(current.node.id) ?? [])].sort((a, b) => {
-      const aName = nodesById.get(a.source)?.name ?? "";
-      const bName = nodesById.get(b.source)?.name ?? "";
+    const candidateEdges = [...(incoming.get(graphNodeKey(current.node)) ?? [])].sort((a, b) => {
+      const aName = nodesById.get(graphEdgeEndpointKey(a, "source"))?.name ?? "";
+      const bName = nodesById.get(graphEdgeEndpointKey(b, "source"))?.name ?? "";
       return aName.localeCompare(bName) || a.type.localeCompare(b.type);
     });
 
     for (const edge of candidateEdges) {
       if (totalNodes >= maxNodes) break;
-      const caller = nodesById.get(edge.source);
-      if (!caller || STRUCTURAL_LABELS.has(caller.label) || visited.has(caller.id)) continue;
+      const caller = nodesById.get(graphEdgeEndpointKey(edge, "source"));
+      if (!caller || STRUCTURAL_LABELS.has(caller.label) || visited.has(graphNodeKey(caller))) continue;
 
       const layer = current.layer + 1;
-      const key = `node:${caller.id}`;
-      visited.add(caller.id);
+      const key = `node:${graphNodeKey(caller)}`;
+      visited.add(graphNodeKey(caller));
       layers[layer].push({
         key,
         graphNode: caller,
@@ -279,12 +294,15 @@ export function buildHotspotModel(
   architectureHotspots: ArchitectureHotspot[],
 ): HotspotModel {
   const { nodes, edges } = flattenGraph(data);
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const nodeByQualifiedName = new Map(
-    nodes
-      .filter((node) => node.qualified_name)
-      .map((node) => [node.qualified_name!, node]),
-  );
+  const nodeById = new Map(nodes.map((node) => [graphNodeKey(node), node]));
+  const nodeByQualifiedName = new Map<string, GraphNode>();
+  for (const node of nodes) {
+    if (node.qualified_name && !nodeByQualifiedName.has(node.qualified_name)) {
+      /* flattenGraph keeps the primary project first. Preserve that node when
+       * two projects expose the same qualified name. */
+      nodeByQualifiedName.set(node.qualified_name, node);
+    }
+  }
   const maxFanIn = Math.max(0, ...architectureHotspots.map((item) => item.fan_in));
 
   const rows = architectureHotspots
@@ -300,39 +318,43 @@ export function buildHotspotModel(
     .sort((a, b) => b.fan_in - a.fan_in || a.qualified_name.localeCompare(b.qualified_name));
 
   const fileMap = new Map<string, Omit<FileHotspot, "score" | "risk">>();
+  const fileKeyFor = (node: GraphNode): string =>
+    `${node.graph_project ?? ""}:${node.file_path ?? ""}`;
   for (const node of nodes) {
     if (!node.file_path || STRUCTURAL_LABELS.has(node.label)) continue;
-    const current = fileMap.get(node.file_path) ?? {
+    const fileKey = fileKeyFor(node);
+    const current = fileMap.get(fileKey) ?? {
       file: node.file_path,
       fanIn: 0,
       hotspotCount: 0,
       nodeCount: 0,
     };
     current.nodeCount += 1;
-    fileMap.set(node.file_path, current);
+    fileMap.set(fileKey, current);
   }
 
   for (const edge of edges) {
     if (edge.type !== "CALLS") continue;
-    const target = nodeById.get(edge.target);
+    const target = nodeById.get(graphEdgeEndpointKey(edge, "target"));
     if (!target?.file_path) continue;
-    const current = fileMap.get(target.file_path);
+    const current = fileMap.get(fileKeyFor(target));
     if (current) current.fanIn += 1;
   }
 
   const indexedFanInByFile = new Map<string, number>();
   for (const row of rows) {
     if (!row.graphNode?.file_path) continue;
+    const fileKey = fileKeyFor(row.graphNode);
     indexedFanInByFile.set(
-      row.graphNode.file_path,
-      (indexedFanInByFile.get(row.graphNode.file_path) ?? 0) + row.fan_in,
+      fileKey,
+      (indexedFanInByFile.get(fileKey) ?? 0) + row.fan_in,
     );
-    const current = fileMap.get(row.graphNode.file_path);
+    const current = fileMap.get(fileKey);
     if (!current) continue;
     current.hotspotCount += 1;
   }
-  for (const [file, fanIn] of indexedFanInByFile) {
-    const current = fileMap.get(file);
+  for (const [fileKey, fanIn] of indexedFanInByFile) {
+    const current = fileMap.get(fileKey);
     if (current) current.fanIn = Math.max(current.fanIn, fanIn);
   }
 

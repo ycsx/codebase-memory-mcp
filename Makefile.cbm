@@ -183,6 +183,7 @@ CYPHER_SRCS = src/cypher/cypher.c
 MCP_SRCS = src/mcp/mcp.c src/mcp/analysis_meta.c src/mcp/index_supervisor.c src/mcp/compact_out.c \
     src/context/build_context.c \
     src/mcp/usage_stats.c \
+    src/mcp/remote_auth.c \
     src/mcp/http_transport.c
 
 # Discover module (new)
@@ -498,6 +499,11 @@ ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS
 # ── Build directories ────────────────────────────────────────────
 
 BUILD_DIR = build/c
+CBM_EXE_SUFFIX :=
+ifeq ($(IS_MINGW),yes)
+CBM_EXE_SUFFIX := .exe
+endif
+CBM_BIN = $(BUILD_DIR)/codebase-memory-mcp$(CBM_EXE_SUFFIX)
 
 # ── Object file compilation (grammars need relaxed warnings) ─────
 
@@ -719,15 +725,15 @@ OBJS_VENDORED_PROD = $(MIMALLOC_OBJ_PROD) $(SQLITE3_OBJ_PROD) $(TRE_OBJ_PROD) $(
 
 MAIN_SRC = src/main.c
 
-$(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) | $(BUILD_DIR)
+$(CBM_BIN): $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_PROD) -o $@ \
 		$(MAIN_SRC) $(PROD_SRCS) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
 		$(LDFLAGS)
 
-cbm: $(BUILD_DIR)/codebase-memory-mcp
-	@echo "Built: $(BUILD_DIR)/codebase-memory-mcp"
+cbm: $(CBM_BIN)
+	@echo "Built: $(CBM_BIN)"
 
 # ── Build with embedded UI (requires Node.js) ───────────────────
 
@@ -745,13 +751,13 @@ embed: frontend
 	scripts/embed-frontend.sh graph-ui/dist $(BUILD_DIR)/embedded
 
 cbm-with-ui: embed $(OBJS_VENDORED_PROD)
-	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp \
+	$(CC) $(CFLAGS_PROD) -o $(CBM_BIN) \
 		$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
 		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) \
 		$(LDFLAGS)
-	@echo "Built with UI: $(BUILD_DIR)/codebase-memory-mcp"
+	@echo "Built with UI: $(CBM_BIN)"
 
 clean-c:
 	rm -rf $(BUILD_DIR)
@@ -847,10 +853,10 @@ lint-ci: lint-cppcheck lint-format lint-no-suppress
 security: cbm
 	@echo "=== Running security audit suite ==="
 	scripts/security-audit.sh
-	scripts/security-strings.sh $(BUILD_DIR)/codebase-memory-mcp
+	scripts/security-strings.sh $(CBM_BIN)
 	scripts/security-ui.sh
-	scripts/security-install.sh $(BUILD_DIR)/codebase-memory-mcp
-	scripts/security-network.sh $(BUILD_DIR)/codebase-memory-mcp
-	scripts/security-fuzz.sh $(BUILD_DIR)/codebase-memory-mcp
+	scripts/security-install.sh $(CBM_BIN)
+	scripts/security-network.sh $(CBM_BIN)
+	scripts/security-fuzz.sh $(CBM_BIN)
 	scripts/security-vendored.sh
 	@echo "=== All security checks passed ==="

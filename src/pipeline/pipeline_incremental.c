@@ -33,6 +33,26 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include <stdatomic.h>
 #include <stdint.h>
 
+static bool incremental_is_markdown_ext(const char *ext) {
+    if (!ext || ext[0] != '.') {
+        return false;
+    }
+    if ((ext[1] == 'm' || ext[1] == 'M') && (ext[2] == 'd' || ext[2] == 'D') && ext[3] == '\0') {
+        return true;
+    }
+    static const char markdown[] = ".markdown";
+    for (size_t i = 0; markdown[i]; i++) {
+        char c = ext[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c + ('a' - 'A'));
+        }
+        if (c != markdown[i]) {
+            return false;
+        }
+    }
+    return ext[9] == '\0';
+}
+
 /* ── Constants ───────────────────────────────────────────────────── */
 
 #define CBM_MS_PER_SEC 1000.0
@@ -885,8 +905,26 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     for (int i = 0; i < ci; i++) {
         char *file_qn = cbm_pipeline_fqn_compute(project, changed_files[i].rel_path, "__file__");
         if (file_qn) {
-            cbm_gbuf_upsert_node(existing, "File", changed_files[i].rel_path, file_qn,
-                                 changed_files[i].rel_path, 0, 0, "{}");
+            const char *slash = strrchr(changed_files[i].rel_path, '/');
+            const char *basename = slash ? slash + 1 : changed_files[i].rel_path;
+            cbm_gbuf_upsert_node(existing, "File", basename, file_qn, changed_files[i].rel_path, 0,
+                                 0, "{}");
+            const char *ext = strrchr(changed_files[i].rel_path, '.');
+            bool is_markdown = incremental_is_markdown_ext(ext);
+            if (is_markdown) {
+                char *doc_qn =
+                    cbm_pipeline_fqn_compute(project, changed_files[i].rel_path, "__document__");
+                if (doc_qn) {
+                    int64_t doc_id = cbm_gbuf_upsert_node(existing, "Document", basename, doc_qn,
+                                                          changed_files[i].rel_path, 1, 0,
+                                                          "{\"format\":\"markdown\"}");
+                    const cbm_gbuf_node_t *fnode = cbm_gbuf_find_by_qn(existing, file_qn);
+                    if (fnode && doc_id > 0) {
+                        cbm_gbuf_insert_edge(existing, fnode->id, doc_id, "HAS_DOCUMENT", "{}");
+                    }
+                    free(doc_qn);
+                }
+            }
             free(file_qn);
         }
     }

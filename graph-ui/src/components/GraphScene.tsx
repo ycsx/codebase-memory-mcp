@@ -8,7 +8,7 @@ import { NodeCloud } from "./NodeCloud";
 import { EdgeLines } from "./EdgeLines";
 import { NodeLabels } from "./NodeLabels";
 import { NodeTooltip } from "./NodeTooltip";
-import type { GraphData, GraphEdge, GraphNode, LinkedProject } from "../lib/types";
+import type { GraphData, GraphEdge, GraphNode, GraphNodeKey, LinkedProject } from "../lib/types";
 import {
   DEFAULT_DISPLAY_SETTINGS,
   bloomIntensityScale,
@@ -137,7 +137,7 @@ interface GraphSceneProps {
    * the not-fully-indexed files, rendered as a ghost cluster beside the
    * galaxy. null hides it. */
   missed?: { nodes: GraphNode[]; edges: GraphData["edges"] } | null;
-  highlightedIds: Set<number> | null;
+  highlightedIds: Set<GraphNodeKey> | null;
   cameraTarget: CameraTarget | null;
   showLabels: boolean;
   display?: DisplaySettings;
@@ -367,7 +367,7 @@ export function GraphScene({
 
 export function computeCameraTarget(
   nodes: GraphNode[],
-  ids: Set<number>,
+  ids: Set<GraphNodeKey>,
 ): CameraTarget | null {
   if (ids.size === 0) return null;
 
@@ -376,7 +376,7 @@ export function computeCameraTarget(
     cz = 0,
     count = 0;
   for (const node of nodes) {
-    if (ids.has(node.id)) {
+    if (ids.has(node.graph_key ?? String(node.id)) || ids.has(node.id)) {
       cx += node.x;
       cy += node.y;
       cz += node.z;
@@ -392,7 +392,7 @@ export function computeCameraTarget(
   /* Distance based on cluster spread — ensure we never zoom too close */
   let maxDist = 0;
   for (const node of nodes) {
-    if (ids.has(node.id)) {
+    if (ids.has(node.graph_key ?? String(node.id)) || ids.has(node.id)) {
       const d = Math.sqrt(
         (node.x - cx) ** 2 + (node.y - cy) ** 2 + (node.z - cz) ** 2,
       );

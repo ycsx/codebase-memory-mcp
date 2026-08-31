@@ -5,16 +5,16 @@
 ## 事实摘要
 
 - 维护仓库：[ycsx/codebase-memory-mcp](https://github.com/ycsx/codebase-memory-mcp)，基于 DeusData 原项目。
-- MCP 工具：当前二进制提供 18 个工具，覆盖索引、项目管理、图谱搜索、任务上下文编译、调用链、源码片段、架构、影响、确定性变更评审、覆盖度、Cypher、ADR 和运行时 trace。
+- MCP 工具：当前二进制提供 19 个工具，覆盖索引、项目管理、图谱搜索、任务上下文编译、调用链、源码片段、架构、影响、确定性变更评审、覆盖度、Markdown 文档章节、Cypher、ADR 和运行时 trace。
 - 解析：内置 Tree-sitter 语法解析，覆盖多种编程语言、配置、模板和基础设施文件；Hybrid LSP 对 Python、TypeScript/JavaScript/JSX/TSX、PHP、C#、Go、C/C++、Java、Kotlin、Rust、Perl 等语言增强类型和调用解析。具体支持以 `get_architecture` 返回为准。
-- 图谱：节点包括 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource；关系包括 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等。
+- 图谱：节点包括 Project、Folder、File、Document、Section、Module、Class、Function、Method、Interface、Route、Resource；Markdown 文件保留 File，并通过 `HAS_DOCUMENT` 连接 Document，标题通过 `CONTAINS_SECTION` 连接 Section；关系还包括 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等。
 - 覆盖度：`index_status` 和 `check_index_coverage` 报告 `parse_partial`、`skipped`、`not_indexed`。没有记录缺口不等于证明完整覆盖。
 - 客户端：`install` 支持 43 个自动/条件接入面；会按平台、已存在配置和客户端 schema 保守写入 MCP、说明、技能、Agent 与 Hook。
 <!-- client-surface-contract: total=43 automatic=37 conditional=6 -->
 - 37 个自动检测：Claude Code、Codex CLI、Gemini CLI、Zed、OpenCode、Antigravity、Aider、KiloCode、VS Code、Cursor、Windsurf、Augment / Auggie、OpenClaw、Kiro、Junie、Hermes、OpenHands、Cline、Warp、Qwen Code、GitHub Copilot CLI、Factory Droid、Crush、Goose、Mistral Vibe、Qoder CLI、Kimi Code CLI、GitLab Duo CLI、Rovo Dev CLI、Amp、Devin CLI / Local、Tabnine、Amazon Q Developer IDE、CodeBuddy Code CLI、IBM Bob Shell、Pochi、Pi。
 - 6 个条件/显式：Continue / cn、Visual Studio、TRAE、Roo Code、IBM Bob IDE、Sourcegraph Cody。
 - UI：UI/桌面版本提供 loopback 图谱控制台，默认 `http://127.0.0.1:9749`，包含索引、图谱、影响、热点、风险、进程、日志和客户端接入计划。
-- 远程：`serve` 提供带 Bearer Token 的 Streamable HTTP，默认 `analysis` 工具档位；生产环境应使用 TLS 反向代理。
+- 远程：`serve` 提供带 Bearer Token 的 Streamable HTTP，支持兼容单 Token 和 `CBM_MCP_AUTH_STORE` 托管 Key、主体、项目 ACL 及独立读写权限；默认 `analysis` 工具档位，生产环境应使用 TLS 反向代理。
 
 ## 推荐查询顺序
 

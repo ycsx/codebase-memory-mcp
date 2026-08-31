@@ -3605,6 +3605,110 @@ static char *extract_markdown_heading_name(CBMArena *a, TSNode node, const char 
     return trim_heading_name(name);
 }
 
+static size_t markdown_utf8_decode(const unsigned char *text, size_t length, uint32_t *codepoint) {
+    if (!text || !codepoint || length == 0) {
+        return 0;
+    }
+    unsigned char first = text[0];
+    if (first < 0x80U) {
+        *codepoint = first;
+        return 1;
+    }
+    size_t width = 0;
+    uint32_t value = 0;
+    if (first >= 0xc2U && first <= 0xdfU) {
+        width = 2;
+        value = first & 0x1fU;
+    } else if (first >= 0xe0U && first <= 0xefU) {
+        width = 3;
+        value = first & 0x0fU;
+    } else if (first >= 0xf0U && first <= 0xf4U) {
+        width = 4;
+        value = first & 0x07U;
+    } else {
+        return 0;
+    }
+    if (width > length) {
+        return 0;
+    }
+    for (size_t i = 1; i < width; i++) {
+        if ((text[i] & 0xc0U) != 0x80U) {
+            return 0;
+        }
+        value = (value << 6) | (text[i] & 0x3fU);
+    }
+    if ((width == 2 && value < 0x80U) || (width == 3 && value < 0x800U) ||
+        (width == 4 && (value < 0x10000U || value > 0x10ffffU)) ||
+        (value >= 0xd800U && value <= 0xdfffU)) {
+        return 0;
+    }
+    *codepoint = value;
+    return width;
+}
+
+/* Preserve letters, numbers, combining marks, and common CJK ranges in
+ * anchors. Unicode punctuation is treated as a separator like ASCII syntax. */
+static bool markdown_anchor_word_char(uint32_t codepoint) {
+    if ((codepoint >= 'a' && codepoint <= 'z') || (codepoint >= 'A' && codepoint <= 'Z') ||
+        (codepoint >= '0' && codepoint <= '9')) {
+        return true;
+    }
+    return (codepoint >= 0x300U && codepoint <= 0x36FU) ||
+           (codepoint >= 0x370U && codepoint <= 0x52FU) ||
+           (codepoint >= 0x4e00U && codepoint <= 0x9fffU) ||
+           (codepoint >= 0xac00U && codepoint <= 0xd7ffU) ||
+           (codepoint >= 0xf900U && codepoint <= 0xfaffU) ||
+           (codepoint >= 0x20000U && codepoint <= 0x2ffffU);
+}
+
+/* Deterministic anchor suitable for Markdown links and metadata. */
+static char *markdown_heading_anchor(CBMArena *a, const char *name) {
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    size_t n = strlen(name);
+    char *out = (char *)cbm_arena_alloc(a, n + 1);
+    if (!out) {
+        return NULL;
+    }
+    size_t w = 0;
+    bool dash = false;
+    for (size_t i = 0; i < n;) {
+        uint32_t codepoint = 0;
+        size_t width = markdown_utf8_decode((const unsigned char *)name + i, n - i, &codepoint);
+        if (width == 0) {
+            i++;
+            if (!dash && w > 0) {
+                out[w++] = '-';
+                dash = true;
+            }
+            continue;
+        }
+        if (markdown_anchor_word_char(codepoint)) {
+            if (width == 1 && codepoint >= 'A' && codepoint <= 'Z') {
+                codepoint += 'a' - 'A';
+            }
+            if (width == 1) {
+                out[w++] = (char)codepoint;
+            } else {
+                for (size_t j = 0; j < width; j++) {
+                    out[w++] = name[i + j];
+                }
+            }
+            dash = false;
+        } else if (!dash && w > 0) {
+            out[w++] = '-';
+            dash = true;
+        }
+        i += width;
+    }
+    if (w > 0 && out[w - 1] == '-') {
+        w--;
+    }
+    out[w] = '\0';
+    return w > 0 ? out : NULL;
+}
+
 // INI: extract section name from section node.
 static char *find_ini_section_name(CBMArena *a, TSNode node, const char *source) {
     uint32_t nc = ts_node_child_count(node);
@@ -3691,6 +3795,33 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
 
     if (name && name[0]) {
         push_simple_class_def(ctx, node, name, label);
+        if (ctx->language == CBM_LANG_MARKDOWN && ctx->result->defs.count > 0) {
+            CBMDefinition *def = &ctx->result->defs.items[ctx->result->defs.count - 1];
+            /* Headings with the same title are valid in one document. Keep the
+             * first QN human-friendly and disambiguate later occurrences by
+             * source line so incremental updates remain stable. */
+            for (int i = 0; i + 1 < ctx->result->defs.count; i++) {
+                CBMDefinition *prev = &ctx->result->defs.items[i];
+                if (prev->label && strcmp(prev->label, "Section") == 0 && prev->qualified_name &&
+                    strcmp(prev->qualified_name, def->qualified_name) == 0) {
+                    def->qualified_name = cbm_arena_sprintf(
+                        a, "%s@%u", def->qualified_name,
+                        (unsigned)(ts_node_start_point(node).row + TS_LINE_OFFSET));
+                    break;
+                }
+            }
+            def->anchor = markdown_heading_anchor(a, name);
+            if (strcmp(kind, "atx_heading") == 0) {
+                uint32_t start = ts_node_start_byte(node);
+                int level = 0;
+                while (start < (uint32_t)ctx->source_len && ctx->source[start++] == '#') {
+                    level++;
+                }
+                def->heading_level = level > 0 ? level : 1;
+            } else {
+                def->heading_level = 1;
+            }
+        }
     }
     return true;
 }

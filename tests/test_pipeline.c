@@ -1191,6 +1191,83 @@ TEST(pipeline_web_java_gateway_prefix_cross_match) {
     PASS();
 }
 
+/* Cross-repo package matching must understand structured conditional exports.
+ * A string search of package.json sees the object but cannot resolve the
+ * package root, leaving a valid @aikb/core import disconnected. */
+TEST(pipeline_cross_repo_package_exports_condition) {
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cbm_cross_pkg_exports_XXXXXX");
+    if (!cbm_mkdtemp(root)) {
+        FAIL("tmpdir");
+    }
+
+    char consumer[512], provider[512], consumer_src[512], provider_src[512], cache[512];
+    snprintf(consumer, sizeof(consumer), "%s/consumer", root);
+    snprintf(provider, sizeof(provider), "%s/provider", root);
+    snprintf(consumer_src, sizeof(consumer_src), "%s/src", consumer);
+    snprintf(provider_src, sizeof(provider_src), "%s/src", provider);
+    snprintf(cache, sizeof(cache), "%s/cache", root);
+    ASSERT_EQ(cbm_mkdir(consumer), 0);
+    ASSERT_EQ(cbm_mkdir(provider), 0);
+    ASSERT_EQ(cbm_mkdir(consumer_src), 0);
+    ASSERT_EQ(cbm_mkdir(provider_src), 0);
+    ASSERT_EQ(cbm_mkdir(cache), 0);
+
+    write_temp_file(provider, "package.json",
+                    "{\"name\":\"@aikb/core\",\"exports\":{\".\":{"
+                    "\"development\":\"./src/dev.js\","
+                    "\"import\":\"./src/index.js\","
+                    "\"require\":\"./src/index.cjs\"},"
+                    "\"./sub\":\"./src/sub.js\"}}");
+    write_temp_file(provider, "src/index.js", "export function greet() { return 'ok'; }\n");
+    write_temp_file(provider, "src/dev.js", "export function greet() { return 'dev'; }\n");
+    write_temp_file(consumer, "package.json", "{\"name\":\"consumer\"}");
+    write_temp_file(consumer, "src/main.js",
+                    "import { greet } from '@aikb/core';\n"
+                    "export function run() { return greet(); }\n");
+
+    char *consumer_project = cbm_project_name_from_path(consumer);
+    char *provider_project = cbm_project_name_from_path(provider);
+    ASSERT_NOT_NULL(consumer_project);
+    ASSERT_NOT_NULL(provider_project);
+    char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? strdup(old_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char consumer_db[768], provider_db[768];
+    snprintf(consumer_db, sizeof(consumer_db), "%s/%s.db", cache, consumer_project);
+    snprintf(provider_db, sizeof(provider_db), "%s/%s.db", cache, provider_project);
+    cbm_pipeline_t *consumer_pipeline = cbm_pipeline_new(consumer, consumer_db, CBM_MODE_FULL);
+    cbm_pipeline_t *provider_pipeline = cbm_pipeline_new(provider, provider_db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(consumer_pipeline);
+    ASSERT_NOT_NULL(provider_pipeline);
+    ASSERT_EQ(cbm_pipeline_run(consumer_pipeline), 0);
+    ASSERT_EQ(cbm_pipeline_run(provider_pipeline), 0);
+
+    const char *target = provider_project;
+    cbm_cross_repo_result_t cross = cbm_cross_repo_match(consumer_project, &target, 1);
+    ASSERT_GT(cross.package_import_edges, 0);
+    cbm_store_t *consumer_store = cbm_store_open_path(consumer_db);
+    ASSERT_NOT_NULL(consumer_store);
+    ASSERT_EQ(
+        cbm_store_count_edges_by_type(consumer_store, consumer_project, "CROSS_PACKAGE_IMPORTS"),
+        1);
+    cbm_store_close(consumer_store);
+
+    cbm_pipeline_free(consumer_pipeline);
+    cbm_pipeline_free(provider_pipeline);
+    if (saved_cache) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache, 1);
+        free(saved_cache);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(consumer_project);
+    free(provider_project);
+    th_rmtree(root);
+    PASS();
+}
+
 /* Parallel-resolver regression for the TS/JS receiver guard (>= 50 files forces
  * pass_parallel.c's resolve_file_calls). The guard must not drop a weak member
  * match before the service classification runs — it suppresses ONLY the plain
@@ -1487,8 +1564,7 @@ TEST(pipeline_python_http_propagation_and_helpers) {
             strstr(props, "\"method\":\"POST\"")) {
             found_session = true;
         }
-        if (strstr(props, "\"url_path\":\"/api/bridge\"") &&
-            strstr(props, "\"method\":\"POST\"")) {
+        if (strstr(props, "\"url_path\":\"/api/bridge\"") && strstr(props, "\"method\":\"POST\"")) {
             found_bridge = true;
         }
         if (strstr(props, "\"url_path\":\"/api/nested\"")) {
@@ -1587,8 +1663,8 @@ static void write_java_http_wrapper_fixture(const char *tmp) {
 
 static int run_java_http_wrapper_pipeline(bool parallel) {
     char tmp[256];
-    snprintf(tmp, sizeof(tmp), parallel ? "/tmp/cbm_java_http_par_XXXXXX"
-                                        : "/tmp/cbm_java_http_seq_XXXXXX");
+    snprintf(tmp, sizeof(tmp),
+             parallel ? "/tmp/cbm_java_http_par_XXXXXX" : "/tmp/cbm_java_http_seq_XXXXXX");
     if (!cbm_mkdtemp(tmp)) {
         FAIL("tmpdir");
     }
@@ -1598,9 +1674,10 @@ static int run_java_http_wrapper_pipeline(bool parallel) {
             char name[64];
             char body[160];
             snprintf(name, sizeof(name), "src/filler/Filler%d.java", i);
-            snprintf(body, sizeof(body),
-                     "package filler; public class Filler%d { public int value() { return %d; } }\n",
-                     i, i);
+            snprintf(
+                body, sizeof(body),
+                "package filler; public class Filler%d { public int value() { return %d; } }\n", i,
+                i);
             write_temp_file(tmp, name, body);
         }
     }
@@ -7416,6 +7493,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_web_http_receivers_sequential);
     RUN_TEST(pipeline_web_http_receivers_parallel);
     RUN_TEST(pipeline_web_java_gateway_prefix_cross_match);
+    RUN_TEST(pipeline_cross_repo_package_exports_condition);
     RUN_TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges);
     RUN_TEST(pipeline_native_fetch_classified_as_http_calls);
     RUN_TEST(pipeline_native_fetch_parallel_classified_as_http_calls);

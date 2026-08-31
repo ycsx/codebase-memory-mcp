@@ -26,7 +26,14 @@ import { NodeDetailPanel } from "./NodeDetailPanel";
 import { MissedCallout } from "./MissedCallout";
 import { ResizeHandle } from "./ResizeHandle";
 import { ErrorBoundary } from "./ErrorBoundary";
-import type { GraphNode, GraphData, RepoInfo } from "../lib/types";
+import {
+  graphEdgeEndpointKey,
+  graphNodeKey,
+  type GraphNode,
+  type GraphData,
+  type GraphNodeKey,
+  type RepoInfo,
+} from "../lib/types";
 import { colorForStatus } from "../lib/colors";
 import { AnalysisModeBar, type AnalysisMode } from "./analysis/AnalysisModeBar";
 import { ImpactView } from "./analysis/ImpactView";
@@ -74,7 +81,7 @@ export function formatGraphLimitNotice(data: GraphData | null): string | null {
 export function GraphTab({ project }: GraphTabProps) {
   const { data, loading, error, progress, fetchOverview } = useGraphData();
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("explore");
-  const [highlightedIds, setHighlightedIds] = useState<Set<number> | null>(null);
+  const [highlightedIds, setHighlightedIds] = useState<Set<GraphNodeKey> | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdgeSelection | null>(null);
@@ -242,14 +249,14 @@ export function GraphTab({ project }: GraphTabProps) {
       z: n.z + mg.offset.z,
       color: "#e9eef5",
     }));
-    return { nodes, edges: mg.edges, ids: new Set(nodes.map((n) => n.id)) };
+    return { nodes, edges: mg.edges, ids: new Set(nodes.map((n) => graphNodeKey(n))) };
   }, [data]);
 
   /* Overview framing: both clusters (galaxy + skeleton) in one shot. */
   const overviewTarget = useMemo(() => {
     if (!data) return null;
     const all = missedSkeleton ? [...data.nodes, ...missedSkeleton.nodes] : data.nodes;
-    return computeCameraTarget(all, new Set(all.map((n) => n.id)));
+    return computeCameraTarget(all, new Set(all.map((n) => graphNodeKey(n))));
   }, [data, missedSkeleton]);
 
   /* Auto-frame the full graph on load. When a missed skeleton exists, the
@@ -271,7 +278,11 @@ export function GraphTab({ project }: GraphTabProps) {
       setCameraTarget(null);
       return;
     }
-    if (selectedNode && missedSkeleton?.ids.has(selectedNode.id) && overviewTarget) {
+    if (
+      selectedNode &&
+      missedSkeleton?.ids.has(graphNodeKey(selectedNode)) &&
+      overviewTarget
+    ) {
       setSelectedNode(null);
       setHighlightedIds(null);
       setSelectedPath(null);
@@ -308,48 +319,81 @@ export function GraphTab({ project }: GraphTabProps) {
       }
       setSelectedEdge(null);
       setSelectedPath(path);
-      setHighlightedIds(nodeIds);
-      setCameraTarget(computeCameraTarget(filteredData.nodes, nodeIds));
+      const scopedIds = new Set<GraphNodeKey>(
+        [...nodeIds].map((id) => (project ? `primary:${project}:${id}` : String(id))),
+      );
+      setHighlightedIds(scopedIds);
+      setCameraTarget(computeCameraTarget(filteredData.nodes, scopedIds));
     },
-    [filteredData],
+    [filteredData, project],
   );
 
   const handleNodeClick = useCallback(
     (node: GraphNode) => {
       if (!filteredData) return;
+      /* Test doubles and older embedded clients may return the raw node object
+       * without the UI-only graph_key. Resolve it against the scoped detail
+       * graph before computing selection and relationships. */
+      const resolvedNode =
+        detailGraph.nodes.find((candidate) => graphNodeKey(candidate) === graphNodeKey(node)) ??
+        detailGraph.nodes.find((candidate) => !node.graph_project && candidate.id === node.id) ??
+        node;
       setSelectedEdge(null);
 
       /* Clicking the missed skeleton re-centers the camera on that whole
        * cluster (it's small — the natural focus unit is the skeleton, not a
        * single node); clicking any code node flies back to the code galaxy
        * via the normal per-node focus below. */
-      if (missedSkeleton?.ids.has(node.id)) {
-        setSelectedNode(node);
+      if (
+        missedSkeleton?.ids.has(graphNodeKey(resolvedNode))
+      ) {
+        setSelectedNode(resolvedNode);
         setHighlightedIds(null);
-        setSelectedPath(node.file_path ?? null);
+        setSelectedPath(resolvedNode.file_path ?? null);
         setCameraTarget(computeCameraTarget(missedSkeleton.nodes, missedSkeleton.ids));
         return;
       }
 
-      setSelectedNode(node);
+      setSelectedNode(resolvedNode);
 
       /* Highlight the node and its direct connections */
-      const connectedIds = new Set([node.id]);
-      for (const edge of filteredData.edges) {
-        if (edge.source === node.id) connectedIds.add(edge.target);
-        if (edge.target === node.id) connectedIds.add(edge.source);
+      const selectedKey = graphNodeKey(resolvedNode);
+      const connectedIds = new Set<GraphNodeKey>([selectedKey]);
+      const allEdges = [
+        ...filteredData.edges,
+        ...(filteredData.linked_projects ?? []).flatMap((linked) => [
+          ...linked.edges,
+          ...linked.cross_edges,
+        ]),
+      ];
+      for (const edge of allEdges) {
+        const sourceKey = graphEdgeEndpointKey(edge, "source");
+        const targetKey = graphEdgeEndpointKey(edge, "target");
+        if (sourceKey === selectedKey) connectedIds.add(targetKey);
+        if (targetKey === selectedKey) connectedIds.add(sourceKey);
       }
       setHighlightedIds(connectedIds);
-      setSelectedPath(node.file_path ?? null);
-      setCameraTarget(computeCameraTarget(filteredData.nodes, connectedIds));
+      setSelectedPath(resolvedNode.file_path ?? null);
+      const cameraNodes = [
+        ...filteredData.nodes,
+        ...(filteredData.linked_projects ?? []).flatMap((linked) =>
+          linked.nodes.map((linkedNode) => ({
+            ...linkedNode,
+            x: linkedNode.x + linked.offset.x,
+            y: linkedNode.y + linked.offset.y,
+            z: linkedNode.z + linked.offset.z,
+          })),
+        ),
+      ];
+      setCameraTarget(computeCameraTarget(cameraNodes, connectedIds));
     },
-    [filteredData, missedSkeleton],
+    [detailGraph, filteredData, missedSkeleton],
   );
 
   const handleEdgeClick = useCallback((selection: GraphEdgeSelection) => {
     const endpointIds = new Set([
-      selection.sourceNode.id,
-      selection.targetNode.id,
+      graphNodeKey(selection.sourceNode),
+      graphNodeKey(selection.targetNode),
     ]);
     setSelectedEdge(selection);
     setSelectedNode(null);
@@ -666,7 +710,7 @@ export function GraphTab({ project }: GraphTabProps) {
               maxHeight: "100%",
             }}
           >
-            {missedSkeleton?.ids.has(selectedNode.id) ? (
+            {missedSkeleton?.ids.has(graphNodeKey(selectedNode)) ? (
               /* Skeleton node: the standard panel (code snippet, callers) is
                * meaningless for a not-fully-indexed file — show the coverage
                * callout with its report-the-edge-case actions instead. */

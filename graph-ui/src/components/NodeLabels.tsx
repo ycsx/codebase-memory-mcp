@@ -1,10 +1,10 @@
 import { useEffect, useMemo } from "react";
 import * as THREE from "three";
-import type { GraphNode } from "../lib/types";
+import { graphNodeKey, type GraphNode, type GraphNodeKey } from "../lib/types";
 
 interface NodeLabelsProps {
   nodes: GraphNode[];
-  highlightedIds: Set<number> | null;
+  highlightedIds: Set<GraphNodeKey> | null;
   maxLabels?: number;
 }
 
@@ -139,7 +139,7 @@ export function NodeLabels({
 
     if (hasHighlight) {
       return nodes
-        .filter((n) => highlightedIds.has(n.id))
+        .filter((n) => highlightedIds.has(graphNodeKey(n)) || highlightedIds.has(n.id))
         .sort((a, b) => b.size - a.size)
         .slice(0, maxLabels);
     }
@@ -150,7 +150,7 @@ export function NodeLabels({
   return (
     <group>
       {labeled.map((node) => (
-        <NodeLabelSprite key={node.id} node={node} />
+        <NodeLabelSprite key={graphNodeKey(node)} node={node} />
       ))}
     </group>
   );

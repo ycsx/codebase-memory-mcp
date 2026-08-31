@@ -170,21 +170,140 @@ typedef struct {
     struct cbm_watcher *watcher;
     atomic_int status; /* 0=idle, 1=running, 2=done, 3=error */
     char error_msg[256];
-#ifndef _WIN32
+    cbm_thread_t thread;
+    bool thread_valid;
+    bool reaping;
     long child_pid; /* tracked for process-kill validation */
-#endif
 } index_job_t;
 
 static index_job_t g_index_jobs[MAX_INDEX_JOBS];
 static atomic_ullong g_next_index_job_id = 1;
+static cbm_mutex_t g_index_jobs_mutex;
+static atomic_int g_index_jobs_mutex_init = 0;
+
+typedef struct {
+    unsigned long long job_id;
+    char root_path[1024];
+    char project_name[256];
+    char remote_url[CBM_REMOTE_URL_MAX];
+    char remote_branch[CBM_REMOTE_BRANCH_MAX];
+    int poll_interval_sec;
+    struct cbm_watcher *watcher;
+} index_job_snapshot_t;
+
+static void index_jobs_init(void) {
+    int state = atomic_load(&g_index_jobs_mutex_init);
+    if (state == 2)
+        return;
+    state = 0;
+    if (atomic_compare_exchange_strong(&g_index_jobs_mutex_init, &state, 1)) {
+        cbm_mutex_init(&g_index_jobs_mutex);
+        atomic_store(&g_index_jobs_mutex_init, 2);
+        return;
+    }
+    while (atomic_load(&g_index_jobs_mutex_init) != 2) {
+        cbm_usleep(1000);
+    }
+}
 
 static bool any_index_job_running(void) {
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    bool running = false;
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
         if (atomic_load(&g_index_jobs[i].status) == 1) {
-            return true;
+            running = true;
+            break;
         }
     }
-    return false;
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+    return running;
+}
+
+static bool index_job_running_for_project(const char *project) {
+    if (!project || !project[0]) {
+        return false;
+    }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    bool running = false;
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        if (atomic_load(&g_index_jobs[i].status) == 1 &&
+            strcmp(g_index_jobs[i].project_name, project) == 0) {
+            running = true;
+            break;
+        }
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+    return running;
+}
+
+static void set_job_status(index_job_t *job, int status) {
+    if (!job) {
+        return;
+    }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    atomic_store(&job->status, status);
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+}
+
+static void snapshot_index_job(index_job_t *job, index_job_snapshot_t *out) {
+    if (!job || !out) {
+        return;
+    }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    out->job_id = job->job_id;
+    snprintf(out->root_path, sizeof(out->root_path), "%s", job->root_path);
+    snprintf(out->project_name, sizeof(out->project_name), "%s", job->project_name);
+    snprintf(out->remote_url, sizeof(out->remote_url), "%s", job->remote_url);
+    snprintf(out->remote_branch, sizeof(out->remote_branch), "%s", job->remote_branch);
+    out->poll_interval_sec = job->poll_interval_sec;
+    out->watcher = job->watcher;
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+}
+
+/* Graph UI tool calls carry the selected project in params.arguments. While an
+ * index worker replaces project A's database, keep A closed on Windows but do
+ * not reject independent reads for projects B, C, and so on. Calls without an
+ * explicit project remain conservatively blocked because their store scope
+ * cannot be proven safe. */
+static bool rpc_targets_running_project(const char *body, size_t body_len) {
+    if (!any_index_job_running() || !body || body_len == 0) {
+        return false;
+    }
+
+    yyjson_doc *doc = yyjson_read(body, body_len, 0);
+    if (!doc) {
+        return false;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *method = root ? yyjson_obj_get(root, "method") : NULL;
+    if (!method || !yyjson_is_str(method) || strcmp(yyjson_get_str(method), "tools/call") != 0) {
+        yyjson_doc_free(doc);
+        return false;
+    }
+
+    yyjson_val *params = yyjson_obj_get(root, "params");
+    yyjson_val *arguments =
+        params && yyjson_is_obj(params) ? yyjson_obj_get(params, "arguments") : NULL;
+    static const char *const project_keys[] = {"project", "project_name", "project_id",
+                                               "projectName"};
+    const char *project = NULL;
+    if (arguments && yyjson_is_obj(arguments)) {
+        for (size_t i = 0; i < sizeof(project_keys) / sizeof(project_keys[0]); i++) {
+            yyjson_val *value = yyjson_obj_get(arguments, project_keys[i]);
+            if (value && yyjson_is_str(value) && yyjson_get_str(value)[0]) {
+                project = yyjson_get_str(value);
+                break;
+            }
+        }
+    }
+
+    bool conflicts = project ? index_job_running_for_project(project) : true;
+    yyjson_doc_free(doc);
+    return conflicts;
 }
 
 /* ── Serve embedded asset ─────────────────────────────────────── */
@@ -587,9 +706,27 @@ static void handle_processes(cbm_http_conn_t *c) {
     http_appendf(buf, sizeof(buf), &pos,
                  "{\"self_pid\":%d,\"self_rss_mb\":%.1f,"
                  "\"self_user_cpu_s\":%.1f,\"self_sys_cpu_s\":%.1f,"
-                 "\"service_token\":\"%s\",\"processes\":[]}",
+                 "\"service_token\":\"%s\",\"processes\":[",
                  (int)_getpid(), (double)rss_bytes / (1024.0 * 1024.0), user_s, sys_s,
                  service_token);
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    bool first_process = true;
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        if (atomic_load(&g_index_jobs[i].status) != 1 || g_index_jobs[i].child_pid <= 0) {
+            continue;
+        }
+        if (!first_process) {
+            http_appendf(buf, sizeof(buf), &pos, ",");
+        }
+        first_process = false;
+        http_appendf(buf, sizeof(buf), &pos,
+                     "{\"pid\":%ld,\"cpu\":0.0,\"rss_mb\":0.0,"
+                     "\"elapsed\":\"\",\"command\":\"index-worker\",\"is_self\":false}",
+                     g_index_jobs[i].child_pid);
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+    http_appendf(buf, sizeof(buf), &pos, "]}");
 #else
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
@@ -673,10 +810,11 @@ static void handle_process_kill(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         return;
     }
 
-#ifndef _WIN32
-    /* Only allow killing PIDs that were spawned by this server (indexing jobs) */
+    /* Only allow killing PIDs that were spawned by this server (indexing jobs). */
     {
         bool pid_is_ours = false;
+        index_jobs_init();
+        cbm_mutex_lock(&g_index_jobs_mutex);
         for (int i = 0; i < MAX_INDEX_JOBS; i++) {
             if (atomic_load(&g_index_jobs[i].status) == 1 &&
                 g_index_jobs[i].child_pid == target_pid) {
@@ -684,13 +822,13 @@ static void handle_process_kill(cbm_http_conn_t *c, const cbm_http_req_t *req) {
                 break;
             }
         }
+        cbm_mutex_unlock(&g_index_jobs_mutex);
         if (!pid_is_ours) {
             cbm_http_replyf(c, 403, g_cors_json,
                             "{\"error\":\"can only kill server-spawned processes\"}");
             return;
         }
     }
-#endif
 
 #ifdef _WIN32
     HANDLE hproc = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)target_pid);
@@ -1139,13 +1277,51 @@ static void set_job_error(index_job_t *job, const char *message) {
     if (!job) {
         return;
     }
-    snprintf(job->error_msg, sizeof(job->error_msg), "%s",
+    char sanitized[256];
+    snprintf(sanitized, sizeof(sanitized), "%s",
              message && message[0] ? message : "operation failed");
-    for (char *p = job->error_msg; *p; p++) {
+    for (char *p = sanitized; *p; p++) {
         if (*p == '\r' || *p == '\n' || *p == '\t') {
             *p = ' ';
         }
     }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    snprintf(job->error_msg, sizeof(job->error_msg), "%s", sanitized);
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+}
+
+static bool job_error_empty(index_job_t *job) {
+    if (!job) {
+        return true;
+    }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    bool empty = job->error_msg[0] == '\0';
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+    return empty;
+}
+
+static void copy_job_start_fields(int slot, unsigned long long *job_id, char *root_path,
+                                  size_t root_path_size) {
+    if (job_id) {
+        *job_id = 0;
+    }
+    if (root_path && root_path_size > 0) {
+        root_path[0] = '\0';
+    }
+    if (slot < 0 || slot >= MAX_INDEX_JOBS) {
+        return;
+    }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    if (job_id) {
+        *job_id = g_index_jobs[slot].job_id;
+    }
+    if (root_path && root_path_size > 0) {
+        snprintf(root_path, root_path_size, "%s", g_index_jobs[slot].root_path);
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
 }
 
 /* Index workers return an MCP result through --response-out and deliberately
@@ -1194,6 +1370,19 @@ static void ui_index_log_line(const char *line, void *ud) {
     }
 }
 
+static void ui_index_child_pid(long pid, void *ud) {
+    index_job_t *job = ud;
+    if (!job || pid <= 0) {
+        return;
+    }
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    if (atomic_load(&job->status) == 1) {
+        job->child_pid = pid;
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+}
+
 static int ui_index_quiet_timeout_ms(void) {
     enum { DEFAULT_TIMEOUT_MS = 900000 }; /* 15 minutes without a log line */
     const char *value = getenv("CBM_INDEX_WORKER_TIMEOUT_S");
@@ -1210,21 +1399,29 @@ static int ui_index_quiet_timeout_ms(void) {
 
 static void *index_thread_fn(void *arg) {
     index_job_t *job = arg;
-    cbm_log_info("ui.index.start", "path", job->root_path);
+    index_job_snapshot_t snapshot = {0};
+    snapshot_index_job(job, &snapshot);
+    char root_path[sizeof(snapshot.root_path)];
+    snprintf(root_path, sizeof(root_path), "%s", snapshot.root_path);
+    cbm_log_info("ui.index.start", "path", root_path);
 
-    if (job->remote_url[0]) {
+    if (snapshot.remote_url[0]) {
         char remote_error[1024] = {0};
-        if (cbm_remote_repo_prepare(job->project_name, job->remote_url, job->remote_branch,
-                                    job->poll_interval_sec, job->root_path, sizeof(job->root_path),
-                                    remote_error, sizeof(remote_error)) != 0) {
+        if (cbm_remote_repo_prepare(snapshot.project_name, snapshot.remote_url,
+                                    snapshot.remote_branch, snapshot.poll_interval_sec, root_path,
+                                    sizeof(root_path), remote_error, sizeof(remote_error)) != 0) {
             set_job_error(job, remote_error);
-            atomic_store(&job->status, 3);
-            cbm_log_warn("ui.remote.prepare_failed", "project", job->project_name, "detail",
-                         job->error_msg);
+            set_job_status(job, 3);
+            cbm_log_warn("ui.remote.prepare_failed", "project", snapshot.project_name, "detail",
+                         remote_error);
             return NULL;
         }
-        cbm_log_info("ui.remote.prepared", "project", job->project_name, "branch",
-                     job->remote_branch);
+        index_jobs_init();
+        cbm_mutex_lock(&g_index_jobs_mutex);
+        snprintf(job->root_path, sizeof(job->root_path), "%s", root_path);
+        cbm_mutex_unlock(&g_index_jobs_mutex);
+        cbm_log_info("ui.remote.prepared", "project", snapshot.project_name, "branch",
+                     snapshot.remote_branch);
     }
 
     /* Use stored binary path, or try to find it */
@@ -1240,11 +1437,11 @@ static void *index_thread_fn(void *arg) {
 
     /* JSON-escape root_path and optional project name. */
     char escaped_path[2048];
-    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), job->root_path);
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), root_path);
     char escaped_name[512];
-    cbm_json_escape(escaped_name, (int)sizeof(escaped_name), job->project_name);
+    cbm_json_escape(escaped_name, (int)sizeof(escaped_name), snapshot.project_name);
     char json_arg[4096];
-    if (job->project_name[0]) {
+    if (snapshot.project_name[0]) {
         snprintf(json_arg, sizeof(json_arg), "{\"repo_path\":\"%s\",\"name\":\"%s\"}", escaped_path,
                  escaped_name);
     } else {
@@ -1257,50 +1454,52 @@ static void *index_thread_fn(void *arg) {
     wchar_t wide_response[1024];
     DWORD temp_len = GetTempPathW((DWORD)(sizeof(wide_temp) / sizeof(wide_temp[0])), wide_temp);
     if (temp_len > 0 && temp_len < (sizeof(wide_temp) / sizeof(wide_temp[0]))) {
-        int written = swprintf(wide_log, sizeof(wide_log) / sizeof(wide_log[0]),
-                               L"%lscbm_index_%d_%llu.log", wide_temp, (int)_getpid(),
-                               job->job_id);
+        int written =
+            swprintf(wide_log, sizeof(wide_log) / sizeof(wide_log[0]), L"%lscbm_index_%d_%llu.log",
+                     wide_temp, (int)_getpid(), snapshot.job_id);
         int response_written =
             swprintf(wide_response, sizeof(wide_response) / sizeof(wide_response[0]),
-                     L"%lscbm_index_%d_%llu.response", wide_temp, (int)_getpid(), job->job_id);
+                     L"%lscbm_index_%d_%llu.response", wide_temp, (int)_getpid(), snapshot.job_id);
         char *utf8_log = written > 0 ? cbm_wide_to_utf8(wide_log) : NULL;
         char *utf8_response = response_written > 0 ? cbm_wide_to_utf8(wide_response) : NULL;
         if (!utf8_log || !copy_path(log_file, sizeof(log_file), utf8_log)) {
             snprintf(log_file, sizeof(log_file), "cbm_index_%d_%llu.log", (int)_getpid(),
-                     job->job_id);
+                     snapshot.job_id);
         }
         if (!utf8_response || !copy_path(response_file, sizeof(response_file), utf8_response)) {
             snprintf(response_file, sizeof(response_file), "cbm_index_%d_%llu.response",
-                     (int)_getpid(), job->job_id);
+                     (int)_getpid(), snapshot.job_id);
         }
         free(utf8_log);
         free(utf8_response);
     } else {
-        snprintf(log_file, sizeof(log_file), "cbm_index_%d_%llu.log", (int)_getpid(), job->job_id);
+        snprintf(log_file, sizeof(log_file), "cbm_index_%d_%llu.log", (int)_getpid(),
+                 snapshot.job_id);
         snprintf(response_file, sizeof(response_file), "cbm_index_%d_%llu.response", (int)_getpid(),
-                 job->job_id);
+                 snapshot.job_id);
     }
 
 #else
-    snprintf(log_file, sizeof(log_file), "/tmp/cbm_index_%d_%llu.log", (int)getpid(), job->job_id);
+    snprintf(log_file, sizeof(log_file), "/tmp/cbm_index_%d_%llu.log", (int)getpid(),
+             snapshot.job_id);
     snprintf(response_file, sizeof(response_file), "/tmp/cbm_index_%d_%llu.response", (int)getpid(),
-             job->job_id);
+             snapshot.job_id);
 #endif
 
     /* The shared subprocess runner handles argv quoting, safe POSIX fork/exec,
      * log tailing, crash classification, and a quiet timeout on every platform.
      * The UI worker is explicitly marked so it runs the index in-process once;
      * the runner itself is the isolation boundary. */
-    const char *const idx_argv[] = {bin, "cli", "--index-worker", "index_repository", json_arg,
-                                    "--response-out", response_file, NULL};
+    const char *const idx_argv[] = {
+        bin,           "cli", "--index-worker", "index_repository", json_arg, "--response-out",
+        response_file, NULL};
     cbm_proc_opts_t proc_opts = {0};
     proc_opts.bin = bin;
     proc_opts.argv = idx_argv;
     proc_opts.log_file = log_file;
     proc_opts.on_log_line = ui_index_log_line;
-#ifndef _WIN32
-    proc_opts.child_pid_out = &job->child_pid;
-#endif
+    proc_opts.on_child_pid = ui_index_child_pid;
+    proc_opts.child_pid_ud = job;
     proc_opts.quiet_timeout_ms = ui_index_quiet_timeout_ms();
     proc_opts.delete_log_on_exit = false;
 
@@ -1309,8 +1508,10 @@ static void *index_thread_fn(void *arg) {
     int spawn_rc = cbm_subprocess_run(&proc_opts, &proc_result);
     int exit_code = spawn_rc != 0 ? -1 : proc_result.exit_code;
     if (spawn_rc == 0 && proc_result.outcome != CBM_PROC_CLEAN) {
-        snprintf(job->error_msg, sizeof(job->error_msg), "indexing worker ended with %s (exit code %d)",
+        char error[256];
+        snprintf(error, sizeof(error), "indexing worker ended with %s (exit code %d)",
                  cbm_proc_outcome_str(proc_result.outcome), proc_result.exit_code);
+        set_job_error(job, error);
         exit_code = -1;
     } else if (exit_code == 0 && index_response_has_error(response_file)) {
         exit_code = 1;
@@ -1319,18 +1520,19 @@ static void *index_thread_fn(void *arg) {
     (void)cbm_unlink(response_file);
 
     if (exit_code != 0) {
-        if (job->error_msg[0] == '\0') {
-            snprintf(job->error_msg, sizeof(job->error_msg), "indexing failed (exit code %d)",
-                     exit_code);
+        if (job_error_empty(job)) {
+            char error[128];
+            snprintf(error, sizeof(error), "indexing failed (exit code %d)", exit_code);
+            set_job_error(job, error);
         }
-        atomic_store(&job->status, 3);
+        set_job_status(job, 3);
     } else {
-        atomic_store(&job->status, 2);
-        if (job->remote_url[0] && job->watcher) {
-            cbm_watcher_watch(job->watcher, job->project_name, job->root_path);
+        set_job_status(job, 2);
+        if (snapshot.remote_url[0] && snapshot.watcher) {
+            cbm_watcher_watch(snapshot.watcher, snapshot.project_name, root_path);
         }
     }
-    cbm_log_info("ui.index.done", "path", job->root_path, "rc", exit_code == 0 ? "ok" : "err");
+    cbm_log_info("ui.index.done", "path", root_path, "rc", exit_code == 0 ? "ok" : "err");
     return NULL;
 }
 
@@ -1342,27 +1544,6 @@ enum {
 static int start_index_job(cbm_http_server_t *srv, const char *root_path, const char *project_name,
                            const char *remote_url, const char *remote_branch,
                            int poll_interval_sec) {
-    int slot = INDEX_JOB_NO_SLOT;
-    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
-        int status = atomic_load(&g_index_jobs[i].status);
-        bool same_named_project = project_name && project_name[0] &&
-                                  strcmp(g_index_jobs[i].project_name, project_name) == 0;
-        bool same_unnamed_root = (!project_name || !project_name[0]) &&
-                                 g_index_jobs[i].project_name[0] == '\0' && root_path &&
-                                 strcmp(g_index_jobs[i].root_path, root_path) == 0;
-        if (status == 1 && (same_named_project || same_unnamed_root)) {
-            /* Starting the same operation twice is idempotent. Returning the
-             * active slot lets every caller monitor the original job_id. */
-            return i;
-        }
-        if (slot == INDEX_JOB_NO_SLOT && (status == 0 || status == 2 || status == 3)) {
-            slot = i;
-        }
-    }
-    if (slot == INDEX_JOB_NO_SLOT) {
-        return INDEX_JOB_NO_SLOT;
-    }
-
     /* The UI MCP instance caches the last queried SQLite store. On Windows that
      * open handle prevents the index worker's atomic temp-DB replacement, so a
      * fully successful parse otherwise ends as phase=dump / exit code 1. Drop
@@ -1370,29 +1551,86 @@ static int start_index_job(cbm_http_server_t *srv, const char *root_path, const 
      * initial in-memory store is intentionally preserved by evict_idle(). */
     cbm_mcp_server_evict_idle(srv->mcp, 0);
 
-    index_job_t *job = &g_index_jobs[slot];
-    job->job_id = atomic_fetch_add(&g_next_index_job_id, 1);
-    snprintf(job->root_path, sizeof(job->root_path), "%s", root_path);
-    snprintf(job->project_name, sizeof(job->project_name), "%s", project_name ? project_name : "");
-    snprintf(job->remote_url, sizeof(job->remote_url), "%s", remote_url ? remote_url : "");
-    snprintf(job->remote_branch, sizeof(job->remote_branch), "%s",
-             remote_branch ? remote_branch : "");
-    job->poll_interval_sec = poll_interval_sec;
-    job->watcher = srv->watcher;
-    job->error_msg[0] = '\0';
-#ifndef _WIN32
-    job->child_pid = 0;
-#endif
-    atomic_store(&job->status, 1);
+    index_jobs_init();
+    for (;;) {
+        int slot = INDEX_JOB_NO_SLOT;
+        int reap_slot = INDEX_JOB_NO_SLOT;
+        cbm_thread_t reap_thread;
+        unsigned long long reap_job_id = 0;
 
-    cbm_thread_t tid;
-    if (cbm_thread_create(&tid, 0, index_thread_fn, job) != 0) {
-        atomic_store(&job->status, 3);
-        set_job_error(job, "thread creation failed");
-        return INDEX_JOB_THREAD_FAILED;
+        cbm_mutex_lock(&g_index_jobs_mutex);
+        for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+            int status = atomic_load(&g_index_jobs[i].status);
+            bool same_named_project = project_name && project_name[0] &&
+                                      strcmp(g_index_jobs[i].project_name, project_name) == 0;
+            bool same_unnamed_root = (!project_name || !project_name[0]) &&
+                                     g_index_jobs[i].project_name[0] == '\0' && root_path &&
+                                     strcmp(g_index_jobs[i].root_path, root_path) == 0;
+            if (status == 1 && (same_named_project || same_unnamed_root)) {
+                cbm_mutex_unlock(&g_index_jobs_mutex);
+                /* Starting the same operation twice is idempotent. */
+                return i;
+            }
+            bool completed_reaped = (status == 2 || status == 3) && !g_index_jobs[i].thread_valid &&
+                                    !g_index_jobs[i].reaping;
+            if (slot == INDEX_JOB_NO_SLOT && (status == 0 || completed_reaped)) {
+                slot = i;
+            }
+            if (reap_slot == INDEX_JOB_NO_SLOT && (status == 2 || status == 3) &&
+                g_index_jobs[i].thread_valid && !g_index_jobs[i].reaping) {
+                reap_slot = i;
+                g_index_jobs[i].reaping = true;
+                reap_thread = g_index_jobs[i].thread;
+                reap_job_id = g_index_jobs[i].job_id;
+            }
+        }
+        if (slot == INDEX_JOB_NO_SLOT && reap_slot == INDEX_JOB_NO_SLOT) {
+            cbm_mutex_unlock(&g_index_jobs_mutex);
+            return INDEX_JOB_NO_SLOT;
+        }
+        if (slot == INDEX_JOB_NO_SLOT) {
+            cbm_mutex_unlock(&g_index_jobs_mutex);
+            (void)cbm_thread_join(&reap_thread);
+            cbm_mutex_lock(&g_index_jobs_mutex);
+            index_job_t *reaped = &g_index_jobs[reap_slot];
+            if (reaped->job_id == reap_job_id && reaped->reaping) {
+                reaped->thread_valid = false;
+                reaped->reaping = false;
+                atomic_store(&reaped->status, 0);
+                reaped->error_msg[0] = '\0';
+            }
+            cbm_mutex_unlock(&g_index_jobs_mutex);
+            continue;
+        }
+
+        index_job_t *job = &g_index_jobs[slot];
+        job->job_id = atomic_fetch_add(&g_next_index_job_id, 1);
+        snprintf(job->root_path, sizeof(job->root_path), "%s", root_path);
+        snprintf(job->project_name, sizeof(job->project_name), "%s",
+                 project_name ? project_name : "");
+        snprintf(job->remote_url, sizeof(job->remote_url), "%s", remote_url ? remote_url : "");
+        snprintf(job->remote_branch, sizeof(job->remote_branch), "%s",
+                 remote_branch ? remote_branch : "");
+        job->poll_interval_sec = poll_interval_sec;
+        job->watcher = srv->watcher;
+        job->error_msg[0] = '\0';
+        job->thread_valid = false;
+        job->reaping = false;
+        job->child_pid = 0;
+        atomic_store(&job->status, 1);
+
+        /* Hold the mutex through creation so the worker cannot finish and make
+         * this slot appear reusable before its native handle is recorded. */
+        if (cbm_thread_create(&job->thread, 0, index_thread_fn, job) != 0) {
+            atomic_store(&job->status, 3);
+            snprintf(job->error_msg, sizeof(job->error_msg), "%s", "thread creation failed");
+            cbm_mutex_unlock(&g_index_jobs_mutex);
+            return INDEX_JOB_THREAD_FAILED;
+        }
+        job->thread_valid = true;
+        cbm_mutex_unlock(&g_index_jobs_mutex);
+        return slot;
     }
-    cbm_thread_detach(&tid);
-    return slot;
 }
 
 static bool reply_index_job_error(cbm_http_conn_t *c, int result) {
@@ -1462,9 +1700,14 @@ static void handle_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
+    unsigned long long job_id = 0;
+    char job_path[1024];
+    copy_job_start_fields(slot, &job_id, job_path, sizeof(job_path));
+    char escaped_path[2048];
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), job_path);
     cbm_http_replyf(c, 202, g_cors_json,
-                    "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,\"path\":\"%s\"}",
-                    g_index_jobs[slot].job_id, slot, g_index_jobs[slot].root_path);
+                    "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,\"path\":\"%s\"}", job_id,
+                    slot, escaped_path);
 }
 
 /* POST /api/remote-index — clone a managed SSH repository and index it. */
@@ -1553,12 +1796,15 @@ static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c
 
     char escaped_path[2048];
     char escaped_project[512];
-    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), g_index_jobs[slot].root_path);
+    unsigned long long job_id = 0;
+    char job_path[1024];
+    copy_job_start_fields(slot, &job_id, job_path, sizeof(job_path));
+    cbm_json_escape(escaped_path, (int)sizeof(escaped_path), job_path);
     cbm_json_escape(escaped_project, (int)sizeof(escaped_project), project_name);
     cbm_http_replyf(c, 202, g_cors_json,
                     "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,"
                     "\"path\":\"%s\",\"project\":\"%s\"}",
-                    g_index_jobs[slot].job_id, slot, escaped_path, escaped_project);
+                    job_id, slot, escaped_path, escaped_project);
 }
 
 static void handle_remote_info(cbm_http_conn_t *c, const cbm_http_req_t *req) {
@@ -1621,11 +1867,12 @@ static void handle_project_update(cbm_http_server_t *srv, cbm_http_conn_t *c,
     char escaped_project[512];
     cbm_json_escape(escaped_path, (int)sizeof(escaped_path), root_path);
     cbm_json_escape(escaped_project, (int)sizeof(escaped_project), project);
+    unsigned long long job_id = 0;
+    copy_job_start_fields(slot, &job_id, NULL, 0);
     cbm_http_replyf(c, 202, g_cors_json,
                     "{\"status\":\"indexing\",\"job_id\":%llu,\"slot\":%d,\"path\":\"%s\","
                     "\"project\":\"%s\",\"source\":\"%s\"}",
-                    g_index_jobs[slot].job_id, slot, escaped_path, escaped_project,
-                    is_remote ? "remote" : "local");
+                    job_id, slot, escaped_path, escaped_project, is_remote ? "remote" : "local");
 }
 
 static void handle_remote_sync(cbm_http_server_t *srv, cbm_http_conn_t *c,
@@ -1655,6 +1902,8 @@ static void handle_remote_sync(cbm_http_server_t *srv, cbm_http_conn_t *c,
 static void handle_index_status(cbm_http_conn_t *c) {
     char buf[16384] = "[";
     int pos = 1;
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
         int st = atomic_load(&g_index_jobs[i].status);
         if (st == 0)
@@ -1676,12 +1925,92 @@ static void handle_index_status(cbm_http_conn_t *c) {
                      g_index_jobs[i].job_id, i, ss, escaped_path, escaped_project,
                      g_index_jobs[i].remote_url[0] ? "remote" : "local", escaped_error);
     }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
     http_appendf(buf, sizeof(buf), &pos, "]");
     if ((size_t)pos >= sizeof(buf)) {
         pos = (int)sizeof(buf) - 1;
     }
     buf[pos] = '\0';
     cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
+}
+
+/* W5 admin API: expose the same project directory used by MCP list_projects.
+ * The MCP handler returns a text content envelope; unwrap it so admin clients
+ * receive a stable JSON object directly. This endpoint is intentionally served
+ * by the loopback UI server, whose host guard already limits administrative
+ * access to the local machine. */
+static void handle_admin_projects(cbm_http_server_t *srv, cbm_http_conn_t *c) {
+    char *result = cbm_mcp_handle_tool(srv->mcp, "list_projects", "{\"metadata_only\":true}");
+    if (!result) {
+        cbm_http_replyf(c, 503, g_cors_json, "{\"error\":\"project directory unavailable\"}");
+        return;
+    }
+    yyjson_doc *doc = yyjson_read(result, strlen(result), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *content = root ? yyjson_obj_get(root, "content") : NULL;
+    yyjson_val *first = content && yyjson_is_arr(content) ? yyjson_arr_get(content, 0) : NULL;
+    yyjson_val *text = first ? yyjson_obj_get(first, "text") : NULL;
+    const char *payload = text && yyjson_is_str(text) ? yyjson_get_str(text) : NULL;
+    if (payload) {
+        cbm_http_replyf(c, 200, g_cors_json, "%s", payload);
+    } else {
+        cbm_http_replyf(c, 503, g_cors_json, "{\"error\":\"invalid project directory response\"}");
+    }
+    if (doc)
+        yyjson_doc_free(doc);
+    free(result);
+}
+
+/* Liveness/readiness probes for desktop and remote management wrappers. */
+static void handle_healthz(cbm_http_conn_t *c) {
+    cbm_http_replyf(c, 200, g_cors_json, "{\"status\":\"ok\"}");
+}
+
+static void handle_readyz(cbm_http_server_t *srv, cbm_http_conn_t *c) {
+    if (srv && srv->listener_ok) {
+        cbm_http_replyf(c, 200, g_cors_json, "{\"status\":\"ready\"}");
+    } else {
+        cbm_http_replyf(c, 503, g_cors_json, "{\"status\":\"starting\"}");
+    }
+}
+
+/* Small, dependency-free Prometheus surface. Counters are derived from the
+ * bounded in-memory job history; this keeps metrics useful after restarts while
+ * avoiding a new persistence format for the MVP. */
+static void handle_metrics(cbm_http_conn_t *c) {
+    int active = 0, done = 0, failed = 0, seen = 0;
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        int st = atomic_load(&g_index_jobs[i].status);
+        if (st == 1)
+            active++;
+        else if (st == 2)
+            done++;
+        else if (st == 3)
+            failed++;
+        if (st != 0)
+            seen++;
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+    char body[1024];
+    int n = snprintf(body, sizeof(body),
+                     "# TYPE cbm_index_jobs_active gauge\n"
+                     "cbm_index_jobs_active %d\n"
+                     "# TYPE cbm_index_jobs_completed gauge\n"
+                     "cbm_index_jobs_completed %d\n"
+                     "# TYPE cbm_index_jobs_failed gauge\n"
+                     "cbm_index_jobs_failed %d\n"
+                     "# TYPE cbm_index_jobs_known gauge\n"
+                     "cbm_index_jobs_known %d\n",
+                     active, done, failed, seen);
+    if (n < 0 || (size_t)n >= sizeof(body)) {
+        cbm_http_replyf(c, 500, g_cors, "metrics unavailable");
+        return;
+    }
+    cbm_http_replyf(c, 200,
+                    "Content-Type: text/plain; version=0.0.4\r\nCache-Control: no-store\r\n", "%s",
+                    body);
 }
 
 /* DELETE /api/project?name=X — closes the UI store, then deletes the project. */
@@ -1697,13 +2026,20 @@ static void handle_delete_project(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    bool project_busy = false;
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
         if (atomic_load(&g_index_jobs[i].status) == 1 &&
             strcmp(g_index_jobs[i].project_name, name) == 0) {
-            cbm_http_replyf(c, 409, g_cors_json,
-                            "{\"error\":\"project is currently being indexed\"}");
-            return;
+            project_busy = true;
+            break;
         }
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+    if (project_busy) {
+        cbm_http_replyf(c, 409, g_cors_json, "{\"error\":\"project is currently being indexed\"}");
+        return;
     }
 
     char escaped_name[512];
@@ -1775,6 +2111,10 @@ static void handle_project_health(cbm_http_conn_t *c, const cbm_http_req_t *req)
     char name[256] = {0};
     if (!cbm_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
         cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing name\"}");
+        return;
+    }
+    if (index_job_running_for_project(name)) {
+        cbm_http_replyf(c, 200, g_cors_json, "{\"status\":\"indexing\"}");
         return;
     }
 
@@ -2072,6 +2412,12 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project parameter\"}");
         return;
     }
+    if (index_job_running_for_project(project)) {
+        cbm_http_replyf(c, 409, g_cors_json,
+                        "{\"error\":\"this project graph is being updated; retry after indexing "
+                        "completes\"}");
+        return;
+    }
 
     int max_nodes = 0; /* 0 → layout default budget */
     if (cbm_http_query_param(req->query, "max_nodes", max_str, (int)sizeof(max_str))) {
@@ -2175,6 +2521,10 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     yyjson_mut_val *lp_arr = yyjson_mut_arr(mdoc);
 
     for (int li = 0; li < linked_count; li++) {
+        if (index_job_running_for_project(linked[li])) {
+            free(linked[li]);
+            continue;
+        }
         char lp_path[1024];
         db_path_for_project(linked[li], lp_path, sizeof(lp_path));
         if (!cbm_file_exists(lp_path)) {
@@ -2353,16 +2703,58 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
         return;
     }
 
+    /* W5 local admin API. These aliases intentionally reuse the existing
+     * project/index handlers so deduplication and worker isolation stay in one
+     * place. */
+    if (is_get && cbm_http_path_match(req->path, "/healthz")) {
+        handle_healthz(c);
+        return;
+    }
+    if (is_get && cbm_http_path_match(req->path, "/readyz")) {
+        handle_readyz(srv, c);
+        return;
+    }
+    if (is_get && cbm_http_path_match(req->path, "/metrics")) {
+        handle_metrics(c);
+        return;
+    }
+    if (is_get && cbm_http_path_match(req->path, "/admin/v1/projects")) {
+        handle_admin_projects(srv, c);
+        return;
+    }
+    if (is_get && cbm_http_path_match(req->path, "/admin/v1/jobs")) {
+        handle_index_status(c);
+        return;
+    }
+    if (is_post && cbm_http_path_match(req->path, "/admin/v1/index")) {
+        handle_index_start(srv, c, req);
+        return;
+    }
+    if (is_post && cbm_http_path_match(req->path, "/admin/v1/projects")) {
+        handle_index_start(srv, c, req);
+        return;
+    }
+    if (is_post && cbm_http_path_match(req->path, "/admin/v1/remote-index")) {
+        handle_remote_index_start(srv, c, req);
+        return;
+    }
+    if (is_post && cbm_http_path_match(req->path, "/admin/v1/projects/update*")) {
+        handle_project_update(srv, c, req);
+        return;
+    }
+    if (is_delete && cbm_http_path_match(req->path, "/admin/v1/projects*")) {
+        handle_delete_project(srv, c, req);
+        return;
+    }
+
     /* POST /rpc → JSON-RPC dispatch (reuses existing MCP tools) */
     if (is_post && cbm_http_path_match(req->path, "/rpc")) {
-        /* A graph query can reopen and cache the database after start_index_job
-         * evicts it. Windows then refuses the worker's atomic DB replacement.
-         * Keep progress/log endpoints available, but do not admit new cached
-         * graph readers until every background update has published. */
-        if (any_index_job_running()) {
-            cbm_http_replyf(
-                c, 409, g_cors_json,
-                "{\"error\":\"graph update in progress; retry after indexing completes\"}");
+        /* Do not reopen the database currently being replaced. Independent
+         * projects remain readable, so one update cannot blank every graph. */
+        if (rpc_targets_running_project(req->body, req->body_len)) {
+            cbm_http_replyf(c, 409, g_cors_json,
+                            "{\"error\":\"requested graph update in progress; retry after indexing "
+                            "completes\"}");
             return;
         }
         handle_rpc(c, req, srv->mcp);
@@ -2550,9 +2942,39 @@ cbm_http_server_t *cbm_http_server_new(int port) {
     return srv;
 }
 
+static void join_all_index_jobs(void) {
+    index_jobs_init();
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        index_job_t *job = &g_index_jobs[i];
+        cbm_thread_t thread;
+        unsigned long long job_id = 0;
+        bool should_join = false;
+        cbm_mutex_lock(&g_index_jobs_mutex);
+        if (job->thread_valid && !job->reaping) {
+            job->reaping = true;
+            thread = job->thread;
+            job_id = job->job_id;
+            should_join = true;
+        }
+        cbm_mutex_unlock(&g_index_jobs_mutex);
+        if (!should_join) {
+            continue;
+        }
+        (void)cbm_thread_join(&thread);
+        cbm_mutex_lock(&g_index_jobs_mutex);
+        if (job->job_id == job_id && job->reaping) {
+            job->thread_valid = false;
+            job->reaping = false;
+            atomic_store(&job->status, 0);
+        }
+        cbm_mutex_unlock(&g_index_jobs_mutex);
+    }
+}
+
 void cbm_http_server_free(cbm_http_server_t *srv) {
     if (!srv)
         return;
+    join_all_index_jobs();
     cbm_httpd_close(srv->listener);
     cbm_mcp_server_free(srv->mcp);
     free(srv);

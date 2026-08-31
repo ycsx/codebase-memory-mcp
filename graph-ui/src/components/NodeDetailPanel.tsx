@@ -15,7 +15,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { colorForLabel } from "../lib/colors";
 import { graphNodeLabel, graphRelationshipLabel } from "../lib/graphLabels";
 import { callTool } from "../api/rpc";
-import type { GraphEdge, GraphNode, RepoInfo } from "../lib/types";
+import { graphEdgeEndpointKey, graphNodeKey, type GraphEdge, type GraphNode, type RepoInfo } from "../lib/types";
 
 const CONNECTION_PREVIEW_LIMIT = 25;
 
@@ -106,19 +106,25 @@ export function NodeDetailPanel({
     setCodeLoading(false);
     setConnectionQuery("");
     setShowAllConnections(false);
-  }, [node.id]);
+  }, [graphNodeKey(node)]);
 
-  const canFetchCode = Boolean(project && node.qualified_name);
-  const ghUrl = githubUrl(node, repoInfo);
+  const nodeProject = node.graph_project ?? project;
+  const canFetchCode = Boolean(nodeProject && node.qualified_name);
+  /* The primary repo metadata cannot safely build a deep link for a satellite
+   * project; avoid presenting a link that points at the wrong repository. */
+  const ghUrl =
+    node.graph_project && project && node.graph_project !== project
+      ? null
+      : githubUrl(node, repoInfo);
 
   const loadCode = async () => {
-    if (!project || !node.qualified_name) return;
+    if (!nodeProject || !node.qualified_name) return;
     setCodeLoading(true);
     setCodeError(null);
     try {
       const result = await callTool<SnippetResult>("get_code_snippet", {
         qualified_name: node.qualified_name,
-        project,
+        project: nodeProject,
       });
       setCode(result.source ?? "(source not available)");
     } catch (error) {
@@ -129,19 +135,22 @@ export function NodeDetailPanel({
   };
 
   const connections = useMemo(() => {
-    const nodeMap = new Map<number, GraphNode>();
-    for (const graphNode of allNodes) nodeMap.set(graphNode.id, graphNode);
+    const nodeMap = new Map<string, GraphNode>();
+    for (const graphNode of allNodes) nodeMap.set(graphNodeKey(graphNode), graphNode);
+    const selectedKey = graphNodeKey(node);
 
     const result: Connection[] = [];
     for (const edge of allEdges) {
-      if (edge.source === node.id) {
-        const target = nodeMap.get(edge.target);
+      const sourceKey = graphEdgeEndpointKey(edge, "source");
+      const targetKey = graphEdgeEndpointKey(edge, "target");
+      if (sourceKey === selectedKey || (!edge.source_key && edge.source === node.id)) {
+        const target = nodeMap.get(targetKey);
         if (target) {
           result.push({ node: target, edgeType: edge.type, direction: "outbound" });
         }
       }
-      if (edge.target === node.id) {
-        const source = nodeMap.get(edge.source);
+      if (targetKey === selectedKey || (!edge.target_key && edge.target === node.id)) {
+        const source = nodeMap.get(sourceKey);
         if (source) {
           result.push({ node: source, edgeType: edge.type, direction: "inbound" });
         }

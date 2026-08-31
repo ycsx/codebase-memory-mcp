@@ -166,6 +166,55 @@ describe("buildImpactModel", () => {
     expect(model.totalNodes).toBe(61);
     expect(model.truncated).toBe(false);
   });
+
+  it("does not leak a linked project's same numeric ID into primary impact", () => {
+    const graph: GraphData = {
+      nodes: [
+        { ...DATA.nodes[0], graph_key: "primary:app:1", graph_project: "app" },
+      ],
+      edges: [],
+      total_nodes: 1,
+      linked_projects: [
+        {
+          project: "dependency",
+          nodes: [
+            { ...DATA.nodes[0], graph_key: "linked:dependency:1", graph_project: "dependency" },
+            {
+              ...DATA.nodes[1],
+              id: 2,
+              graph_key: "linked:dependency:2",
+              graph_project: "dependency",
+            },
+          ],
+          edges: [
+            {
+              source: 2,
+              target: 1,
+              type: "CALLS",
+              source_key: "linked:dependency:2",
+              target_key: "linked:dependency:1",
+            },
+          ],
+          cross_edges: [],
+          offset: { x: 0, y: 0, z: 0 },
+        },
+      ],
+    };
+
+    const model = buildImpactModel(
+      graph,
+      {
+        changed_files: ["src/orders.ts"],
+        changed_count: 1,
+        impacted_symbols: [{ name: "saveOrder", label: "Function", file: "src/orders.ts" }],
+        depth: 1,
+      },
+      1,
+    );
+
+    expect(model.layers[0].map((node) => node.name)).toEqual(["saveOrder"]);
+    expect(model.layers[1]).toHaveLength(0);
+  });
 });
 
 describe("buildHotspotModel", () => {

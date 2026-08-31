@@ -1,0 +1,9 @@
+=== lint.sh: os=windows arch=x86_64 cores=20 cc=gcc cxx=g++ ===
+=== no-skips policy (tests pass or fail) ===
+[no-skips] OK — no forbidden skips in tests/*.c (SKIP_PLATFORM allowed for platform-only tests)
+=== CI mode: cppcheck + clang-format ===
+=== cppcheck ===
+=== clang-format ===
+make: clang-format-20: No such file or directory
+make: *** [Makefile.cbm:809: lint-format] Error 127
+make: *** Waiting for unfinished jobs....

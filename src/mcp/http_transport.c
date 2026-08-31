@@ -1,11 +1,15 @@
 #include "mcp/http_transport.h"
 
+#include "mcp/remote_auth.h"
+
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
 #include "foundation/log.h"
 #include "foundation/sha256.h"
 #include "ui/httpd.h"
+
+#include <yyjson/yyjson.h>
 
 #include <ctype.h>
 #include <stdatomic.h>
@@ -41,12 +45,14 @@ typedef struct {
     time_t last_used;
     int in_flight;
     cbm_mcp_server_t *mcp;
+    char key_id[CBM_REMOTE_KEY_ID_LEN + 1];
     cbm_mutex_t mutex;
 } cbm_mcp_http_session_t;
 
 struct cbm_mcp_http_server {
     cbm_httpd_t *httpd;
     char *auth_token;
+    cbm_remote_auth_store_t *auth_store;
     char token_key_id[13];
     char *audit_log_path;
     char *trusted_proxies;
@@ -194,12 +200,19 @@ bool cbm_mcp_http_resolve_client_ip(const char *peer_ip, const char *x_forwarded
 
 static void make_nonce(cbm_mcp_http_server_t *server, const char *kind, const char *client_ip,
                        char out[CBM_SHA256_HEX_LEN + 1]) {
+    uint8_t random[32];
+    if (cbm_remote_random_bytes(random, sizeof(random))) {
+        cbm_sha256_hex(random, sizeof(random), out);
+        memset(random, 0, sizeof(random));
+        return;
+    }
     uint64_t counter = atomic_fetch_add(&server->nonce, 1U) + 1U;
     time_t now = time(NULL);
     cbm_sha256_ctx ctx;
     uint8_t digest[CBM_SHA256_DIGEST_LEN];
+    const char *nonce_seed = server->auth_token ? server->auth_token : "auth-store";
     cbm_sha256_init(&ctx);
-    cbm_sha256_update(&ctx, server->auth_token, strlen(server->auth_token));
+    cbm_sha256_update(&ctx, nonce_seed, strlen(nonce_seed));
     cbm_sha256_update(&ctx, &counter, sizeof(counter));
     cbm_sha256_update(&ctx, &now, sizeof(now));
     cbm_sha256_update(&ctx, kind, strlen(kind));
@@ -259,7 +272,8 @@ static FILE *audit_open(const char *path) {
 static void write_audit(cbm_mcp_http_server_t *server, const char *request_id,
                         const char *client_ip, const char *session_id, const char *method,
                         const char *tool, const char *target, const char *status, int http_status,
-                        int64_t duration_ms, size_t request_bytes, size_t response_bytes) {
+                        const char *principal, const char *key_id, int64_t duration_ms,
+                        size_t request_bytes, size_t response_bytes) {
     char timestamp[32];
     iso8601_now(timestamp);
     cbm_mutex_lock(&server->audit_mutex);
@@ -272,11 +286,12 @@ static void write_audit(cbm_mcp_http_server_t *server, const char *request_id,
         fputs(",\"client_ip\":", file);
         audit_json_string(file, client_ip);
         fputs(",\"principal\":", file);
-        char principal[CLIENT_IP_LEN + 4];
-        snprintf(principal, sizeof(principal), "ip:%s", client_ip ? client_ip : "unknown");
-        audit_json_string(file, principal);
+        char legacy_principal[CLIENT_IP_LEN + 4];
+        snprintf(legacy_principal, sizeof(legacy_principal), "ip:%s",
+                 client_ip ? client_ip : "unknown");
+        audit_json_string(file, principal ? principal : legacy_principal);
         fputs(",\"auth_key_id\":", file);
-        audit_json_string(file, server->token_key_id);
+        audit_json_string(file, key_id ? key_id : "");
         fputs(",\"session_id\":", file);
         audit_json_string(file, session_id ? session_id : "");
         fputs(",\"method\":", file);
@@ -347,6 +362,7 @@ static void session_destroy(cbm_mcp_http_session_t *session) {
     session->used = false;
     session->id[0] = '\0';
     session->client_ip[0] = '\0';
+    session->key_id[0] = '\0';
     session->last_used = 0;
     session->in_flight = 0;
 }
@@ -361,8 +377,29 @@ static void evict_expired_sessions_locked(cbm_mcp_http_server_t *server, time_t 
     }
 }
 
-static cbm_mcp_http_session_t *session_create(cbm_mcp_http_server_t *server,
-                                              const char *client_ip) {
+static cbm_mcp_tool_profile_t effective_profile(cbm_mcp_tool_profile_t server_profile,
+                                                cbm_mcp_tool_profile_t key_profile) {
+    if (server_profile == CBM_MCP_TOOL_PROFILE_SCOUT || key_profile == CBM_MCP_TOOL_PROFILE_SCOUT) {
+        return CBM_MCP_TOOL_PROFILE_SCOUT;
+    }
+    return CBM_MCP_TOOL_PROFILE_ANALYSIS;
+}
+
+static void identity_to_authz(const cbm_remote_identity_t *identity, cbm_mcp_authz_t *authz) {
+    memset(authz, 0, sizeof(*authz));
+    authz->enabled = true;
+    authz->principal = identity->principal;
+    authz->key_id = identity->key_id;
+    authz->projects = (const char *const *)identity->projects;
+    authz->project_count = identity->project_count;
+    authz->source_read = identity->source_read;
+    authz->index_write = identity->index_write;
+    authz->delete_write = identity->delete_write;
+    authz->admin = identity->admin;
+}
+
+static cbm_mcp_http_session_t *session_create(cbm_mcp_http_server_t *server, const char *client_ip,
+                                              const cbm_remote_identity_t *identity) {
     cbm_mutex_lock(&server->sessions_mutex);
     evict_expired_sessions_locked(server, time(NULL));
     cbm_mcp_http_session_t *slot = NULL;
@@ -381,11 +418,21 @@ static cbm_mcp_http_session_t *session_create(cbm_mcp_http_server_t *server,
         cbm_mutex_unlock(&server->sessions_mutex);
         return NULL;
     }
-    cbm_mcp_server_set_tool_profile(slot->mcp, server->tool_profile);
+    cbm_mcp_server_set_tool_profile(
+        slot->mcp, effective_profile(server->tool_profile, identity->tool_profile));
+    cbm_mcp_authz_t authz;
+    identity_to_authz(identity, &authz);
+    if (!cbm_mcp_server_set_authz(slot->mcp, &authz)) {
+        cbm_mcp_server_free(slot->mcp);
+        slot->mcp = NULL;
+        cbm_mutex_unlock(&server->sessions_mutex);
+        return NULL;
+    }
     char nonce[CBM_SHA256_HEX_LEN + 1];
     make_nonce(server, "session", client_ip, nonce);
     memcpy(slot->id, nonce, SESSION_ID_HEX_LEN + 1);
     snprintf(slot->client_ip, sizeof(slot->client_ip), "%s", client_ip);
+    snprintf(slot->key_id, sizeof(slot->key_id), "%s", identity->key_id);
     slot->last_used = time(NULL);
     slot->in_flight = 1;
     slot->used = true;
@@ -395,8 +442,10 @@ static cbm_mcp_http_session_t *session_create(cbm_mcp_http_server_t *server,
 
 static cbm_mcp_http_session_t *session_acquire(cbm_mcp_http_server_t *server,
                                                const char *session_id, const char *client_ip,
-                                               bool *ip_mismatch) {
+                                               const char *key_id, bool *ip_mismatch,
+                                               bool *key_mismatch) {
     *ip_mismatch = false;
+    *key_mismatch = false;
     cbm_mutex_lock(&server->sessions_mutex);
     evict_expired_sessions_locked(server, time(NULL));
     cbm_mcp_http_session_t *found = NULL;
@@ -405,6 +454,8 @@ static cbm_mcp_http_session_t *session_acquire(cbm_mcp_http_server_t *server,
         if (session->used && constant_time_equal(session->id, session_id)) {
             if (strcmp(session->client_ip, client_ip) != 0) {
                 *ip_mismatch = true;
+            } else if (strcmp(session->key_id, key_id ? key_id : "") != 0) {
+                *key_mismatch = true;
             } else {
                 session->in_flight++;
                 found = session;
@@ -427,8 +478,10 @@ static void session_release(cbm_mcp_http_server_t *server, cbm_mcp_http_session_
 }
 
 static bool session_delete(cbm_mcp_http_server_t *server, const char *session_id,
-                           const char *client_ip, bool *ip_mismatch) {
+                           const char *client_ip, const char *key_id, bool *ip_mismatch,
+                           bool *key_mismatch) {
     *ip_mismatch = false;
+    *key_mismatch = false;
     bool deleted = false;
     cbm_mutex_lock(&server->sessions_mutex);
     for (int i = 0; i < server->max_sessions; i++) {
@@ -437,6 +490,8 @@ static bool session_delete(cbm_mcp_http_server_t *server, const char *session_id
             continue;
         if (strcmp(session->client_ip, client_ip) != 0) {
             *ip_mismatch = true;
+        } else if (strcmp(session->key_id, key_id ? key_id : "") != 0) {
+            *key_mismatch = true;
         } else if (session->in_flight == 0) {
             session_destroy(session);
             deleted = true;
@@ -478,6 +533,188 @@ static int64_t elapsed_ms(const struct timespec *start, const struct timespec *e
            (int64_t)(end->tv_nsec - start->tv_nsec) / 1000000;
 }
 
+static bool bearer_token_value(const char *authorization, const char **token_out) {
+    if (!authorization || strncmp(authorization, "Bearer ", 7) != 0) {
+        return false;
+    }
+    const char *token = authorization + 7;
+    size_t len = strlen(token);
+    if (len == 0 || len > TOKEN_MAX_LEN) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)token[i];
+        if (ch <= 0x20U || ch >= 0x7fU) {
+            return false;
+        }
+    }
+    if (token_out) {
+        *token_out = token;
+    }
+    return true;
+}
+
+static bool is_admin_route(const char *path) {
+    return path && strncmp(path, "/admin/v1/", sizeof("/admin/v1/") - 1U) == 0;
+}
+
+static bool admin_key_id_from_path(const char *path, char out[CBM_REMOTE_KEY_ID_LEN + 1],
+                                   bool *rotate) {
+    const char prefix[] = "/admin/v1/keys/";
+    size_t prefix_len = sizeof(prefix) - 1U;
+    if (!path || strncmp(path, prefix, prefix_len) != 0) {
+        return false;
+    }
+    const char *start = path + prefix_len;
+    const char *slash = strchr(start, '/');
+    size_t id_len = slash ? (size_t)(slash - start) : strlen(start);
+    if (id_len != CBM_REMOTE_KEY_ID_LEN ||
+        !copy_string(out, CBM_REMOTE_KEY_ID_LEN + 1U, start, id_len)) {
+        return false;
+    }
+    if (rotate) {
+        *rotate = slash && strcmp(slash, "/rotate") == 0;
+    }
+    return !slash || (rotate && *rotate);
+}
+
+static void handle_remote_admin(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn,
+                                const cbm_http_req_t *request,
+                                const cbm_remote_identity_t *identity) {
+    if (!server || !conn || !request || !identity || !identity->admin || !server->auth_store) {
+        cbm_http_replyf(conn, server && server->auth_store ? 403 : 503,
+                        "Cache-Control: no-store\r\n", "%s",
+                        server && server->auth_store ? "admin permission required"
+                                                     : "managed authentication is disabled");
+        return;
+    }
+    if (strcmp(request->method, "GET") == 0 &&
+        (strcmp(request->path, "/admin/v1/principals") == 0 ||
+         strcmp(request->path, "/admin/v1/keys") == 0)) {
+        char *json = cbm_remote_auth_list_json(server->auth_store);
+        if (!json) {
+            cbm_http_replyf(conn, 503, "Cache-Control: no-store\r\n", "%s",
+                            "key store unavailable");
+        } else {
+            cbm_http_replyf(conn, 200,
+                            "Content-Type: application/json\r\nCache-Control: no-store\r\n", "%s",
+                            json);
+            free(json);
+        }
+        return;
+    }
+
+    char key_id[CBM_REMOTE_KEY_ID_LEN + 1];
+    bool rotate = false;
+    if (strcmp(request->method, "POST") == 0 && strcmp(request->path, "/admin/v1/keys") == 0) {
+        yyjson_doc *doc = request->body ? yyjson_read(request->body, request->body_len, 0) : NULL;
+        yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+        const char *principal = root ? yyjson_get_str(yyjson_obj_get(root, "principal")) : NULL;
+        const char *kind = root ? yyjson_get_str(yyjson_obj_get(root, "kind")) : NULL;
+        const char *profile_name = root ? yyjson_get_str(yyjson_obj_get(root, "profile")) : NULL;
+        if (!principal || !kind) {
+            yyjson_doc_free(doc);
+            cbm_http_replyf(conn, 400, "Cache-Control: no-store\r\n", "%s",
+                            "principal and kind are required");
+            return;
+        }
+        yyjson_val *projects_val = root ? yyjson_obj_get(root, "projects") : NULL;
+        const char *project_values[128];
+        size_t project_count = 0;
+        if (projects_val && yyjson_is_arr(projects_val)) {
+            size_t idx, max;
+            yyjson_val *item;
+            yyjson_arr_foreach(projects_val, idx, max, item) {
+                if (project_count >= sizeof(project_values) / sizeof(project_values[0]) ||
+                    !yyjson_is_str(item)) {
+                    yyjson_doc_free(doc);
+                    cbm_http_replyf(conn, 400, "Cache-Control: no-store\r\n", "%s",
+                                    "projects must be a string array");
+                    return;
+                }
+                project_values[project_count++] = yyjson_get_str(item);
+            }
+        }
+        if (project_count == 0) {
+            project_values[project_count++] = "*";
+        }
+        bool source_read = root && yyjson_is_true(yyjson_obj_get(root, "source_read"));
+        bool index_write = root && yyjson_is_true(yyjson_obj_get(root, "index"));
+        bool delete_write = root && yyjson_is_true(yyjson_obj_get(root, "delete"));
+        bool admin = root && yyjson_is_true(yyjson_obj_get(root, "admin"));
+        cbm_mcp_tool_profile_t profile = CBM_MCP_TOOL_PROFILE_ANALYSIS;
+        if (profile_name && strcmp(profile_name, "scout") == 0) {
+            profile = CBM_MCP_TOOL_PROFILE_SCOUT;
+        } else if (profile_name && strcmp(profile_name, "analysis") != 0) {
+            yyjson_doc_free(doc);
+            cbm_http_replyf(conn, 400, "Cache-Control: no-store\r\n", "%s", "invalid profile");
+            return;
+        }
+        cbm_remote_key_options_t options = {
+            .principal = principal,
+            .kind = kind,
+            .tool_profile = profile,
+            .source_read = source_read,
+            .index_write = index_write,
+            .delete_write = delete_write,
+            .admin = admin,
+            .projects = project_values,
+            .project_count = project_count,
+        };
+        char *plaintext = NULL;
+        int rc = cbm_remote_auth_create_key(server->auth_store, &options, &plaintext, key_id);
+        yyjson_doc_free(doc);
+        if (rc != 0 || !plaintext) {
+            cbm_http_replyf(conn, 400, "Cache-Control: no-store\r\n", "%s", "invalid key options");
+            return;
+        }
+        cbm_http_replyf(conn, 201, "Content-Type: application/json\r\nCache-Control: no-store\r\n",
+                        "{\"key_id\":\"%s\",\"key\":\"%s\"}", key_id, plaintext);
+        memset(plaintext, 0, strlen(plaintext));
+        free(plaintext);
+        return;
+    }
+
+    if (admin_key_id_from_path(request->path, key_id, &rotate)) {
+        if (strcmp(request->method, "DELETE") == 0 && !rotate) {
+            int rc = cbm_remote_auth_revoke_key(server->auth_store, key_id);
+            cbm_http_replyf(conn, rc == 0 ? 204 : 404, "Cache-Control: no-store\r\n", "%s", "");
+            return;
+        }
+        if (strcmp(request->method, "POST") == 0 && rotate) {
+            char *plaintext = NULL;
+            char new_id[CBM_REMOTE_KEY_ID_LEN + 1];
+            int rc = cbm_remote_auth_rotate_key(server->auth_store, key_id, &plaintext, new_id);
+            if (rc != 0 || !plaintext) {
+                cbm_http_replyf(conn, 404, "Cache-Control: no-store\r\n", "%s", "key not found");
+                return;
+            }
+            cbm_http_replyf(conn, 200,
+                            "Content-Type: application/json\r\nCache-Control: no-store\r\n",
+                            "{\"key_id\":\"%s\",\"key\":\"%s\"}", new_id, plaintext);
+            memset(plaintext, 0, strlen(plaintext));
+            free(plaintext);
+            return;
+        }
+    }
+    cbm_http_replyf(conn, 404, "Cache-Control: no-store\r\n", "%s", "not found");
+}
+
+static void legacy_identity(cbm_mcp_http_server_t *server, cbm_remote_identity_t *identity,
+                            const char *client_ip) {
+    memset(identity, 0, sizeof(*identity));
+    snprintf(identity->key_id, sizeof(identity->key_id), "%s", server->token_key_id);
+    snprintf(identity->principal, sizeof(identity->principal), "ip:%s", client_ip);
+    snprintf(identity->kind, sizeof(identity->kind), "legacy");
+    identity->tool_profile = server->tool_profile;
+    identity->source_read = true;
+    identity->projects = calloc(1, sizeof(*identity->projects));
+    if (identity->projects) {
+        identity->projects[0] = string_dup("*");
+        identity->project_count = identity->projects[0] ? 1 : 0;
+    }
+}
+
 static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn) {
     struct timespec started, finished;
     cbm_clock_gettime(CLOCK_MONOTONIC, &started);
@@ -505,6 +742,10 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
     char audit_tool[128] = "";
     char audit_target_value[AUDIT_VALUE_LEN] = "";
     const char *audit_status = "error";
+    char audit_principal[CBM_REMOTE_PRINCIPAL_MAX] = "";
+    char audit_key_id[CBM_REMOTE_KEY_ID_LEN + 1] = "";
+    cbm_remote_identity_t identity;
+    memset(&identity, 0, sizeof(identity));
 
     if (read_status != 0) {
         if (read_status > 0)
@@ -512,11 +753,24 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
         goto done;
     }
 
-    if (strcmp(request.path, "/mcp") != 0) {
+    bool admin_route = is_admin_route(request.path);
+    if (strcmp(request.path, "/mcp") != 0 && !admin_route) {
         cbm_http_replyf(conn, 404, "Cache-Control: no-store\r\n", "%s", "not found");
         goto done;
     }
-    if (!cbm_mcp_http_authorize(request.authorization, server->auth_token)) {
+    const char *presented_token = NULL;
+    bool auth_ok = bearer_token_value(request.authorization, &presented_token);
+    if (auth_ok && server->auth_store) {
+        auth_ok = cbm_remote_auth_authenticate(server->auth_store, presented_token, &identity);
+    } else if (auth_ok && server->auth_token) {
+        auth_ok = cbm_mcp_http_authorize(request.authorization, server->auth_token);
+        if (auth_ok) {
+            legacy_identity(server, &identity, client_ip);
+        }
+    } else {
+        auth_ok = false;
+    }
+    if (!auth_ok) {
         cbm_http_replyf(conn, 401,
                         "WWW-Authenticate: Bearer realm=\"codebase-memory-mcp\"\r\n"
                         "Cache-Control: no-store\r\n",
@@ -524,9 +778,18 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
         audit_status = "auth_failed";
         goto done;
     }
+    snprintf(audit_principal, sizeof(audit_principal), "%s", identity.principal);
+    snprintf(audit_key_id, sizeof(audit_key_id), "%s", identity.key_id);
     if (request.origin[0] != '\0') {
         cbm_http_replyf(conn, 403, "Cache-Control: no-store\r\n", "%s", "forbidden origin");
         audit_status = "origin_rejected";
+        goto done;
+    }
+
+    if (admin_route) {
+        handle_remote_admin(server, conn, &request, &identity);
+        audit_status =
+            cbm_http_conn_status(conn) >= 200 && cbm_http_conn_status(conn) < 300 ? "ok" : "error";
         goto done;
     }
 
@@ -543,11 +806,16 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
             goto done;
         }
         bool ip_mismatch = false;
-        if (!session_delete(server, request.mcp_session_id, client_ip, &ip_mismatch)) {
-            reply_json(conn, ip_mismatch ? 403 : 404, NULL,
-                       ip_mismatch ? "{\"error\":\"session IP mismatch\"}"
-                                   : "{\"error\":\"unknown MCP session\"}");
-            audit_status = ip_mismatch ? "session_ip_mismatch" : "session_not_found";
+        bool key_mismatch = false;
+        if (!session_delete(server, request.mcp_session_id, client_ip, identity.key_id,
+                            &ip_mismatch, &key_mismatch)) {
+            reply_json(conn, (ip_mismatch || key_mismatch) ? 403 : 404, NULL,
+                       ip_mismatch    ? "{\"error\":\"session IP mismatch\"}"
+                       : key_mismatch ? "{\"error\":\"session key mismatch\"}"
+                                      : "{\"error\":\"unknown MCP session\"}");
+            audit_status = ip_mismatch    ? "session_ip_mismatch"
+                           : key_mismatch ? "session_key_mismatch"
+                                          : "session_not_found";
             goto done;
         }
         reply_empty(conn, 204, NULL);
@@ -587,21 +855,25 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
     bool is_initialize = strcmp(rpc.method, "initialize") == 0;
     cbm_mcp_http_session_t *session = NULL;
     bool ip_mismatch = false;
+    bool key_mismatch = false;
     if (request.mcp_session_id[0]) {
-        session = session_acquire(server, request.mcp_session_id, client_ip, &ip_mismatch);
+        session = session_acquire(server, request.mcp_session_id, client_ip, identity.key_id,
+                                  &ip_mismatch, &key_mismatch);
     } else if (is_initialize) {
-        session = session_create(server, client_ip);
+        session = session_create(server, client_ip, &identity);
     }
     if (!session) {
-        int status = ip_mismatch ? 403 : (is_initialize ? 503 : 404);
+        int status = (ip_mismatch || key_mismatch) ? 403 : (is_initialize ? 503 : 404);
         const char *message = ip_mismatch     ? "session IP mismatch"
+                              : key_mismatch  ? "session key mismatch"
                               : is_initialize ? "session capacity reached"
                                               : "missing or unknown MCP session";
         char body[160];
         snprintf(body, sizeof(body), "{\"error\":\"%s\"}", message);
         reply_json(conn, status, NULL, body);
-        audit_status = ip_mismatch ? "session_ip_mismatch"
-                                   : (is_initialize ? "session_capacity" : "session_not_found");
+        audit_status = ip_mismatch    ? "session_ip_mismatch"
+                       : key_mismatch ? "session_key_mismatch"
+                                      : (is_initialize ? "session_capacity" : "session_not_found");
         cbm_jsonrpc_request_free(&rpc);
         goto done;
     }
@@ -625,8 +897,10 @@ done:
     cbm_clock_gettime(CLOCK_MONOTONIC, &finished);
     int status = cbm_http_conn_status(conn);
     write_audit(server, request_id, client_ip, audit_session, audit_method, audit_tool,
-                audit_target_value, audit_status, status, elapsed_ms(&started, &finished),
-                cbm_http_conn_request_bytes(conn), cbm_http_conn_response_bytes(conn));
+                audit_target_value, audit_status, status, audit_principal, audit_key_id,
+                elapsed_ms(&started, &finished), cbm_http_conn_request_bytes(conn),
+                cbm_http_conn_response_bytes(conn));
+    cbm_remote_identity_free(&identity);
     cbm_http_req_free(&request);
 }
 
@@ -640,23 +914,30 @@ static void *connection_worker(void *arg) {
 }
 
 cbm_mcp_http_server_t *cbm_mcp_http_server_new(const cbm_mcp_http_config_t *config) {
-    if (!config || !config->bind_addr || !config->auth_token || !config->audit_log_path ||
-        strlen(config->auth_token) < TOKEN_MIN_LEN || strlen(config->auth_token) > TOKEN_MAX_LEN ||
-        config->port < 0 || config->port > 65535 || config->max_sessions <= 0 ||
-        config->max_sessions > 1024 || config->max_workers <= 0 || config->max_workers > 256 ||
-        config->session_ttl_sec <= 0 || config->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
+    bool has_legacy_token = config && config->auth_token && config->auth_token[0];
+    bool has_auth_store = config && config->auth_store_path && config->auth_store_path[0];
+    if (!config || !config->bind_addr || (!has_legacy_token && !has_auth_store) ||
+        (has_legacy_token && (strlen(config->auth_token) < TOKEN_MIN_LEN ||
+                              strlen(config->auth_token) > TOKEN_MAX_LEN)) ||
+        !config->audit_log_path || config->port < 0 || config->port > 65535 ||
+        config->max_sessions <= 0 || config->max_sessions > 1024 || config->max_workers <= 0 ||
+        config->max_workers > 256 || config->session_ttl_sec <= 0 ||
+        config->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
         cbm_log_error("mcp_http.config.invalid", "reason", "missing_or_out_of_range");
         return NULL;
     }
     cbm_mcp_http_server_t *server = calloc(1, sizeof(*server));
     if (!server)
         return NULL;
-    server->auth_token = string_dup(config->auth_token);
+    server->auth_token = has_legacy_token ? string_dup(config->auth_token) : NULL;
+    if (has_auth_store) {
+        server->auth_store = cbm_remote_auth_store_open(config->auth_store_path, true);
+    }
     server->audit_log_path = string_dup(config->audit_log_path);
     server->trusted_proxies = string_dup(config->trusted_proxies ? config->trusted_proxies : "");
     server->sessions = calloc((size_t)config->max_sessions, sizeof(*server->sessions));
-    if (!server->auth_token || !server->audit_log_path || !server->trusted_proxies ||
-        !server->sessions) {
+    if ((has_legacy_token && !server->auth_token) || (has_auth_store && !server->auth_store) ||
+        !server->audit_log_path || !server->trusted_proxies || !server->sessions) {
         cbm_log_error("mcp_http.config.invalid", "reason", "out_of_memory");
         cbm_mcp_http_server_free(server);
         return NULL;
@@ -669,10 +950,12 @@ cbm_mcp_http_server_t *cbm_mcp_http_server_new(const cbm_mcp_http_config_t *conf
     cbm_mutex_init(&server->audit_mutex);
     for (int i = 0; i < server->max_sessions; i++)
         cbm_mutex_init(&server->sessions[i].mutex);
-    char token_hash[CBM_SHA256_HEX_LEN + 1];
-    cbm_sha256_hex(server->auth_token, strlen(server->auth_token), token_hash);
-    memcpy(server->token_key_id, token_hash, 12);
-    server->token_key_id[12] = '\0';
+    if (server->auth_token) {
+        char token_hash[CBM_SHA256_HEX_LEN + 1];
+        cbm_sha256_hex(server->auth_token, strlen(server->auth_token), token_hash);
+        memcpy(server->token_key_id, token_hash, 12);
+        server->token_key_id[12] = '\0';
+    }
 
     FILE *audit = audit_open(server->audit_log_path);
     if (!audit) {
@@ -710,8 +993,8 @@ int cbm_mcp_http_server_run(cbm_mcp_http_server_t *server) {
             make_nonce(server, "busy", peer_ip, nonce);
             cbm_http_replyf(conn, 503, "Retry-After: 1\r\nCache-Control: no-store\r\n", "%s",
                             "server busy");
-            write_audit(server, nonce, peer_ip, "", "HTTP", "", "", "server_busy", 503, 0, 0,
-                        cbm_http_conn_response_bytes(conn));
+            write_audit(server, nonce, peer_ip, "", "HTTP", "", "", "server_busy", 503, "", "", 0,
+                        0, cbm_http_conn_response_bytes(conn));
             cbm_httpd_conn_close(conn);
             continue;
         }
@@ -748,6 +1031,7 @@ void cbm_mcp_http_server_free(cbm_mcp_http_server_t *server) {
         return;
     if (server->httpd)
         cbm_httpd_close(server->httpd);
+    cbm_remote_auth_store_close(server->auth_store);
     if (server->sessions) {
         for (int i = 0; i < server->max_sessions; i++) {
             session_destroy(&server->sessions[i]);

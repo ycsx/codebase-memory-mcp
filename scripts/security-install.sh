@@ -24,16 +24,26 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 # Set HOME to tmpdir so install writes there instead of real home
 export HOME="$TMPDIR/home"
-mkdir -p "$HOME"
+export USERPROFILE="$HOME"
+export APPDATA="$HOME/AppData/Roaming"
+export LOCALAPPDATA="$HOME/AppData/Local"
+export XDG_CONFIG_HOME="$HOME/.config"
+mkdir -p "$HOME" "$APPDATA" "$LOCALAPPDATA" "$XDG_CONFIG_HOME"
 
 FAIL=0
 
 # ── 1. Run install and capture written files ─────────────────────
 
-echo "--- Running install -y ---"
+echo "--- Running install -y --dry-run ---"
 
-# Run install (non-interactive with -y flag)
-"$BINARY" install -y > "$TMPDIR/install_output.txt" 2>&1 || true
+# The install command stops running service processes before replacing the
+# binary. Security auditing must never disturb a developer's live service, so
+# exercise the complete plan in the CLI's supported dry-run mode.
+if ! "$BINARY" install -y --dry-run > "$TMPDIR/install_output.txt" 2>&1; then
+    echo "FAIL: install dry-run returned a non-zero exit code"
+    cat "$TMPDIR/install_output.txt"
+    exit 1
+fi
 
 echo "Install output:"
 cat "$TMPDIR/install_output.txt"

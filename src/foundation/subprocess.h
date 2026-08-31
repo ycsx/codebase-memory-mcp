@@ -43,18 +43,21 @@ typedef struct {
 /* Called for each newly-completed (newline-terminated) log line while the child
  * runs. A completed line also resets the quiet-timeout (it is progress). */
 typedef void (*cbm_proc_log_cb)(const char *line, void *ud);
+typedef void (*cbm_proc_pid_cb)(long pid, void *ud);
 
 typedef struct {
-    const char *bin;             /* executable path; also argv[0] when argv is NULL */
-    const char *const *argv;     /* NULL-terminated argv; NULL => { bin, NULL } */
-    const char *log_file;        /* child stdout+stderr are redirected here and tailed;
-                                  * NULL => discard child output, no tailing */
-    cbm_proc_log_cb on_log_line; /* optional per-line callback */
-    void *log_ud;                /* user data for on_log_line */
-    long *child_pid_out;         /* optional PID/process ID, filled immediately after spawn */
-    int quiet_timeout_ms;        /* <= 0 => no timeout; else kill+HANG after this many
-                                  * ms with no new completed log line */
-    bool delete_log_on_exit;     /* unlink log_file after reaping */
+    const char *bin;              /* executable path; also argv[0] when argv is NULL */
+    const char *const *argv;      /* NULL-terminated argv; NULL => { bin, NULL } */
+    const char *log_file;         /* child stdout+stderr are redirected here and tailed;
+                                   * NULL => discard child output, no tailing */
+    cbm_proc_log_cb on_log_line;  /* optional per-line callback */
+    void *log_ud;                 /* user data for on_log_line */
+    long *child_pid_out;          /* optional PID/process ID, filled immediately after spawn */
+    cbm_proc_pid_cb on_child_pid; /* optional callback, invoked in the parent after spawn */
+    void *child_pid_ud;           /* callback context */
+    int quiet_timeout_ms;         /* <= 0 => no timeout; else kill+HANG after this many
+                                   * ms with no new completed log line */
+    bool delete_log_on_exit;      /* unlink log_file after reaping */
 } cbm_proc_opts_t;
 
 /* Spawn opts->bin, supervise (tail + optional quiet-timeout), block until it ends,

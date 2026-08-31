@@ -4,6 +4,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
 #include "mcp/http_transport.h"
+#include "mcp/remote_auth.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,31 @@ static int live_server_start(live_server_t *live, const char *audit_path) {
         .bind_addr = "127.0.0.1",
         .port = 0,
         .auth_token = TEST_TOKEN,
+        .audit_log_path = audit_path,
+        .trusted_proxies = "",
+        .session_ttl_sec = 60,
+        .max_sessions = 4,
+        .max_workers = 4,
+        .tool_profile = CBM_MCP_TOOL_PROFILE_ANALYSIS,
+    };
+    live->server = cbm_mcp_http_server_new(&config);
+    if (!live->server)
+        return -1;
+    if (cbm_thread_create(&live->thread, 0, run_live_server, live->server) != 0) {
+        cbm_mcp_http_server_free(live->server);
+        live->server = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static int live_server_start_managed(live_server_t *live, const char *auth_path,
+                                     const char *audit_path) {
+    cbm_mcp_http_config_t config = {
+        .bind_addr = "127.0.0.1",
+        .port = 0,
+        .auth_token = NULL,
+        .auth_store_path = auth_path,
         .audit_log_path = audit_path,
         .trusted_proxies = "",
         .session_ttl_sec = 60,
@@ -230,6 +256,114 @@ TEST(mcp_http_config_fails_closed) {
     PASS();
 }
 
+TEST(mcp_remote_auth_key_lifecycle_and_fail_closed_reload) {
+    char tempdir[256] = "build/c/cbm-remote-auth-XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(tempdir));
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/auth.json", tempdir);
+    cbm_remote_auth_store_t *store = cbm_remote_auth_store_open(path, true);
+    ASSERT_NOT_NULL(store);
+    const char *projects[] = {"demo"};
+    cbm_remote_key_options_t options = {
+        .principal = "alice",
+        .kind = "user",
+        .tool_profile = CBM_MCP_TOOL_PROFILE_ANALYSIS,
+        .source_read = true,
+        .projects = projects,
+        .project_count = 1,
+    };
+    char *plaintext = NULL;
+    char key_id[CBM_REMOTE_KEY_ID_LEN + 1];
+    ASSERT_EQ(cbm_remote_auth_create_key(store, &options, &plaintext, key_id), 0);
+    ASSERT_NOT_NULL(plaintext);
+    ASSERT_TRUE(strncmp(plaintext, "cbm_", 4) == 0);
+    cbm_remote_identity_t identity;
+    memset(&identity, 0, sizeof(identity));
+    ASSERT_TRUE(cbm_remote_auth_authenticate(store, plaintext, &identity));
+    ASSERT_STR_EQ(identity.principal, "alice");
+    ASSERT_TRUE(cbm_remote_identity_project_allowed(&identity, "demo"));
+    ASSERT_FALSE(cbm_remote_identity_project_allowed(&identity, "other"));
+    cbm_remote_identity_free(&identity);
+    ASSERT_EQ(cbm_remote_auth_revoke_key(store, key_id), 0);
+    ASSERT_FALSE(cbm_remote_auth_authenticate(store, plaintext, &identity));
+    memset(plaintext, 0, strlen(plaintext));
+    free(plaintext);
+
+    /* A changed, malformed store must not leave the last valid key usable. */
+    FILE *bad = cbm_fopen(path, "wb");
+    ASSERT_NOT_NULL(bad);
+    ASSERT_TRUE(fputs("{\"version\":1,\"keys\":", bad) >= 0);
+    ASSERT_EQ(fclose(bad), 0);
+    ASSERT_FALSE(cbm_remote_auth_authenticate(store, "cbm_invalid", &identity));
+    ASSERT_NULL(cbm_remote_auth_list_json(store));
+    cbm_remote_auth_store_close(store);
+    th_cleanup(tempdir);
+    PASS();
+}
+
+TEST(mcp_http_managed_key_is_bound_to_session_and_acl) {
+    char tempdir[256] = "build/c/cbm-managed-http-XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(tempdir));
+    char auth_path[1024];
+    char audit_path[1024];
+    snprintf(auth_path, sizeof(auth_path), "%s/auth.json", tempdir);
+    snprintf(audit_path, sizeof(audit_path), "%s/audit.jsonl", tempdir);
+    cbm_remote_auth_store_t *store = cbm_remote_auth_store_open(auth_path, true);
+    ASSERT_NOT_NULL(store);
+    const char *projects[] = {"demo"};
+    cbm_remote_key_options_t options = {
+        .principal = "alice",
+        .kind = "user",
+        .tool_profile = CBM_MCP_TOOL_PROFILE_ANALYSIS,
+        .source_read = true,
+        .projects = projects,
+        .project_count = 1,
+    };
+    char *plaintext = NULL;
+    char key_id[CBM_REMOTE_KEY_ID_LEN + 1];
+    ASSERT_EQ(cbm_remote_auth_create_key(store, &options, &plaintext, key_id), 0);
+    cbm_remote_auth_store_close(store);
+
+    live_server_t live;
+    memset(&live, 0, sizeof(live));
+    ASSERT_EQ(live_server_start_managed(&live, auth_path, audit_path), 0);
+    char response[65536];
+    const char *initialize =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{"
+        "\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{"
+        "\"name\":\"test\",\"version\":\"1\"}}}";
+    ASSERT_GT(post_json(cbm_mcp_http_server_port(live.server), plaintext, NULL, NULL, initialize,
+                        response, sizeof(response)),
+              0);
+    ASSERT_EQ(response_status(response), 200);
+    char session[128];
+    ASSERT_TRUE(response_header(response, "Mcp-Session-Id:", session, sizeof(session)));
+
+    const char *tools = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}";
+    ASSERT_GT(post_json(cbm_mcp_http_server_port(live.server), plaintext, session, NULL, tools,
+                        response, sizeof(response)),
+              0);
+    ASSERT_EQ(response_status(response), 200);
+    ASSERT_NOT_NULL(strstr(response, "\"name\":\"search_code\""));
+    ASSERT_NULL(strstr(response, "\"name\":\"index_repository\""));
+
+    /* Project ACL is enforced before the handler, even with an alternate key spelling. */
+    const char *call = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{"
+                       "\"name\":\"search_graph\",\"arguments\":{\"projectName\":\"other\","
+                       "\"name_pattern\":\".*\"}}}";
+    ASSERT_GT(post_json(cbm_mcp_http_server_port(live.server), plaintext, session, NULL, call,
+                        response, sizeof(response)),
+              0);
+    ASSERT_EQ(response_status(response), 200);
+    ASSERT_NOT_NULL(strstr(response, "project is unavailable"));
+
+    live_server_stop(&live);
+    memset(plaintext, 0, strlen(plaintext));
+    free(plaintext);
+    th_cleanup(tempdir);
+    PASS();
+}
+
 TEST(mcp_http_live_auth_session_tools_and_audit) {
     char tempdir[256] = "build/c/cbm-mcp-http-XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(tempdir));
@@ -291,5 +425,7 @@ SUITE(mcp_http) {
     RUN_TEST(mcp_http_bearer_auth_is_strict);
     RUN_TEST(mcp_http_proxy_ip_requires_trusted_peer);
     RUN_TEST(mcp_http_config_fails_closed);
+    RUN_TEST(mcp_remote_auth_key_lifecycle_and_fail_closed_reload);
+    RUN_TEST(mcp_http_managed_key_is_bound_to_session_and_acl);
     RUN_TEST(mcp_http_live_auth_session_tools_and_audit);
 }

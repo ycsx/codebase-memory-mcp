@@ -73,7 +73,7 @@ function IndexedAt({
 
 function HealthDot({ name }: { name: string }) {
   const t = useUiMessages();
-  const [status, setStatus] = useState<"loading" | "healthy" | "corrupt" | "missing">("loading");
+  const [status, setStatus] = useState<"loading" | "indexing" | "healthy" | "corrupt" | "missing">("loading");
   const [info, setInfo] = useState("");
 
   useEffect(() => {
@@ -1000,6 +1000,7 @@ interface ProjectUpdateResponse {
   source: "local" | "remote";
 }
 
+const PROJECT_UPDATE_POLL_MS = 250;
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function waitForProjectUpdate(job: ProjectUpdateResponse): Promise<void> {
@@ -1016,7 +1017,7 @@ async function waitForProjectUpdate(job: ProjectUpdateResponse): Promise<void> {
     if (current?.status === "error") {
       throw new Error(current.error || "Indexing failed");
     }
-    await wait(1000);
+    await wait(PROJECT_UPDATE_POLL_MS);
   }
   throw new Error("Index update timed out");
 }

@@ -390,11 +390,37 @@ describe("StatsTab project updates", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/index-status");
   });
 
+  it("shows updating only on the selected project card", async () => {
+    mockIndexedProjects(["alpha", "beta"]);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith("/api/project-update")) {
+        return new Promise<Response>(() => {});
+      }
+      return originalFetch(input, init);
+    }));
+
+    render(<StatsTab onSelectProject={() => {}} />);
+    const cards = await screen.findAllByRole("article");
+    fireEvent.click(within(cards[0]).getByRole("button", {
+      name: messages.en.projects.updateGraph,
+    }));
+
+    expect(within(cards[0]).getByRole("button", {
+      name: messages.en.projects.updating,
+    })).toBeDisabled();
+    expect(within(cards[1]).getByRole("button", {
+      name: messages.en.projects.updateGraph,
+    })).toBeEnabled();
+  });
+
   it("updates all projects sequentially", async () => {
     const { updateRequests } = mockIndexedProjects(["alpha", "beta"]);
     render(<StatsTab onSelectProject={() => {}} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: messages.en.projects.updateAll }));
+    const updateAllButton = await screen.findByRole("button", { name: messages.en.projects.updateAll });
+    await waitFor(() => expect(updateAllButton).toBeEnabled());
+    fireEvent.click(updateAllButton);
 
     expect(await screen.findByText(messages.en.projects.updateAllComplete(2, 2))).toBeInTheDocument();
     expect(updateRequests).toEqual(["alpha", "beta"]);

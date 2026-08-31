@@ -20,6 +20,7 @@
 #include "cbm.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
 #include "mcp/mcp.h"
 #include "mcp/http_transport.h"
+#include "mcp/remote_auth.h"
 #include "mcp/index_supervisor.h"
 #include "watcher/watcher.h"
 #include "pipeline/pipeline.h"
@@ -544,6 +545,7 @@ static void print_help(void) {
     printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run]\n");
     printf("  codebase-memory-mcp update [-y|-n]\n");
     printf("  codebase-memory-mcp config <list|get|set|reset>\n");
+    printf("  codebase-memory-mcp remote-key <create|list|revoke|rotate> [options]\n");
     printf("  codebase-memory-mcp --version    Print version\n");
     printf("  codebase-memory-mcp --help       Print this help\n");
     printf("\nUI options:\n");
@@ -555,6 +557,7 @@ static void print_help(void) {
     printf("\nRemote MCP options:\n");
     printf("  serve --bind=ADDR --port=N [--tool-profile=analysis|scout]\n");
     printf("  Requires CBM_MCP_AUTH_TOKEN and CBM_MCP_AUDIT_LOG in the environment\n");
+    printf("  Managed keys: set CBM_MCP_AUTH_STORE (or use remote-key to create one)\n");
     printf("\nSupported automatic/conditional client surfaces (43):\n");
     printf("  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,\n");
     printf("  Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf,\n");
@@ -570,11 +573,187 @@ static void print_help(void) {
     printf("  Manual/UI MCP boundaries: Qodo, Warp, JetBrains AI/ACP, Replit,\n");
     printf("  Plandex, SWE-agent, BLACKBOX, GitHub cloud agents, Jules,\n");
     printf("  CodeRabbit.\n");
-    printf("\nTools (18): index_repository, search_graph, query_graph, trace_path,\n");
+    printf("\nTools (19): index_repository, search_graph, query_graph, trace_path,\n");
     printf("  get_code_snippet, get_graph_schema, get_architecture, search_code,\n");
     printf("  list_projects, delete_project, index_status, detect_changes,\n");
     printf("  explain_impact, build_context, review_change, check_index_coverage, manage_adr, "
            "ingest_traces\n");
+}
+
+static void print_remote_key_help(void) {
+    printf("Usage: codebase-memory-mcp remote-key <create|list|revoke|rotate> [options]\n");
+    printf("  --store=PATH          Key store (default: cache/remote-auth.json)\n");
+    printf("  create options: --principal=NAME --kind=user|ci|admin\n");
+    printf("    --profile=analysis|scout --projects=A,B or *\n");
+    printf("    --source-read --index --delete --admin\n");
+    printf("  revoke/rotate: <key-id>\n");
+    printf("  The plaintext key is printed once for create/rotate.\n");
+}
+
+static char *remote_key_strdup(const char *value) {
+    if (!value) {
+        return NULL;
+    }
+    size_t len = strlen(value);
+    char *copy = malloc(len + 1U);
+    if (copy) {
+        memcpy(copy, value, len + 1U);
+    }
+    return copy;
+}
+
+static int run_remote_key(int argc, char **argv) {
+    if (argc <= 0 || !argv || strcmp(argv[0], "--help") == 0 || strcmp(argv[0], "-h") == 0) {
+        print_remote_key_help();
+        return argc <= 0 ? 2 : 0;
+    }
+    const char *operation = argv[0];
+    if (strcmp(operation, "create") != 0 && strcmp(operation, "list") != 0 &&
+        strcmp(operation, "revoke") != 0 && strcmp(operation, "rotate") != 0) {
+        fprintf(stderr, "remote-key: unknown operation: %s\n", operation);
+        print_remote_key_help();
+        return 2;
+    }
+    const char *store_path = NULL;
+    char store_path_buf[CBM_SZ_2K];
+    char principal_buf[CBM_REMOTE_PRINCIPAL_MAX] = "local-admin";
+    char kind_buf[CBM_REMOTE_KIND_MAX] = "admin";
+    char profile_buf[16] = "analysis";
+    char *projects_buf = NULL;
+    bool source_read = false;
+    bool index_write = false;
+    bool delete_write = false;
+    bool admin = false;
+    const char *key_id = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
+            print_remote_key_help();
+            free(projects_buf);
+            return 0;
+        }
+        if (strncmp(arg, "--store=", SLEN("--store=")) == 0) {
+            store_path = arg + SLEN("--store=");
+        } else if (strncmp(arg, "--principal=", SLEN("--principal=")) == 0) {
+            snprintf(principal_buf, sizeof(principal_buf), "%s", arg + SLEN("--principal="));
+        } else if (strncmp(arg, "--kind=", SLEN("--kind=")) == 0) {
+            snprintf(kind_buf, sizeof(kind_buf), "%s", arg + SLEN("--kind="));
+        } else if (strncmp(arg, "--profile=", SLEN("--profile=")) == 0) {
+            snprintf(profile_buf, sizeof(profile_buf), "%s", arg + SLEN("--profile="));
+        } else if (strncmp(arg, "--projects=", SLEN("--projects=")) == 0) {
+            free(projects_buf);
+            projects_buf = remote_key_strdup(arg + SLEN("--projects="));
+        } else if (strcmp(arg, "--source-read") == 0) {
+            source_read = true;
+        } else if (strcmp(arg, "--index") == 0) {
+            index_write = true;
+        } else if (strcmp(arg, "--delete") == 0) {
+            delete_write = true;
+        } else if (strcmp(arg, "--admin") == 0) {
+            admin = true;
+        } else if (arg[0] != '-' && !key_id) {
+            key_id = arg;
+        } else {
+            fprintf(stderr, "remote-key: unknown option: %s\n", arg);
+            free(projects_buf);
+            return 2;
+        }
+    }
+    if (!store_path || !store_path[0]) {
+        if (!cbm_remote_auth_default_path(store_path_buf, sizeof(store_path_buf))) {
+            fprintf(stderr, "remote-key: cannot resolve default key store path\n");
+            free(projects_buf);
+            return 1;
+        }
+        store_path = store_path_buf;
+    }
+    cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
+    cbm_remote_auth_store_t *store = cbm_remote_auth_store_open(store_path, true);
+    if (!store) {
+        fprintf(stderr, "remote-key: cannot open key store: %s\n", store_path);
+        free(projects_buf);
+        return 1;
+    }
+    int rc = 0;
+    if (strcmp(operation, "list") == 0) {
+        char *json = cbm_remote_auth_list_json(store);
+        if (!json) {
+            rc = 1;
+        } else {
+            puts(json);
+            free(json);
+        }
+    } else if ((strcmp(operation, "revoke") == 0 || strcmp(operation, "rotate") == 0) && !key_id) {
+        fprintf(stderr, "remote-key: %s requires a key id\n", operation);
+        rc = 2;
+    } else if (strcmp(operation, "revoke") == 0) {
+        rc = cbm_remote_auth_revoke_key(store, key_id) == 0 ? 0 : 1;
+    } else if (strcmp(operation, "rotate") == 0) {
+        char *plaintext = NULL;
+        char new_id[CBM_REMOTE_KEY_ID_LEN + 1];
+        rc = cbm_remote_auth_rotate_key(store, key_id, &plaintext, new_id) == 0 ? 0 : 1;
+        if (rc == 0) {
+            printf("key_id=%s\nkey=%s\n", new_id, plaintext);
+            memset(plaintext, 0, strlen(plaintext));
+            free(plaintext);
+        }
+    } else {
+        if (!projects_buf) {
+            projects_buf = remote_key_strdup("*");
+        }
+        if (!projects_buf) {
+            rc = 1;
+        } else {
+            const char *projects[64];
+            size_t project_count = 0;
+            char *cursor = projects_buf;
+            while (cursor && *cursor && project_count < sizeof(projects) / sizeof(projects[0])) {
+                projects[project_count++] = cursor;
+                char *comma = strchr(cursor, ',');
+                if (!comma) {
+                    break;
+                }
+                *comma = '\0';
+                cursor = comma + 1;
+            }
+            if (project_count == 0) {
+                rc = 2;
+            } else {
+                if (strcmp(kind_buf, "admin") == 0) {
+                    admin = true;
+                    source_read = true;
+                    index_write = true;
+                    delete_write = true;
+                }
+                cbm_mcp_tool_profile_t profile = strcmp(profile_buf, "scout") == 0
+                                                     ? CBM_MCP_TOOL_PROFILE_SCOUT
+                                                     : CBM_MCP_TOOL_PROFILE_ANALYSIS;
+                cbm_remote_key_options_t options = {
+                    .principal = principal_buf,
+                    .kind = kind_buf,
+                    .tool_profile = profile,
+                    .source_read = source_read,
+                    .index_write = index_write,
+                    .delete_write = delete_write,
+                    .admin = admin,
+                    .projects = projects,
+                    .project_count = project_count,
+                };
+                char *plaintext = NULL;
+                char new_id[CBM_REMOTE_KEY_ID_LEN + 1];
+                rc = cbm_remote_auth_create_key(store, &options, &plaintext, new_id) == 0 ? 0 : 1;
+                if (rc == 0) {
+                    printf("key_id=%s\nkey=%s\n", new_id, plaintext);
+                    memset(plaintext, 0, strlen(plaintext));
+                    free(plaintext);
+                }
+            }
+        }
+    }
+    cbm_remote_auth_store_close(store);
+    free(projects_buf);
+    return rc;
 }
 
 static int positive_env_int(const char *name, int fallback, int maximum) {
@@ -632,15 +811,19 @@ static int run_remote_mcp(int argc, char **argv) {
     }
 
     char token_buf[1024];
+    char auth_store_buf[CBM_SZ_2K];
     char audit_log_buf[CBM_SZ_2K];
     char trusted_proxies_buf[CBM_SZ_1K];
     const char *token = cbm_safe_getenv("CBM_MCP_AUTH_TOKEN", token_buf, sizeof(token_buf), NULL);
+    const char *auth_store =
+        cbm_safe_getenv("CBM_MCP_AUTH_STORE", auth_store_buf, sizeof(auth_store_buf), NULL);
     const char *audit_log =
         cbm_safe_getenv("CBM_MCP_AUDIT_LOG", audit_log_buf, sizeof(audit_log_buf), NULL);
     const char *trusted_proxies = cbm_safe_getenv("CBM_MCP_TRUSTED_PROXIES", trusted_proxies_buf,
                                                   sizeof(trusted_proxies_buf), "");
-    if (!token || strlen(token) < 32U) {
-        fprintf(stderr, "codebase-memory-mcp: CBM_MCP_AUTH_TOKEN must contain at least 32 bytes\n");
+    if ((!token || strlen(token) < 32U) && (!auth_store || auth_store[0] == '\0')) {
+        fprintf(stderr, "codebase-memory-mcp: set CBM_MCP_AUTH_TOKEN (32+ bytes) or "
+                        "CBM_MCP_AUTH_STORE\n");
         return 2;
     }
     if (!audit_log || audit_log[0] == '\0') {
@@ -652,6 +835,7 @@ static int run_remote_mcp(int argc, char **argv) {
         .bind_addr = bind_addr,
         .port = port,
         .auth_token = token,
+        .auth_store_path = auth_store,
         .audit_log_path = audit_log,
         .trusted_proxies = trusted_proxies,
         .session_ttl_sec = positive_env_int("CBM_MCP_SESSION_TTL_SEC",
@@ -841,6 +1025,9 @@ static int handle_subcommand(int argc, char **argv) {
         }
         if (strcmp(argv[i], "config") == 0) {
             return cbm_cmd_config(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
+        }
+        if (strcmp(argv[i], "remote-key") == 0) {
+            return run_remote_key(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
         }
     }
     return CBM_NOT_FOUND;

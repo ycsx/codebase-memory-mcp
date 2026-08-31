@@ -443,24 +443,22 @@ TEST(mcp_tools_have_behavior_annotations) {
         bool open_world;
     } expected[] = {
         {"index_repository", false, false, true, false},
-        /* These query tools can reach resolve_store(), whose corrupt-store
-         * recovery quarantines/removes database files. Keep the annotations
-         * conservative until query resolution is strictly non-mutating. */
-        {"search_graph", false, true, true, false},
-        {"query_graph", false, true, true, false},
-        {"trace_path", false, true, true, false},
-        {"explain_impact", false, true, true, false},
-        {"get_code_snippet", false, true, true, false},
-        {"get_graph_schema", false, true, true, false},
-        {"get_architecture", false, true, true, false},
-        {"search_code", false, true, true, false},
+        {"search_graph", true, false, true, false},
+        {"query_graph", true, false, true, false},
+        {"trace_path", true, false, true, false},
+        {"explain_impact", true, false, true, false},
+        {"get_code_snippet", true, false, true, false},
+        {"get_graph_schema", true, false, true, false},
+        {"get_architecture", true, false, true, false},
+        {"search_code", true, false, true, false},
+        {"get_document", true, false, true, false},
         {"list_projects", true, false, true, false},
         {"delete_project", false, true, true, false},
-        {"index_status", false, true, true, false},
-        {"check_index_coverage", false, true, true, false},
-        {"build_context", false, true, true, false},
-        {"review_change", false, true, true, false},
-        {"detect_changes", false, true, true, false},
+        {"index_status", true, false, true, false},
+        {"check_index_coverage", true, false, true, false},
+        {"build_context", true, false, true, false},
+        {"review_change", true, false, true, false},
+        {"detect_changes", true, false, true, false},
         {"manage_adr", false, true, false, false},
         {"ingest_traces", false, false, false, false},
     };
@@ -1137,10 +1135,10 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
         "{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":201"));
-    /* W3 adds the seventeenth tool, so the second eight-item page advertises
-     * the final one-item page through nextCursor. */
+    /* The first page contains eight tools; the second page advertises the
+     * final three-item page through nextCursor. */
     ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\":\"16\""));
-    ASSERT_NOT_NULL(strstr(resp, "detect_changes"));
+    ASSERT_NOT_NULL(strstr(resp, "index_status"));
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/"
@@ -1148,6 +1146,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":203"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
+    ASSERT_NOT_NULL(strstr(resp, "detect_changes"));
     ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
     ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
     free(resp);
@@ -1172,11 +1171,10 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":220,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",      "trace_path",           "explain_impact",
-        "build_context",    "review_change",     "get_code_snippet",    "get_graph_schema",
-        "get_architecture",
-        "search_code",      "list_projects",    "index_status",         "check_index_coverage",
-        "detect_changes",
+        "search_graph",     "query_graph",          "trace_path",       "explain_impact",
+        "build_context",    "review_change",        "get_code_snippet", "get_graph_schema",
+        "get_architecture", "search_code",          "get_document",     "list_projects",
+        "index_status",     "check_index_coverage", "detect_changes",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1188,7 +1186,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
                                       "\"params\":{\"name\":\"delete_project\","
                                       "\"arguments\":{\"project\":\"anything\"}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not available in the analysis tool profile"));
+    ASSERT_NOT_NULL(strstr(resp, "not available for this remote identity or tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
@@ -1215,7 +1213,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":223,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 9U);
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search_graph"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace_path"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "explain_impact"));
@@ -1224,6 +1222,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "list_projects"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index_status"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "check_index_coverage"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_document"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_code"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_graph_schema"));
@@ -1234,7 +1233,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":224,\"method\":\"tools/call\","
                                       "\"params\":{\"name\":\"query_graph\",\"arguments\":{}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not available in the scout tool profile"));
+    ASSERT_NOT_NULL(strstr(resp, "not available for this remote identity or tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
@@ -1326,7 +1325,7 @@ TEST(server_handle_prompts_get_workflows) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "refund retry policy"));
     ASSERT_NOT_NULL(strstr(resp, "develop"));
-    ASSERT_NOT_NULL(strstr(resp, "detect_changes"));
+    ASSERT_NOT_NULL(strstr(resp, "review_change"));
     ASSERT_NOT_NULL(strstr(resp, "trace_path"));
     ASSERT_NOT_NULL(strstr(resp, "include_tests"));
     free(resp);
@@ -1714,6 +1713,73 @@ TEST(tool_search_graph_query_honors_file_pattern_issue552) {
     PASS();
 }
 
+TEST(tool_get_document_returns_ordered_sections) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *project = "document-api";
+    cbm_mcp_server_set_project(srv, project);
+    ASSERT_EQ(cbm_store_upsert_project(st, project, "/tmp/document-api"), CBM_STORE_OK);
+
+    cbm_node_t document = {.project = project,
+                           .label = "Document",
+                           .name = "guide.md",
+                           .qualified_name = "document-api.docs/guide.md.__document__",
+                           .file_path = "docs/guide.md"};
+    int64_t document_id = cbm_store_upsert_node(st, &document);
+    ASSERT_GT(document_id, 0);
+
+    cbm_node_t later = {.project = project,
+                        .label = "Section",
+                        .name = "Usage",
+                        .qualified_name = "document-api.docs/guide.md.Usage",
+                        .file_path = "docs/guide.md",
+                        .start_line = 8,
+                        .end_line = 14,
+                        .properties_json = "{\"heading_level\":2,\"anchor\":\"usage\"}"};
+    int64_t later_id = cbm_store_upsert_node(st, &later);
+    ASSERT_GT(later_id, 0);
+
+    cbm_node_t first = {.project = project,
+                        .label = "Section",
+                        .name = "Overview",
+                        .qualified_name = "document-api.docs/guide.md.Overview",
+                        .file_path = "docs/guide.md",
+                        .start_line = 2,
+                        .end_line = 7,
+                        .properties_json = "{\"heading_level\":1,\"anchor\":\"overview\"}"};
+    int64_t first_id = cbm_store_upsert_node(st, &first);
+    ASSERT_GT(first_id, 0);
+
+    cbm_edge_t edge = {.project = project,
+                       .source_id = document_id,
+                       .target_id = later_id,
+                       .type = "CONTAINS_SECTION",
+                       .properties_json = "{}"};
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+    edge.target_id = first_id;
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+
+    char *resp = cbm_mcp_handle_tool(srv, "get_document",
+                                     "{\"project\":\"document-api\",\"path\":\"docs/guide.md\"}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"path\":\"docs/guide.md\""));
+    const char *overview = strstr(inner, "\"title\":\"Overview\"");
+    const char *usage = strstr(inner, "\"title\":\"Usage\"");
+    ASSERT_NOT_NULL(overview);
+    ASSERT_NOT_NULL(usage);
+    ASSERT_TRUE(overview < usage);
+    ASSERT_NOT_NULL(strstr(inner, "\"anchor\":\"overview\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"heading_level\":2"));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* Resource discovery methods this server doesn't populate must return EMPTY
  * lists, not -32601 Method-not-found: clients like Cline probe them on connect
  * and surface the errors as a failed connection (#958). */
@@ -1752,7 +1818,31 @@ TEST(tool_query_graph_basic) {
              "\"arguments\":{\"query\":\"MATCH (f:Function) RETURN f.name\"}}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"result\""));
+    ASSERT_NOT_NULL(strstr(resp, "project is required"));
+    ASSERT_NULL(strstr(resp, "available_projects"));
     free(resp);
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_dispatch_normalizes_null_arguments) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *resp = cbm_mcp_handle_tool(srv, "query_graph", NULL);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "query is required"));
+    free(resp);
+
+    ASSERT_NULL(cbm_mcp_get_tool_name(NULL));
+    char *arguments = cbm_mcp_get_arguments(NULL);
+    ASSERT_NOT_NULL(arguments);
+    ASSERT_STR_EQ(arguments, "{}");
+    free(arguments);
+    ASSERT_NULL(cbm_mcp_get_string_arg(NULL, "project"));
+    ASSERT_EQ(cbm_mcp_get_int_arg(NULL, "limit", 17), 17);
+    ASSERT_FALSE(cbm_mcp_get_bool_arg(NULL, "enabled"));
 
     cbm_mcp_server_free(srv);
     PASS();
@@ -2164,11 +2254,11 @@ TEST(tool_cross_project_trace_and_impact_resolve_target_graph) {
     ASSERT_GT(cbm_store_insert_edge(source_store, &forward), 0);
     ASSERT_GT(cbm_store_insert_edge(source_store, &reverse), 0);
 
-    char *trace = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":701,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"trace_path\",\"arguments\":{"
-             "\"function_name\":\"main.js\",\"project\":\"cross-source\","
-             "\"direction\":\"both\",\"format\":\"json\"}}}");
+    char *trace =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":701,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"trace_path\",\"arguments\":{"
+                                   "\"function_name\":\"main.js\",\"project\":\"cross-source\","
+                                   "\"direction\":\"both\",\"format\":\"json\"}}}");
     ASSERT_NOT_NULL(trace);
     char *trace_inner = extract_text_content(trace);
     ASSERT_NOT_NULL(trace_inner);
@@ -2180,10 +2270,10 @@ TEST(tool_cross_project_trace_and_impact_resolve_target_graph) {
     free(trace_inner);
     free(trace);
 
-    char *impact = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":702,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
-             "\"query\":\"main.js\",\"project\":\"cross-source\"}}}");
+    char *impact =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":702,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"explain_impact\",\"arguments\":{"
+                                   "\"query\":\"main.js\",\"project\":\"cross-source\"}}}");
     ASSERT_NOT_NULL(impact);
     char *impact_inner = extract_text_content(impact);
     ASSERT_NOT_NULL(impact_inner);
@@ -2352,10 +2442,10 @@ TEST(tool_build_context_rejects_invalid_token_budget) {
 TEST(tool_review_change_rejects_invalid_token_budget) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
-    char *resp = cbm_mcp_server_handle(
-        srv, "{\"jsonrpc\":\"2.0\",\"id\":629,\"method\":\"tools/call\","
-             "\"params\":{\"name\":\"review_change\",\"arguments\":{"
-             "\"project\":\"w4-budget\",\"token_budget\":0}}}");
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":629,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"review_change\",\"arguments\":{"
+                                   "\"project\":\"w4-budget\",\"token_budget\":0}}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     ASSERT_NOT_NULL(strstr(resp, "token_budget"));
@@ -2446,8 +2536,8 @@ TEST(tool_build_context_budget_result_has_analysis_meta_and_limitations) {
                          .end_line = 60};
     cbm_node_t caller = {.project = proj,
                          .label = "Function",
-                         .name = "openPage",
-                         .qualified_name = "context-budget.routes.openPage",
+                         .name = "renderPanel",
+                         .qualified_name = "context-budget.routes.renderPanel",
                          .file_path = "src/routes.c",
                          .start_line = 1,
                          .end_line = 20};
@@ -2463,7 +2553,7 @@ TEST(tool_build_context_budget_result_has_analysis_meta_and_limitations) {
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":627,\"method\":\"tools/call\","
                                    "\"params\":{\"name\":\"build_context\",\"arguments\":{"
                                    "\"project\":\"context-budget\",\"task\":\"change renderPanel\","
-                                   "\"target\":\"renderPanel\",\"token_budget\":1,"
+                                   "\"target\":\"renderPanel\",\"token_budget\":120,"
                                    "\"evidence_level\":\"analysis\"}}}");
     ASSERT_NOT_NULL(resp);
     char *inner = extract_text_content(resp);
@@ -2472,6 +2562,7 @@ TEST(tool_build_context_budget_result_has_analysis_meta_and_limitations) {
     ASSERT_NOT_NULL(strstr(inner, "limitations"));
     ASSERT_NOT_NULL(strstr(inner, "token_budget"));
     ASSERT_NOT_NULL(strstr(inner, "truncated"));
+    ASSERT_NOT_NULL(strstr(inner, "\"neighbors_complete\":true"));
     free(inner);
     free(resp);
     cbm_mcp_server_free(srv);
@@ -2797,13 +2888,12 @@ TEST(tool_trace_path_evidence_is_opt_in_and_class_mapped) {
     int64_t callee_id = cbm_store_upsert_node(st, &callee);
     ASSERT_GT(caller_id, 0);
     ASSERT_GT(callee_id, 0);
-    cbm_edge_t edge = {
-        .project = proj,
-        .source_id = caller_id,
-        .target_id = callee_id,
-        .type = "CALLS",
-        .properties_json = "{\"callee\":\"target\",\"confidence\":0.95,"
-                           "\"strategy\":\"lsp_trait_dispatch\",\"candidates\":1}"};
+    cbm_edge_t edge = {.project = proj,
+                       .source_id = caller_id,
+                       .target_id = callee_id,
+                       .type = "CALLS",
+                       .properties_json = "{\"callee\":\"target\",\"confidence\":0.95,"
+                                          "\"strategy\":\"lsp_trait_dispatch\",\"candidates\":1}"};
     ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
 
     char *plain = cbm_mcp_server_handle(
@@ -4594,16 +4684,15 @@ TEST(detect_changes_scopes_symbols_to_changed_lines) {
     char source[640];
     snprintf(source, sizeof(source), "%s/mod.py", repo);
     ASSERT_EQ(th_write_file(source, "SETTING = 1\n\n"
-                                        "def foo():\n"
-                                        "    value = 1\n"
-                                        "    return value\n"
-                                        "\n\n"
-                                        "def bar():\n"
-                                        "    value = 2\n"
-                                        "    return value\n"),
+                                    "def foo():\n"
+                                    "    value = 1\n"
+                                    "    return value\n"
+                                    "\n\n"
+                                    "def bar():\n"
+                                    "    value = 2\n"
+                                    "    return value\n"),
               0);
-    if (!detect_changes_git_step(repo, "init -q") ||
-        !detect_changes_git_step(repo, "add -A") ||
+    if (!detect_changes_git_step(repo, "init -q") || !detect_changes_git_step(repo, "add -A") ||
         !detect_changes_git_step(repo, "commit -q -m init")) {
         th_rmtree(repo);
         FAIL("git fixture setup failed");
@@ -4640,18 +4729,18 @@ TEST(detect_changes_scopes_symbols_to_changed_lines) {
     ASSERT_GT(cbm_store_upsert_node(st, &bar), 0);
 
     ASSERT_EQ(th_write_file(source, "SETTING = 1\n\n"
-                                        "def foo():\n"
-                                        "    value = 11\n"
-                                        "    return value\n"
-                                        "\n\n"
-                                        "def bar():\n"
-                                        "    value = 2\n"
-                                        "    return value\n"),
+                                    "def foo():\n"
+                                    "    value = 11\n"
+                                    "    return value\n"
+                                    "\n\n"
+                                    "def bar():\n"
+                                    "    value = 2\n"
+                                    "    return value\n"),
               0);
 
-    char *response = cbm_mcp_handle_tool(
-        srv, "detect_changes",
-        "{\"project\":\"detect-scope\",\"base_branch\":\"main\",\"depth\":1}");
+    char *response =
+        cbm_mcp_handle_tool(srv, "detect_changes",
+                            "{\"project\":\"detect-scope\",\"base_branch\":\"main\",\"depth\":1}");
     ASSERT_NOT_NULL(response);
     char *text = extract_text_content(response);
     ASSERT_NOT_NULL(text);
@@ -4665,17 +4754,17 @@ TEST(detect_changes_scopes_symbols_to_changed_lines) {
     /* A module-level-only change overlaps no callable. Fall back to the old
      * whole-file behavior so precision never reduces recall. */
     ASSERT_EQ(th_write_file(source, "SETTING = 2\n\n"
-                                        "def foo():\n"
-                                        "    value = 1\n"
-                                        "    return value\n"
-                                        "\n\n"
-                                        "def bar():\n"
-                                        "    value = 2\n"
-                                        "    return value\n"),
+                                    "def foo():\n"
+                                    "    value = 1\n"
+                                    "    return value\n"
+                                    "\n\n"
+                                    "def bar():\n"
+                                    "    value = 2\n"
+                                    "    return value\n"),
               0);
-    response = cbm_mcp_handle_tool(
-        srv, "detect_changes",
-        "{\"project\":\"detect-scope\",\"base_branch\":\"main\",\"depth\":1}");
+    response =
+        cbm_mcp_handle_tool(srv, "detect_changes",
+                            "{\"project\":\"detect-scope\",\"base_branch\":\"main\",\"depth\":1}");
     ASSERT_NOT_NULL(response);
     text = extract_text_content(response);
     ASSERT_NOT_NULL(text);
@@ -7733,8 +7822,10 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_toon_never_leaks_internal_fields);
     RUN_TEST(tool_output_byte_budgets);
     RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);
+    RUN_TEST(tool_get_document_returns_ordered_sections);
     RUN_TEST(mcp_resource_discovery_methods_return_empty_lists);
     RUN_TEST(tool_query_graph_basic);
+    RUN_TEST(tool_dispatch_normalizes_null_arguments);
     RUN_TEST(tool_index_status_no_project);
     RUN_TEST(tool_check_index_coverage_finds_path_beyond_status_cap);
     RUN_TEST(tool_check_index_coverage_reports_paths_scopes_and_ranges);

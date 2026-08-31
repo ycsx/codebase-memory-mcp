@@ -707,6 +707,42 @@ TEST(ui_server_unknown_path_404) {
     PASS();
 }
 
+TEST(ui_server_admin_probes_and_jobs) {
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    int port = cbm_http_server_port(ts.srv);
+    char resp[16384];
+
+    int n = th_http(port, "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"ok\""));
+
+    n = th_http(port, "GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_NOT_NULL(strstr(resp, "\"status\":\"ready\""));
+
+    n = th_http(port, "GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_NOT_NULL(strstr(resp, "cbm_index_jobs_active"));
+
+    n = th_http(port, "GET /admin/v1/jobs HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp, sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_NOT_NULL(strstr(resp, "["));
+
+    n = th_http(port, "GET /admin/v1/projects HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", resp,
+                sizeof(resp));
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(th_status(resp), 200);
+    ASSERT_NOT_NULL(strstr(resp, "\"projects\""));
+
+    th_server_stop(&ts);
+    PASS();
+}
+
 TEST(ui_server_root_serves_stub_404) {
     /* Test binary links embedded_stub.c → no frontend → 404 with marker */
     th_server_t ts;
@@ -1624,6 +1660,7 @@ SUITE(httpd) {
     /* Full UI server */
     RUN_TEST(ui_server_rejects_non_loopback_host);
     RUN_TEST(ui_server_unknown_path_404);
+    RUN_TEST(ui_server_admin_probes_and_jobs);
     RUN_TEST(ui_server_root_serves_stub_404);
     RUN_TEST(ui_server_cors_localhost_reflected);
     RUN_TEST(ui_server_cors_evil_origin_not_reflected);

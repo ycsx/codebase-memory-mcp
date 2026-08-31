@@ -2,6 +2,10 @@
 
 export interface GraphNode {
   id: number;
+  /** Stable UI identity. Backend IDs are only unique within one project. */
+  graph_key?: string;
+  /** Project owning this node when multiple project graphs are displayed. */
+  graph_project?: string;
   x: number;
   y: number;
   z: number;
@@ -40,6 +44,9 @@ export interface GraphEdge {
   source: number;
   target: number;
   type: string;
+  /** Scoped endpoint identities used by the multi-project UI. */
+  source_key?: string;
+  target_key?: string;
 }
 
 export interface LinkedProject {
@@ -89,4 +96,17 @@ export interface ProcessInfo {
   elapsed: string;
   command: string;
   is_self: boolean;
+}
+
+export type GraphNodeKey = string | number;
+
+/** Keep fixtures and older API payloads compatible while avoiding cross-project
+ * numeric-ID collisions when the backend supplies scoped identities. */
+export function graphNodeKey(node: GraphNode): string {
+  return node.graph_key ?? String(node.id);
+}
+
+export function graphEdgeEndpointKey(edge: GraphEdge, side: "source" | "target"): string {
+  const scoped = side === "source" ? edge.source_key : edge.target_key;
+  return scoped ?? String(side === "source" ? edge.source : edge.target);
 }

@@ -312,6 +312,15 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
         append_json_string(buf, bufsize, &pos, "bt", def->body_tokens);
     }
 
+    if (def->label && strcmp(def->label, "Section") == 0 && pos < bufsize) {
+        int written = snprintf(buf + pos, bufsize - pos, ",\"heading_level\":%d",
+                               def->heading_level > 0 ? def->heading_level : 1);
+        if (written > 0 && (size_t)written < bufsize - pos) {
+            pos += (size_t)written;
+            append_json_string(buf, bufsize, &pos, "anchor", def->anchor);
+        }
+    }
+
     if (pos < bufsize - SKIP_ONE) {
         buf[pos] = '}';
         buf[pos + SKIP_ONE] = '\0';
@@ -346,6 +355,15 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
     const cbm_gbuf_node_t *file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
     if (file_node && node_id > 0) {
         cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, node_id, "DEFINES", "{}");
+        if (def->label && strcmp(def->label, "Section") == 0) {
+            char *doc_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__document__");
+            const cbm_gbuf_node_t *doc_node =
+                doc_qn ? cbm_gbuf_find_by_qn(ctx->gbuf, doc_qn) : NULL;
+            if (doc_node) {
+                cbm_gbuf_insert_edge(ctx->gbuf, doc_node->id, node_id, "CONTAINS_SECTION", "{}");
+            }
+            free(doc_qn);
+        }
     }
     free(file_qn);
     if (def->parent_class && def->label && strcmp(def->label, "Method") == 0) {

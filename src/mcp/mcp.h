@@ -100,6 +100,21 @@ typedef enum {
     CBM_MCP_TOOL_PROFILE_SCOUT = 2,
 } cbm_mcp_tool_profile_t;
 
+/* Per-session authorization copied by cbm_mcp_server_set_authz. An empty
+ * context keeps the local/stdin behavior unrestricted. Remote HTTP sessions
+ * always install an enabled context after authenticating their API key. */
+typedef struct {
+    bool enabled;
+    const char *principal;
+    const char *key_id;
+    const char *const *projects;
+    size_t project_count;
+    bool source_read;
+    bool index_write;
+    bool delete_write;
+    bool admin;
+} cbm_mcp_authz_t;
+
 /* Parse the process-level tool-profile flag. Explicit malformed or unknown
  * values fail closed with -1; absence selects the full default surface. */
 int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
@@ -113,6 +128,10 @@ cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path);
 
 /* Select the tool surface exposed by tools/list and enforced by dispatch. */
 void cbm_mcp_server_set_tool_profile(cbm_mcp_server_t *srv, cbm_mcp_tool_profile_t profile);
+
+/* Install or clear a per-session authorization context. The server owns an
+ * internal copy, so the caller may release the source immediately. */
+bool cbm_mcp_server_set_authz(cbm_mcp_server_t *srv, const cbm_mcp_authz_t *authz);
 
 /* Free an MCP server. */
 void cbm_mcp_server_free(cbm_mcp_server_t *srv);

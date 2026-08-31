@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import type { GraphNode } from "../lib/types";
+import { graphNodeKey, type GraphNode, type GraphNodeKey } from "../lib/types";
 import { nodeGlowBoost } from "../lib/density";
 
 interface NodeCloudProps {
   nodes: GraphNode[];
-  highlightedIds: Set<number> | null;
+  highlightedIds: Set<GraphNodeKey> | null;
   onHover: (node: GraphNode | null) => void;
   onClick: (node: GraphNode) => void;
   opacity?: number;
@@ -29,14 +29,14 @@ function sphereDetail(count: number): [number, number, number] {
 
 function nodeColor(
   node: GraphNode,
-  highlightedIds: Set<number> | null,
+  highlightedIds: Set<GraphNodeKey> | null,
   opacity: number,
   boost: number,
   tempColor: THREE.Color,
 ): [number, number, number] {
   const hasHighlight = highlightedIds && highlightedIds.size > 0;
   tempColor.set(node.color);
-  if (hasHighlight && !highlightedIds.has(node.id)) {
+  if (hasHighlight && !highlightedIds.has(graphNodeKey(node)) && !highlightedIds.has(node.id)) {
     tempColor.multiplyScalar(0.15);
   } else {
     /* Boost above 1.0 so bloom picks up the excess as glow corona. Blue hubs
@@ -189,7 +189,8 @@ function NodeSpheres({
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
       tempObj.position.set(n.x, n.y, n.z);
-      const isHighlighted = !hasHighlight || highlightedIds.has(n.id);
+      const isHighlighted =
+        !hasHighlight || highlightedIds.has(graphNodeKey(n)) || highlightedIds.has(n.id);
       const s = n.size * (isHighlighted ? 0.5 : 0.2);
       tempObj.scale.set(s, s, s);
       tempObj.updateMatrix();
