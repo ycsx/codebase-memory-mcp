@@ -277,12 +277,27 @@ function joinPath(base: string, dir: string): string {
   return `${base.replace(/[\\/]+$/, "")}${slash}${dir}`;
 }
 
+function normalizedPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized === "/" || /^[A-Za-z]:\/$/.test(normalized)) return normalized;
+  return normalized.replace(/\/+$/, "");
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalizedLeft = normalizedPath(left);
+  const normalizedRight = normalizedPath(right);
+  return /^[A-Za-z]:/.test(normalizedLeft) || /^[A-Za-z]:/.test(normalizedRight)
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
 function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const t = useUiMessages();
   const [sourceMode, setSourceMode] = useState<"local" | "remote">("local");
   const [currentPath, setCurrentPath] = useState("");
   const [dirs, setDirs] = useState<string[]>([]);
   const [roots, setRoots] = useState<string[]>(["/"]);
+  const [allowedRoot, setAllowedRoot] = useState<string | null>(null);
   const [parentPath, setParentPath] = useState("");
   const [projectName, setProjectName] = useState("");
   const [remoteUrl, setRemoteUrl] = useState("");
@@ -312,6 +327,7 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
       setDirs((data.dirs ?? []).sort(compareNames));
       setRoots(data.roots ?? ["/"]);
       setParentPath(data.parent ?? "/");
+      setAllowedRoot(typeof data.allowed_root === "string" && data.allowed_root ? data.allowed_root : null);
     } catch (e) {
       /* Silent (typed-path) refreshes keep the last good listing instead of
        * flashing an error while the user is still typing a path. */
@@ -426,6 +442,16 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
     if (!drives.includes(curRoot)) drives.unshift(curRoot);
     return drives;
   })();
+  const restrictedRoot = allowedRoot ? normalizedPath(allowedRoot) : null;
+  const restrictedSegments = restrictedRoot
+    ? normalizedPath(currentPath).slice(restrictedRoot.length).split("/").filter(Boolean)
+    : [];
+  const restrictedCrumbPath = (i: number): string => restrictedSegments
+    .slice(0, i + 1)
+    .reduce((path, segment) => joinPath(path, segment), restrictedRoot ?? "");
+  const canBrowseParent = restrictedRoot
+    ? !samePath(currentPath, restrictedRoot)
+    : currentPath !== "/" && !/^[A-Za-z]:[\\/]?$/.test(currentPath);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
@@ -439,7 +465,9 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
         <div className="px-5 pt-5 pb-3 shrink-0">
           <h3 className="text-[15px] font-semibold text-foreground/90 mb-1">{t.index.createIndex}</h3>
           <p className="text-[12px] text-foreground/30">
-            {sourceMode === "local" ? t.index.instructions : t.index.remoteInstructions}
+            {sourceMode === "local"
+              ? restrictedRoot ? t.index.restrictedInstructions(restrictedRoot) : t.index.instructions
+              : t.index.remoteInstructions}
           </p>
           <div className="inline-flex mt-3 rounded-lg bg-white/[0.04] p-1">
             <button
@@ -468,9 +496,10 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
               <input
                 aria-label={t.index.repositoryPath}
                 value={currentPath}
+                readOnly={Boolean(restrictedRoot)}
                 onChange={(e) => setCurrentPath(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && /^[A-Za-z]:/.test(currentPath.replace(/\\/g, "/"))) { e.preventDefault(); void browse(currentPath); } }}
-                className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground font-mono outline-none focus:border-primary/40"
+                onKeyDown={(e) => { if (!restrictedRoot && e.key === "Enter" && /^[A-Za-z]:/.test(currentPath.replace(/\\/g, "/"))) { e.preventDefault(); void browse(currentPath); } }}
+                className="w-full bg-white/[0.04] border border-white/[0.06] rounded-lg px-3 py-2 text-[12px] text-foreground font-mono outline-none focus:border-primary/40 read-only:cursor-default read-only:text-foreground/55"
               />
             ) : (
               <input
@@ -549,10 +578,27 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
         {/* Breadcrumb */}
         {sourceMode === "local" && <div className="px-5 py-2 border-y border-border/20 flex items-center gap-0.5 overflow-x-auto text-[11px] shrink-0">
-          {!isWinPath && (
+          {restrictedRoot ? (
+            <>
+              <button onClick={() => browse(restrictedRoot)} className="text-primary/60 hover:text-primary shrink-0 transition-colors">
+                {restrictedRoot}
+              </button>
+              {restrictedSegments.map((seg, i) => (
+                <span key={i} className="flex items-center gap-0.5 shrink-0">
+                  <span className="text-foreground/15">/</span>
+                  <button
+                    onClick={() => browse(restrictedCrumbPath(i))}
+                    className={`transition-colors ${i === restrictedSegments.length - 1 ? "text-foreground/70 font-medium" : "text-primary/50 hover:text-primary"}`}
+                  >
+                    {seg}
+                  </button>
+                </span>
+              ))}
+            </>
+          ) : !isWinPath && (
             <button onClick={() => browse("/")} className="text-primary/60 hover:text-primary shrink-0 transition-colors">/</button>
           )}
-          {segments.map((seg, i) => (
+          {!restrictedRoot && segments.map((seg, i) => (
             <span key={i} className="flex items-center gap-0.5 shrink-0">
               {(i > 0 || !isWinPath) && <span className="text-foreground/15">/</span>}
               <button
@@ -569,7 +615,7 @@ function CreateIndexModal({ onClose, onCreated }: { onClose: () => void; onCreat
         {sourceMode === "local" ? <ScrollArea className="flex-1 min-h-0">
           <div className="px-2 py-1">
             {/* Go up */}
-            {currentPath !== "/" && (
+            {canBrowseParent && (
               <button
                 onClick={() => browse(parentPath)}
                 className="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg hover:bg-white/[0.04] text-[12px] text-foreground/40 transition-colors"
@@ -1348,7 +1394,7 @@ export function StatsTab({ onSelectProject }: StatsTabProps) {
           })}
         </div>
       </div>
-      {showModal && <CreateIndexModal onClose={() => setShowModal(false)} onCreated={() => { setIndexing(true); refresh(); }} />}
+      {showModal && <CreateIndexModal onClose={() => setShowModal(false)} onCreated={() => setIndexing(true)} />}
     </ScrollArea>
   );
 }

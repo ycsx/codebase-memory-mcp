@@ -34,6 +34,9 @@ print_env "lint.sh"
 echo "=== no-skips policy (tests pass or fail) ==="
 bash "$ROOT/scripts/check-no-test-skips.sh"
 
+echo "=== Linux server deployment contracts ==="
+bash "$ROOT/tests/test_server_deploy_contract.sh"
+
 if $CI_ONLY; then
     echo "=== CI mode: cppcheck + clang-format ==="
     make -j2 -f Makefile.cbm lint-ci "${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}"

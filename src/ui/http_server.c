@@ -851,8 +851,15 @@ static void handle_process_kill(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
 /* ── Directory browser ────────────────────────────────────────── */
 
-static void append_roots_json(char *buf, size_t bufsz, int *pos) {
+static void append_roots_json(char *buf, size_t bufsz, int *pos, const char *configured_root) {
     http_appendf(buf, bufsz, pos, ",\"roots\":[");
+    if (configured_root && configured_root[0]) {
+        char escaped_root[2048];
+        cbm_json_escape(escaped_root, (int)sizeof(escaped_root), configured_root);
+        http_appendf(buf, bufsz, pos, "\"%s\"", escaped_root);
+        http_appendf(buf, bufsz, pos, "]");
+        return;
+    }
 #ifdef _WIN32
     DWORD drives = GetLogicalDrives();
     int count = 0;
@@ -874,10 +881,25 @@ static void append_roots_json(char *buf, size_t bufsz, int *pos) {
 /* GET /api/browse?path=/some/dir — list subdirectories for file picker */
 static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char path[1024] = {0};
+    char configured_root[1024] = {0};
+    char allowed_root[1024] = {0};
     const char *home = cbm_get_home_dir();
+    cbm_safe_getenv("CBM_ALLOWED_ROOT", allowed_root, sizeof(allowed_root), NULL);
+    if (allowed_root[0]) {
+        char normalized_root[1024];
+        snprintf(normalized_root, sizeof(normalized_root), "%s", allowed_root);
+        cbm_normalize_path_sep(normalized_root);
+        if (!cbm_canonical_path(normalized_root, configured_root, sizeof(configured_root))) {
+            cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"cannot resolve allowed root\"}");
+            return;
+        }
+    }
+    cbm_normalize_path_sep(configured_root);
+
     if (!cbm_http_query_param(req->query, "path", path, (int)sizeof(path)) || path[0] == '\0') {
-        /* Default to home directory */
-        if (home)
+        if (configured_root[0])
+            snprintf(path, sizeof(path), "%s", configured_root);
+        else if (home)
             snprintf(path, sizeof(path), "%s", home);
         else
             snprintf(path, sizeof(path), "/");
@@ -888,6 +910,20 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
      * gate, exactly as the MCP repo_path handler and cbm_project_name_from_path
      * already do — otherwise a real D:/ directory is rejected (#548). */
     cbm_normalize_path_sep(path);
+
+    if (configured_root[0]) {
+        char canonical_path[1024];
+        if (!cbm_canonical_path(path, canonical_path, sizeof(canonical_path))) {
+            cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"cannot resolve directory\"}");
+            return;
+        }
+        cbm_normalize_path_sep(canonical_path);
+        if (!cbm_path_within_root(configured_root, canonical_path)) {
+            cbm_http_replyf(c, 403, g_cors_json, "{\"error\":\"outside allowed root\"}");
+            return;
+        }
+        snprintf(path, sizeof(path), "%s", canonical_path);
+    }
 
     if (!cbm_is_dir(path)) {
         cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"not a directory\"}");
@@ -951,12 +987,22 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     } else {
         snprintf(parent, sizeof(parent), "/");
     }
+    if (configured_root[0] && !cbm_path_within_root(configured_root, parent)) {
+        snprintf(parent, sizeof(parent), "%s", configured_root);
+    }
 
     {
         char esc_parent[2048];
+        char esc_allowed_root[2048];
         cbm_json_escape(esc_parent, (int)sizeof(esc_parent), parent);
         http_appendf(buf, sizeof(buf), &pos, "],\"parent\":\"%s\"", esc_parent);
-        append_roots_json(buf, sizeof(buf), &pos);
+        append_roots_json(buf, sizeof(buf), &pos, configured_root);
+        if (configured_root[0]) {
+            cbm_json_escape(esc_allowed_root, (int)sizeof(esc_allowed_root), configured_root);
+            http_appendf(buf, sizeof(buf), &pos, ",\"allowed_root\":\"%s\"", esc_allowed_root);
+        } else {
+            http_appendf(buf, sizeof(buf), &pos, ",\"allowed_root\":null");
+        }
         http_appendf(buf, sizeof(buf), &pos, "}");
     }
     cbm_http_replyf(c, 200, g_cors_json, "%s", buf);

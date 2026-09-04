@@ -2175,12 +2175,14 @@ TEST(remote_repo_validates_configuration) {
     ASSERT_TRUE(cbm_remote_repo_validate_url("git@example.com:team/repository.git"));
     ASSERT_TRUE(cbm_remote_repo_validate_url("ssh://git@example.com/team/repository.git"));
     ASSERT_TRUE(cbm_remote_repo_validate_url("file:///tmp/repository.git"));
-    ASSERT_FALSE(cbm_remote_repo_validate_url("https://example.com/team/repository.git"));
+    ASSERT_TRUE(cbm_remote_repo_validate_url("https://example.com/team/repository.git"));
+    ASSERT_FALSE(cbm_remote_repo_validate_url("https://user@example.com/team/repository.git"));
+    ASSERT_FALSE(cbm_remote_repo_validate_url("https://example.com/team/repository.git?ref=main"));
     ASSERT_FALSE(cbm_remote_repo_validate_url("git@example.com"));
     ASSERT_FALSE(cbm_remote_repo_validate_url("git@example.com:team/bad repo.git"));
     ASSERT_TRUE(cbm_remote_repo_normalize_url("https://github.com/team/repository.git",
                                               normalized, sizeof(normalized)));
-    ASSERT_STR_EQ(normalized, "git@github.com:team/repository.git");
+    ASSERT_STR_EQ(normalized, "https://github.com/team/repository.git");
     ASSERT_FALSE(cbm_remote_repo_normalize_url("https://example.com:8443/team/repository.git",
                                                normalized, sizeof(normalized)));
 

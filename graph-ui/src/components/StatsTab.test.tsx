@@ -237,9 +237,38 @@ describe("StatsTab index modal", () => {
     expect(browseCalls()).toBe(before);
   });
 
+  it("keeps a server-restricted picker inside its allowed root", async () => {
+    const fetchMock = mockProjectsFetch((url) => {
+      if (!url.startsWith("/api/browse")) return undefined;
+      return new Response(JSON.stringify({
+        path: "/var/lib/codebase-memory-mcp/repos",
+        parent: "/var/lib/codebase-memory-mcp/repos",
+        dirs: ["project-a"],
+        roots: ["/var/lib/codebase-memory-mcp/repos"],
+        allowed_root: "/var/lib/codebase-memory-mcp/repos",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+
+    render(<StatsTab onSelectProject={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Index your first repository" }));
+
+    const pathInput = await screen.findByLabelText("Repository path");
+    expect(pathInput).toHaveAttribute("readonly");
+    expect(screen.queryByRole("button", { name: ".." })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "/" })).not.toBeInTheDocument();
+    expect(screen.getByText(/This server can index \/var\/lib\/codebase-memory-mcp\/repos/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Browse project-a" }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/browse?path=%2Fvar%2Flib%2Fcodebase-memory-mcp%2Frepos%2Fproject-a",
+      );
+    });
+  });
+
   it("submits a remote SSH repository with branch and polling settings", async () => {
     let submitted: unknown = null;
-    mockProjectsFetch((url, init) => {
+    const fetchMock = mockProjectsFetch((url, init) => {
       if (url === "/api/remote-index") {
         submitted = JSON.parse(String(init?.body));
         return new Response(JSON.stringify({ status: "indexing", slot: 0 }), {
@@ -261,6 +290,9 @@ describe("StatsTab index modal", () => {
     });
     fireEvent.change(screen.getByLabelText("Branch"), { target: { value: "main" } });
     fireEvent.change(screen.getByLabelText("Poll interval"), { target: { value: "5" } });
+    const rpcCallsBeforeSubmit = fetchMock.mock.calls.filter(
+      ([url]) => String(url) === "/rpc",
+    ).length;
     fireEvent.click(screen.getByRole("button", { name: "Clone and Index" }));
 
     await waitFor(() => {
@@ -271,6 +303,9 @@ describe("StatsTab index modal", () => {
         project_name: "repository",
       });
     });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === "/rpc")).toHaveLength(
+      rpcCallsBeforeSubmit,
+    );
   });
 
   it("shows the backend error when deleting an index fails", async () => {

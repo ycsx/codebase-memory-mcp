@@ -30,12 +30,34 @@ enum {
 };
 
 static const char *const g_git_ssh_config =
-    "core.sshCommand=ssh -o BatchMode=yes -o ConnectTimeout=15";
+    "core.sshCommand=ssh -o BatchMode=yes -o ConnectTimeout=15 "
+    "-o StrictHostKeyChecking=accept-new";
 
 static void set_error(char *out, size_t out_size, const char *message) {
     if (out && out_size > 0) {
         snprintf(out, out_size, "%s", message ? message : "remote git operation failed");
     }
+}
+
+static void set_git_error(char *out, size_t out_size, const char *message) {
+    const char *detail = message && message[0] ? message : "remote git operation failed";
+    const char *hint = NULL;
+    if (strstr(detail, "Host key verification failed")) {
+        hint = "Use HTTPS for a public repository. For SSH, initialize known_hosts for the "
+               "service account and verify the server fingerprint.";
+    } else if (strstr(detail, "Permission denied (publickey)")) {
+        hint = "Register this machine's SSH deploy public key with the repository. On a managed "
+               "server, run: sudo cbm-server git-key";
+    } else if (strstr(detail, "could not read Username") ||
+               strstr(detail, "Authentication failed")) {
+        hint = "Private HTTPS repositories need non-interactive credentials; use an SSH URL and "
+               "register the service deploy key instead.";
+    }
+    if (hint && out && out_size > 0) {
+        snprintf(out, out_size, "%s\nHint: %s", detail, hint);
+        return;
+    }
+    set_error(out, out_size, detail);
 }
 
 static int clamp_poll_interval(int seconds) {
@@ -51,6 +73,17 @@ static int clamp_poll_interval(int seconds) {
     return seconds;
 }
 
+static bool validate_https_url(const char *url) {
+    static const char prefix[] = "https://";
+    const char *host = url + sizeof(prefix) - 1;
+    const char *path = strchr(host, '/');
+    if (!path || path == host || path[1] == '\0' || memchr(host, '@', (size_t)(path - host)) ||
+        memchr(host, ':', (size_t)(path - host)) || strpbrk(path, "?#")) {
+        return false;
+    }
+    return true;
+}
+
 bool cbm_remote_repo_validate_url(const char *url) {
     if (!url || !url[0] || strlen(url) >= CBM_REMOTE_URL_MAX ||
         !cbm_validate_shell_arg(url)) {
@@ -60,6 +93,9 @@ bool cbm_remote_repo_validate_url(const char *url) {
         if (isspace(*p) || iscntrl(*p)) {
             return false;
         }
+    }
+    if (strncmp(url, "https://", 8) == 0) {
+        return validate_https_url(url);
     }
     if (strncmp(url, "ssh://", 6) == 0 || strncmp(url, "file://", 7) == 0) {
         return true;
@@ -74,30 +110,11 @@ bool cbm_remote_repo_normalize_url(const char *url, char *out, size_t out_size) 
     if (!url || !out || out_size == 0) {
         return false;
     }
-    if (cbm_remote_repo_validate_url(url)) {
-        int n = snprintf(out, out_size, "%s", url);
-        return n > 0 && (size_t)n < out_size;
-    }
-
-    static const char https_prefix[] = "https://";
-    if (strncmp(url, https_prefix, sizeof(https_prefix) - 1) != 0 ||
-        strlen(url) >= CBM_REMOTE_URL_MAX || !cbm_validate_shell_arg(url)) {
+    if (!cbm_remote_repo_validate_url(url)) {
         return false;
     }
-    const char *host = url + sizeof(https_prefix) - 1;
-    const char *path = strchr(host, '/');
-    if (!path || path == host || path[1] == '\0' || strchr(host, '@') ||
-        memchr(host, ':', (size_t)(path - host)) || strpbrk(path, "?#")) {
-        return false;
-    }
-    for (const unsigned char *p = (const unsigned char *)url; *p; p++) {
-        if (isspace(*p) || iscntrl(*p)) {
-            return false;
-        }
-    }
-
-    int n = snprintf(out, out_size, "git@%.*s:%s", (int)(path - host), host, path + 1);
-    return n > 0 && (size_t)n < out_size && cbm_remote_repo_validate_url(out);
+    int n = snprintf(out, out_size, "%s", url);
+    return n > 0 && (size_t)n < out_size;
 }
 
 bool cbm_remote_repo_validate_branch(const char *branch) {
@@ -271,6 +288,8 @@ static int run_git(const char *const *argv, char *output, size_t output_size) {
     return cbm_exec_capture(argv, output, output_size);
 }
 
+static int remove_tree_no_follow(const char *path);
+
 static bool parse_sha_for_ref(const char *output, const char *ref, char *sha, size_t sha_size) {
     const char *line = output;
     while (line && *line) {
@@ -332,7 +351,10 @@ int cbm_remote_repo_prepare(const char *project_name, const char *remote_url, co
                                 root_out, NULL};
     int rc = run_git(argv, output, sizeof(output));
     if (rc != 0 || !cbm_is_dir(root_out)) {
-        set_error(error_out, error_out_size, output[0] ? output : "git clone failed");
+        if (cbm_is_dir(root_out)) {
+            (void)remove_tree_no_follow(root_out);
+        }
+        set_git_error(error_out, error_out_size, output[0] ? output : "git clone failed");
         return -1;
     }
     if (write_marker(root_out, remote_url, branch, poll_interval_sec) != 0) {
@@ -362,8 +384,8 @@ int cbm_remote_repo_sync(const char *root_path, const cbm_remote_repo_config_t *
     int rc = run_git(ls_argv, output, sizeof(output));
     char remote_sha[65] = {0};
     if (rc != 0 || !parse_sha_for_ref(output, ref, remote_sha, sizeof(remote_sha))) {
-        set_error(error_out, error_out_size,
-                  output[0] ? output : "remote branch was not found or is not reachable");
+        set_git_error(error_out, error_out_size,
+                      output[0] ? output : "remote branch was not found or is not reachable");
         return -1;
     }
     if (remote_sha_out && remote_sha_out_size > 0) {
@@ -382,7 +404,7 @@ int cbm_remote_repo_sync(const char *root_path, const cbm_remote_repo_config_t *
                                       "--no-tags", "origin", remote_ref, NULL};
     rc = run_git(fetch_argv, output, sizeof(output));
     if (rc != 0) {
-        set_error(error_out, error_out_size, output[0] ? output : "git fetch failed");
+        set_git_error(error_out, error_out_size, output[0] ? output : "git fetch failed");
         return -1;
     }
 

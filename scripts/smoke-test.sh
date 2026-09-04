@@ -3024,7 +3024,14 @@ echo "=== Phase 15: UI HTTP server ==="
 
 UI_PORT=19876
 UI_INPUT=$(mktemp)
-"$BINARY" --port "$UI_PORT" < "$UI_INPUT" > /dev/null 2>&1 &
+UI_ALLOWED_ROOT=$(mktemp -d)
+mkdir -p "$UI_ALLOWED_ROOT/inside-child"
+UI_ALLOWED_ROOT_NATIVE="$UI_ALLOWED_ROOT"
+case "$(uname -s)" in
+  MINGW*|MSYS*) UI_ALLOWED_ROOT_NATIVE=$(cygpath -w "$UI_ALLOWED_ROOT") ;;
+esac
+CBM_ALLOWED_ROOT="$UI_ALLOWED_ROOT_NATIVE" "$BINARY" --port "$UI_PORT" \
+  < "$UI_INPUT" > /dev/null 2>&1 &
 UI_PID=$!
 sleep 1
 
@@ -3054,12 +3061,34 @@ if kill -0 "$UI_PID" 2>/dev/null; then
     echo "FAIL 15b: /rpc did not return JSON-RPC"
   fi
 
+  # 15c: a remotely proxied UI must not browse outside CBM_ALLOWED_ROOT.
+  BROWSE_BODY=$(curl -sf "http://127.0.0.1:$UI_PORT/api/browse" 2>/dev/null || echo "")
+  if echo "$BROWSE_BODY" | grep -q 'inside-child' &&
+     echo "$BROWSE_BODY" | grep -q '"roots"'; then
+    echo "OK 15c: UI directory browser defaults to CBM_ALLOWED_ROOT"
+  else
+    echo "FAIL 15c: UI directory browser did not stay inside CBM_ALLOWED_ROOT"
+    echo "$BROWSE_BODY"
+    kill "$UI_PID" 2>/dev/null || true
+    exit 1
+  fi
+  OUTSIDE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' --get \
+    --data-urlencode 'path=/' "http://127.0.0.1:$UI_PORT/api/browse" 2>/dev/null || echo "000")
+  if [ "$OUTSIDE_STATUS" = "403" ]; then
+    echo "OK 15d: UI directory browser rejects paths outside CBM_ALLOWED_ROOT"
+  else
+    echo "FAIL 15d: outside-root browse returned HTTP $OUTSIDE_STATUS (expected 403)"
+    kill "$UI_PID" 2>/dev/null || true
+    exit 1
+  fi
+
   kill "$UI_PID" 2>/dev/null || true
   wait "$UI_PID" 2>/dev/null || true
 else
   echo "SKIP Phase 15: binary exited immediately (no UI assets embedded)"
 fi
 rm -f "$UI_INPUT"
+rm -rf "$UI_ALLOWED_ROOT"
 
 echo ""
 echo "=== Phase 16: stdio server leaves no orphan after shutdown ==="

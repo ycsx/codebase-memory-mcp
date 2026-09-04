@@ -20,8 +20,8 @@ typedef void (*cbm_remote_repo_visit_fn)(const char *project_name, const char *r
                                          const cbm_remote_repo_config_t *config, void *user_data);
 
 bool cbm_remote_repo_validate_url(const char *url);
-/* Accept a native SSH/file URL or convert a conventional HTTPS repository URL
- * to git@host:path so authentication still uses the system OpenSSH config. */
+/* Validate and copy HTTPS, SSH, SCP-style SSH, or local file repository URLs.
+ * HTTPS remains HTTPS so public repositories do not unexpectedly require SSH. */
 bool cbm_remote_repo_normalize_url(const char *url, char *out, size_t out_size);
 bool cbm_remote_repo_validate_branch(const char *branch);
 bool cbm_remote_repo_default_project(const char *url, char *out, size_t out_size);

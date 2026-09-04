@@ -190,6 +190,39 @@ bash scripts/eval-build-context.sh ./build/codebase-memory-mcp
 codebase-memory-mcp serve --bind=0.0.0.0 --port=9766
 ```
 
+Ubuntu/Debian 单节点服务器可以使用一键部署脚本安装带嵌入式前端的 UI Release、两个 systemd 服务、HTTP 路由入口、浏览器登录和托管 Key Store：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/main/deploy/install-server.sh \
+  -o /tmp/install-codebase-memory-server.sh
+sudo bash /tmp/install-codebase-memory-server.sh
+```
+
+默认入口只监听 `http://127.0.0.1:9766`，不生成证书，适合由公司统一 Nginx 或网关使用可信证书对外提供 HTTPS。临时测试需要从其他机器直连时显式传入 `--public`，入口会监听 `0.0.0.0:9766`；该模式是明文 HTTP，只应用在受控测试网络。首次安装会显示一次网页账号密码和 MCP 管理员 Key。
+
+脚本重复执行时会先比较已安装版本和目标 Release，并实际探测嵌入式 UI；版本正确且 UI 可用时跳过二进制压缩包下载和覆盖，只校准服务配置。显式传入 `--binary` 仍会安装指定文件。
+
+安装后使用简化命令管理服务和 Key：
+
+```bash
+sudo cbm-server new-key alice project-a,project-b
+sudo cbm-server keys
+sudo cbm-server status
+sudo cbm-server logs 100
+sudo cbm-server ui-status
+sudo cbm-server ui-logs 100
+sudo cbm-server ui-password-reset
+sudo cbm-server git-key
+sudo cbm-server allowed-root
+sudo cbm-server set-allowed-root /data/projects
+```
+
+可视化页面强制使用独立的 HTTP Basic 登录；密码以 bcrypt 哈希保存，无法查询旧明文，遗失后使用 `ui-password-reset` 生成新密码。MCP 的 Bearer Key 与网页密码彼此独立。默认不限制客户端 IP，只有显式传入 `--allow-cidr` 才会为 `/mcp` 启用白名单。正式环境必须通过公司 HTTPS 入口访问，避免明文传输凭据。
+
+本地目录索引默认限制在服务器的 `/var/lib/codebase-memory-mcp/repos` 下。目录选择器只展示当前允许根及其子目录；源码位于其他位置时，执行 `sudo cbm-server set-allowed-root /实际/代码目录` 即可同步更新环境变量和 systemd 路径沙箱并重启服务，`sudo cbm-server allowed-root` 可查看当前值。不要填写浏览器所在电脑的路径，控制台浏览的是服务器文件系统。
+
+新建远端索引时，公开仓库直接填写 HTTPS 地址即可，不会再被改写成 SSH。私有仓库可填写 SSH 地址，并先将 `sudo cbm-server git-key` 输出的公钥添加为仓库只读 Deploy Key；首次连接会记录主机密钥，之后主机密钥变化仍会拒绝连接。
+
 远程模式要求设置 `CBM_MCP_AUDIT_LOG`，并选择一种鉴权方式：兼容现有部署的 `CBM_MCP_AUTH_TOKEN`（至少 32 字节），或使用托管 Key Store 的 `CBM_MCP_AUTH_STORE`。托管模式只在服务端保存 Key 的 SHA-256 哈希，支持 `user`、`ci`、`admin` 主体、`analysis`/`scout` 工具档位、项目 ACL，以及源码读取、索引、删除和管理权限。请用 TLS 反向代理，不要把 Token 或 Key 写进 Codex 的 `config.toml`。完整的 systemd、Nginx、可信代理和 Codex 配置见 [docs/REMOTE_MCP.md](docs/REMOTE_MCP.md)。
 
 托管 Key 的生命周期由 CLI 管理，明文只在创建或轮换时显示一次：
@@ -244,7 +277,8 @@ codebase-memory-mcp config reset auto_index
 | 现象 | 处理 |
 |---|---|
 | 客户端看不到 MCP | 检查配置中的绝对路径，重启/重新连接客户端；运行 `codebase-memory-mcp --version` 验证二进制。 |
-| `index_repository` 失败 | 使用绝对 `repo_path`，先检查 `CBM_ALLOWED_ROOT`、文件权限和索引状态。 |
+| 路径提示 `outside the allowed root` | 这是服务器目录白名单；运行 `sudo cbm-server allowed-root` 查看范围，必要时用 `sudo cbm-server set-allowed-root /实际/代码目录` 切换。 |
+| `index_repository` 失败 | 使用服务器上的绝对 `repo_path`，再检查文件权限和索引状态。 |
 | `trace_path` 没有结果 | 先用 `search_graph(name_pattern=".*Name.*")` 找到准确限定名。 |
 | 结果可能漏项 | 调用 `index_status`/`check_index_coverage`，读取报告的范围并回退源码搜索。 |
 | UI 无法打开 | 使用 UI 版本，确认端口未被占用，并访问 `http://127.0.0.1:9749`。 |

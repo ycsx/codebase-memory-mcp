@@ -905,6 +905,70 @@ TEST(ui_server_browse_traversal_probe) {
     PASS();
 }
 
+TEST(ui_server_browse_honors_allowed_root) {
+    char *created = th_mktempdir("cbm_browse_scope");
+    if (!created) {
+        FAIL("temp directory creation failed");
+    }
+    char allowed[768];
+    char child[1024];
+    snprintf(allowed, sizeof(allowed), "%s/allowed", created);
+    snprintf(child, sizeof(child), "%s/project-a", allowed);
+    if (th_mkdir_p(child) != 0) {
+        th_rmtree(created);
+        FAIL("allowed-root fixture creation failed");
+    }
+    cbm_normalize_path_sep(allowed);
+
+    char saved_allowed[4096] = {0};
+    const char *existing_allowed = getenv("CBM_ALLOWED_ROOT");
+    bool had_allowed = existing_allowed && existing_allowed[0];
+    if (had_allowed) {
+        snprintf(saved_allowed, sizeof(saved_allowed), "%s", existing_allowed);
+    }
+    cbm_setenv("CBM_ALLOWED_ROOT", allowed, 1);
+
+    th_server_t ts;
+    if (th_server_start(&ts) != 0) {
+        if (had_allowed) {
+            cbm_setenv("CBM_ALLOWED_ROOT", saved_allowed, 1);
+        } else {
+            cbm_unsetenv("CBM_ALLOWED_ROOT");
+        }
+        th_rmtree(created);
+        FAIL("HTTP server start failed");
+    }
+
+    char response[16384];
+    int initial_size =
+        th_http(cbm_http_server_port(ts.srv), "GET /api/browse HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                response, sizeof(response));
+    int initial_status = th_status(response);
+    bool exposes_scope = strstr(response, "\"allowed_root\":\"") != NULL;
+    bool lists_child = strstr(response, "project-a") != NULL;
+
+    int outside_size = th_http(cbm_http_server_port(ts.srv),
+                               "GET /api/browse?path=%2F HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                               response, sizeof(response));
+    int outside_status = th_status(response);
+
+    th_server_stop(&ts);
+    if (had_allowed) {
+        cbm_setenv("CBM_ALLOWED_ROOT", saved_allowed, 1);
+    } else {
+        cbm_unsetenv("CBM_ALLOWED_ROOT");
+    }
+    th_rmtree(created);
+
+    ASSERT_GT(initial_size, 0);
+    ASSERT_EQ(initial_status, 200);
+    ASSERT_TRUE(exposes_scope);
+    ASSERT_TRUE(lists_child);
+    ASSERT_GT(outside_size, 0);
+    ASSERT_EQ(outside_status, 403);
+    PASS();
+}
+
 TEST(ui_server_browse_utf8_directory) {
     char *created = th_mktempdir("cbm_browse_utf8");
     if (!created) {
@@ -1672,6 +1736,7 @@ SUITE(httpd) {
     RUN_TEST(ui_server_nul_in_target_rejected);
     RUN_TEST(ui_server_layout_returns_two_linked_projects_with_renderable_cross_edges);
     RUN_TEST(ui_server_browse_traversal_probe);
+    RUN_TEST(ui_server_browse_honors_allowed_root);
     RUN_TEST(ui_server_browse_utf8_directory);
     RUN_TEST(ui_server_project_update_requires_project_name);
     RUN_TEST(ui_server_project_update_rejects_unknown_project);

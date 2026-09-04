@@ -1,3 +1,8 @@
 # Vendored tree-sitter grammars — machine-generated, hide from stats and diffs
 internal/cbm/vendored/grammars/**/parser.c  linguist-generated=true diff=false
 internal/cbm/vendored/grammars/**/scanner.c linguist-generated=true diff=false
+
+# Linux deployment and CI entrypoints must keep Unix line endings on Windows.
+*.sh text eol=lf
+*.service text eol=lf
+deploy/nginx/*.conf text eol=lf
