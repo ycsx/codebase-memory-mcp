@@ -146,6 +146,7 @@ jobs:
         run: scripts/smoke-test.sh ./codebase-memory-mcp
         env:
           SMOKE_DOWNLOAD_URL: http://localhost:18080
+          SMOKE_VARIANT: ${{ matrix.variant }}
 
       - name: Security audits
         run: |
@@ -273,6 +274,7 @@ jobs:
         env:
           SMOKE_DOWNLOAD_URL: http://127.0.0.1:18080
           SMOKE_ARCH: ${{ matrix.arch }}
+          SMOKE_VARIANT: ${{ matrix.variant }}
 
       - name: Security audits
         shell: msys2 {0}
@@ -338,6 +340,8 @@ jobs:
           tar -xzf codebase-memory-mcp${SUFFIX}-linux-${{ matrix.arch }}-portable.tar.gz
           chmod +x codebase-memory-mcp
           scripts/smoke-test.sh ./codebase-memory-mcp
+        env:
+          SMOKE_VARIANT: ${{ matrix.variant }}
 
       # The -portable binary is what all linux install/update paths now deliver;
       # it MUST start on old glibc (Debian 11 / RHEL 8 / Ubuntu 20.04). Runs it

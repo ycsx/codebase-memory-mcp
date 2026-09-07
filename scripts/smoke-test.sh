@@ -17,6 +17,14 @@ if [ -n "$SMOKE_MODE" ] && [ "$SMOKE_MODE" != "--agent-config-only" ]; then
   echo "usage: smoke-test.sh <binary-path> [--agent-config-only]" >&2
   exit 2
 fi
+SMOKE_VARIANT="${SMOKE_VARIANT:-auto}"
+case "$SMOKE_VARIANT" in
+  auto|standard|ui) ;;
+  *)
+    echo "SMOKE_VARIANT must be auto, standard, or ui" >&2
+    exit 2
+    ;;
+esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
 TMPDIR=$(mktemp -d)
 DRYRUN_HOME=""
@@ -3022,73 +3030,87 @@ fi
 echo ""
 echo "=== Phase 15: UI HTTP server ==="
 
-UI_PORT=19876
-UI_INPUT=$(mktemp)
-UI_ALLOWED_ROOT=$(mktemp -d)
-mkdir -p "$UI_ALLOWED_ROOT/inside-child"
-UI_ALLOWED_ROOT_NATIVE="$UI_ALLOWED_ROOT"
-case "$(uname -s)" in
-  MINGW*|MSYS*) UI_ALLOWED_ROOT_NATIVE=$(cygpath -w "$UI_ALLOWED_ROOT") ;;
-esac
-CBM_ALLOWED_ROOT="$UI_ALLOWED_ROOT_NATIVE" "$BINARY" --port "$UI_PORT" \
-  < "$UI_INPUT" > /dev/null 2>&1 &
-UI_PID=$!
-sleep 1
-
-if kill -0 "$UI_PID" 2>/dev/null; then
-  # 15a: GET / returns 200 with HTML content
-  UI_BODY=$(curl -sf "http://127.0.0.1:$UI_PORT/" 2>/dev/null || echo "")
-  if echo "$UI_BODY" | grep -qi "<html"; then
-    echo "OK 15a: UI serves HTML at /"
-  elif [ -z "$UI_BODY" ]; then
-    echo "SKIP 15a: UI not reachable (binary may not have embedded assets)"
-  else
-    echo "FAIL 15a: UI root did not return HTML"
-    kill "$UI_PID" 2>/dev/null || true
-    exit 1
-  fi
-
-  # 15b: POST /rpc accepts JSON-RPC and returns JSON
-  RPC_BODY=$(curl -sf -X POST \
-    -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-    "http://127.0.0.1:$UI_PORT/rpc" 2>/dev/null || echo "")
-  if echo "$RPC_BODY" | grep -q "jsonrpc"; then
-    echo "OK 15b: /rpc returns JSON-RPC response"
-  elif [ -z "$RPC_BODY" ]; then
-    echo "SKIP 15b: /rpc not reachable"
-  else
-    echo "FAIL 15b: /rpc did not return JSON-RPC"
-  fi
-
-  # 15c: a remotely proxied UI must not browse outside CBM_ALLOWED_ROOT.
-  BROWSE_BODY=$(curl -sf "http://127.0.0.1:$UI_PORT/api/browse" 2>/dev/null || echo "")
-  if echo "$BROWSE_BODY" | grep -q 'inside-child' &&
-     echo "$BROWSE_BODY" | grep -q '"roots"'; then
-    echo "OK 15c: UI directory browser defaults to CBM_ALLOWED_ROOT"
-  else
-    echo "FAIL 15c: UI directory browser did not stay inside CBM_ALLOWED_ROOT"
-    echo "$BROWSE_BODY"
-    kill "$UI_PID" 2>/dev/null || true
-    exit 1
-  fi
-  OUTSIDE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' --get \
-    --data-urlencode 'path=/' "http://127.0.0.1:$UI_PORT/api/browse" 2>/dev/null || echo "000")
-  if [ "$OUTSIDE_STATUS" = "403" ]; then
-    echo "OK 15d: UI directory browser rejects paths outside CBM_ALLOWED_ROOT"
-  else
-    echo "FAIL 15d: outside-root browse returned HTTP $OUTSIDE_STATUS (expected 403)"
-    kill "$UI_PID" 2>/dev/null || true
-    exit 1
-  fi
-
-  kill "$UI_PID" 2>/dev/null || true
-  wait "$UI_PID" 2>/dev/null || true
+if [ "$SMOKE_VARIANT" = "standard" ]; then
+  echo "SKIP Phase 15: standard artifact has no embedded UI"
 else
-  echo "SKIP Phase 15: binary exited immediately (no UI assets embedded)"
+  UI_PORT=19876
+  UI_INPUT=$(mktemp)
+  UI_LOG=$(mktemp)
+  UI_ALLOWED_ROOT=$(mktemp -d)
+  mkdir -p "$UI_ALLOWED_ROOT/inside-child"
+  UI_ALLOWED_ROOT_NATIVE="$UI_ALLOWED_ROOT"
+  case "$(uname -s)" in
+    MINGW*|MSYS*) UI_ALLOWED_ROOT_NATIVE=$(cygpath -w "$UI_ALLOWED_ROOT") ;;
+  esac
+  CBM_ALLOWED_ROOT="$UI_ALLOWED_ROOT_NATIVE" "$BINARY" console --no-open \
+    "--port=$UI_PORT" < "$UI_INPUT" > "$UI_LOG" 2>&1 &
+  UI_PID=$!
+  cleanup_ui_probe() {
+    kill "$UI_PID" 2>/dev/null || true
+    wait "$UI_PID" 2>/dev/null || true
+    rm -f "$UI_INPUT" "$UI_LOG"
+    rm -rf "$UI_ALLOWED_ROOT"
+  }
+
+  UI_BODY=""
+  UI_ATTEMPT=0
+  while [ "$UI_ATTEMPT" -lt 20 ] && kill -0 "$UI_PID" 2>/dev/null; do
+    UI_BODY=$(curl -sf "http://127.0.0.1:$UI_PORT/" 2>/dev/null || echo "")
+    if echo "$UI_BODY" | grep -qi "<html"; then
+      break
+    fi
+    UI_ATTEMPT=$((UI_ATTEMPT + 1))
+    sleep 0.5
+  done
+
+  if ! echo "$UI_BODY" | grep -qi "<html"; then
+    if [ "$SMOKE_VARIANT" = "ui" ]; then
+      echo "FAIL 15a: UI artifact did not serve embedded assets within 10 seconds"
+      cat "$UI_LOG"
+      cleanup_ui_probe
+      exit 1
+    fi
+    echo "SKIP Phase 15: auto-detected standard binary has no embedded UI"
+  else
+    echo "OK 15a: UI serves HTML at /"
+
+    # 15b: POST /rpc accepts JSON-RPC and returns JSON.
+    RPC_BODY=$(curl -sf -X POST \
+      -H "Content-Type: application/json" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+      "http://127.0.0.1:$UI_PORT/rpc" 2>/dev/null || echo "")
+    if echo "$RPC_BODY" | grep -q "jsonrpc"; then
+      echo "OK 15b: /rpc returns JSON-RPC response"
+    else
+      echo "FAIL 15b: /rpc did not return JSON-RPC"
+      cleanup_ui_probe
+      exit 1
+    fi
+
+    # 15c: a remotely proxied UI must not browse outside CBM_ALLOWED_ROOT.
+    BROWSE_BODY=$(curl -sf "http://127.0.0.1:$UI_PORT/api/browse" 2>/dev/null || echo "")
+    if echo "$BROWSE_BODY" | grep -q 'inside-child' &&
+       echo "$BROWSE_BODY" | grep -q '"roots"'; then
+      echo "OK 15c: UI directory browser defaults to CBM_ALLOWED_ROOT"
+    else
+      echo "FAIL 15c: UI directory browser did not stay inside CBM_ALLOWED_ROOT"
+      echo "$BROWSE_BODY"
+      cleanup_ui_probe
+      exit 1
+    fi
+    OUTSIDE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' --get \
+      --data-urlencode 'path=/' "http://127.0.0.1:$UI_PORT/api/browse" 2>/dev/null || echo "000")
+    if [ "$OUTSIDE_STATUS" = "403" ]; then
+      echo "OK 15d: UI directory browser rejects paths outside CBM_ALLOWED_ROOT"
+    else
+      echo "FAIL 15d: outside-root browse returned HTTP $OUTSIDE_STATUS (expected 403)"
+      cleanup_ui_probe
+      exit 1
+    fi
+  fi
+
+  cleanup_ui_probe
 fi
-rm -f "$UI_INPUT"
-rm -rf "$UI_ALLOWED_ROOT"
 
 echo ""
 echo "=== Phase 16: stdio server leaves no orphan after shutdown ==="
