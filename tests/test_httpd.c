@@ -523,6 +523,140 @@ static int ui_delete_request(th_server_t *ts, const char *target, char *resp, si
     return th_http(cbm_http_server_port(ts->srv), req, resp, respsz);
 }
 
+/* An absent file remote tests HTTP name selection without invoking an index
+ * worker or using the network. Server shutdown joins the failed clone job. */
+static int ui_remote_index_request(th_server_t *ts, const ui_delete_fixture_t *fx,
+                                   const char *project, char *resp, size_t respsz) {
+    char missing_remote[1024];
+    snprintf(missing_remote, sizeof(missing_remote), "file:///%s/missing/repo.git", fx->tmpdir);
+    cbm_normalize_path_sep(missing_remote);
+    char body[2048];
+    snprintf(body, sizeof(body),
+             "{\"remote_url\":\"%s\",\"branch\":\"main\",\"project_name\":\"%s\"}", missing_remote,
+             project);
+    char req[2304];
+    snprintf(req, sizeof(req),
+             "POST /api/remote-index HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+             "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+             (int)strlen(body), body);
+    return th_http(cbm_http_server_port(ts->srv), req, resp, respsz);
+}
+
+TEST(ui_server_remote_index_avoids_local_directory) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    char local_root[1024];
+    ASSERT_TRUE(cbm_remote_repo_managed_path("repo", local_root, sizeof(local_root)));
+    char sentinel[1100];
+    snprintf(sentinel, sizeof(sentinel), "%s/local.txt", local_root);
+    ASSERT_EQ(th_write_file(sentinel, "local work must survive"), 0);
+    ASSERT_EQ(ui_delete_make_project_db(&fx, "local-index", local_root), 0);
+
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char resp[4096];
+    int n = ui_remote_index_request(&ts, &fx, "", resp, sizeof(resp));
+    int status = th_status(resp);
+    bool chose_remote_name = strstr(resp, "\"project\":\"repo-git\"") != NULL;
+    bool chose_remote_path = strstr(resp, "/repos/repo-git\"") != NULL;
+    th_server_stop(&ts);
+
+    bool local_survived = cbm_file_exists(sentinel);
+    char db_path[1024];
+    ui_delete_db_path(&fx, "local-index", db_path, sizeof(db_path));
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    cbm_project_t local_project = {0};
+    bool graph_unchanged =
+        store && cbm_store_get_project(store, "local-index", &local_project) == CBM_STORE_OK &&
+        strcmp(local_project.root_path, local_root) == 0;
+    cbm_project_free_fields(&local_project);
+    cbm_store_close(store);
+    ui_delete_fixture_cleanup(&fx);
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(status, 202);
+    ASSERT_TRUE(chose_remote_name);
+    ASSERT_TRUE(chose_remote_path);
+    ASSERT_TRUE(local_survived);
+    ASSERT_TRUE(graph_unchanged);
+    PASS();
+}
+
+TEST(ui_server_remote_index_avoids_existing_project_and_file) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    ASSERT_EQ(ui_delete_make_project_db(&fx, "repo", fx.root_dir), 0);
+    char occupied_path[1024];
+    ASSERT_TRUE(cbm_remote_repo_managed_path("repo-git", occupied_path, sizeof(occupied_path)));
+    ASSERT_EQ(th_write_file(occupied_path, "an unrelated file"), 0);
+
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char resp[4096];
+    int n = ui_remote_index_request(&ts, &fx, "", resp, sizeof(resp));
+    int status = th_status(resp);
+    bool chose_unused_name = strstr(resp, "\"project\":\"repo-git-2\"") != NULL;
+    th_server_stop(&ts);
+    bool occupied_survived = cbm_file_exists(occupied_path) && !cbm_is_dir(occupied_path);
+    ui_delete_fixture_cleanup(&fx);
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(status, 202);
+    ASSERT_TRUE(chose_unused_name);
+    ASSERT_TRUE(occupied_survived);
+    PASS();
+}
+
+TEST(ui_server_remote_index_explicit_collision_is_actionable) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    char local_root[1024];
+    ASSERT_TRUE(cbm_remote_repo_managed_path("repo", local_root, sizeof(local_root)));
+    ASSERT_EQ(th_mkdir_p(local_root), 0);
+    /* Even a graph whose root equals the managed path is still local if it
+     * has no ownership marker. It must not be adopted by the remote worker. */
+    ASSERT_EQ(ui_delete_make_project_db(&fx, "repo", local_root), 0);
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char resp[4096];
+    int n = ui_remote_index_request(&ts, &fx, "repo", resp, sizeof(resp));
+    int status = th_status(resp);
+    bool explains_recovery = strstr(resp, "leave it blank") != NULL;
+    th_server_stop(&ts);
+    bool local_survived = cbm_is_dir(local_root);
+    ui_delete_fixture_cleanup(&fx);
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(status, 409);
+    ASSERT_TRUE(explains_recovery);
+    ASSERT_TRUE(local_survived);
+    PASS();
+}
+
+TEST(ui_server_remote_index_preserves_graph_with_missing_source) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    char missing_root[1024];
+    ASSERT_TRUE(cbm_remote_repo_managed_path("repo", missing_root, sizeof(missing_root)));
+    ASSERT_FALSE(cbm_file_exists(missing_root));
+    ASSERT_EQ(ui_delete_make_project_db(&fx, "repo", missing_root), 0);
+    th_server_t ts;
+    ASSERT_EQ(th_server_start(&ts), 0);
+    char resp[4096];
+    int n = ui_remote_index_request(&ts, &fx, "", resp, sizeof(resp));
+    int status = th_status(resp);
+    bool chose_remote_name = strstr(resp, "\"project\":\"repo-git\"") != NULL;
+    th_server_stop(&ts);
+    char db_path[1024];
+    ui_delete_db_path(&fx, "repo", db_path, sizeof(db_path));
+    bool original_graph_exists = cbm_file_exists(db_path);
+    bool original_path_absent = !cbm_file_exists(missing_root);
+    ui_delete_fixture_cleanup(&fx);
+    ASSERT_GT(n, 0);
+    ASSERT_EQ(status, 202);
+    ASSERT_TRUE(chose_remote_name);
+    ASSERT_TRUE(original_graph_exists);
+    ASSERT_TRUE(original_path_absent);
+    PASS();
+}
+
 static bool ui_layout_json_has_node(yyjson_val *nodes, int64_t id) {
     size_t idx, max;
     yyjson_val *node;
@@ -1740,6 +1874,10 @@ SUITE(httpd) {
     RUN_TEST(ui_server_browse_utf8_directory);
     RUN_TEST(ui_server_project_update_requires_project_name);
     RUN_TEST(ui_server_project_update_rejects_unknown_project);
+    RUN_TEST(ui_server_remote_index_avoids_local_directory);
+    RUN_TEST(ui_server_remote_index_avoids_existing_project_and_file);
+    RUN_TEST(ui_server_remote_index_explicit_collision_is_actionable);
+    RUN_TEST(ui_server_remote_index_preserves_graph_with_missing_source);
     RUN_TEST(ui_server_delete_project_unwatches_after_delete);
     RUN_TEST(ui_server_delete_project_unicode_cache_path);
     RUN_TEST(ui_server_delete_project_preserves_local_source);

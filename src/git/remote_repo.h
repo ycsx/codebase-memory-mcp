@@ -27,6 +27,11 @@ bool cbm_remote_repo_validate_branch(const char *branch);
 bool cbm_remote_repo_default_project(const char *url, char *out, size_t out_size);
 bool cbm_remote_repo_managed_path(const char *project_name, char *out, size_t out_size);
 
+/* True only when root_path is absent, or is a non-link managed clone with
+ * matching URL and branch metadata. This performs no filesystem mutations. */
+bool cbm_remote_repo_path_available(const char *root_path, const char *remote_url,
+                                    const char *branch);
+
 /* Clone or reuse a managed repository and persist its polling metadata. */
 int cbm_remote_repo_prepare(const char *project_name, const char *remote_url, const char *branch,
                             int poll_interval_sec, char *root_out, size_t root_out_size,

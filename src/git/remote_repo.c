@@ -85,8 +85,7 @@ static bool validate_https_url(const char *url) {
 }
 
 bool cbm_remote_repo_validate_url(const char *url) {
-    if (!url || !url[0] || strlen(url) >= CBM_REMOTE_URL_MAX ||
-        !cbm_validate_shell_arg(url)) {
+    if (!url || !url[0] || strlen(url) >= CBM_REMOTE_URL_MAX || !cbm_validate_shell_arg(url)) {
         return false;
     }
     for (const unsigned char *p = (const unsigned char *)url; *p; p++) {
@@ -184,6 +183,54 @@ bool cbm_remote_repo_managed_path(const char *project_name, char *out, size_t ou
 static bool marker_path(const char *root_path, char *out, size_t out_size) {
     int n = snprintf(out, out_size, "%s/.git/cbm-remote.json", root_path);
     return n > 0 && (size_t)n < out_size;
+}
+
+static bool path_is_absent_no_link(const char *path) {
+#ifdef _WIN32
+    wchar_t *wide_path = cbm_utf8_to_wide(path);
+    if (!wide_path) {
+        return false;
+    }
+    WIN32_FIND_DATAW find_data;
+    HANDLE find = FindFirstFileW(wide_path, &find_data);
+    if (find != INVALID_HANDLE_VALUE) {
+        FindClose(find);
+        free(wide_path);
+        return false;
+    }
+    DWORD error = GetLastError();
+    free(wide_path);
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+#else
+    struct stat state;
+    return lstat(path, &state) != 0 && errno == ENOENT;
+#endif
+}
+
+static bool plain_directory(const char *path);
+
+bool cbm_remote_repo_path_available(const char *root_path, const char *remote_url,
+                                    const char *branch) {
+    if (!root_path || !root_path[0] || !cbm_remote_repo_validate_url(remote_url) ||
+        !cbm_remote_repo_validate_branch(branch)) {
+        return false;
+    }
+    if (path_is_absent_no_link(root_path)) {
+        return true;
+    }
+    if (!plain_directory(root_path)) {
+        return false;
+    }
+
+    char git_dir[REMOTE_PATH_MAX];
+    int n = snprintf(git_dir, sizeof(git_dir), "%s/.git", root_path);
+    if (n <= 0 || (size_t)n >= sizeof(git_dir) || !plain_directory(git_dir)) {
+        return false;
+    }
+
+    cbm_remote_repo_config_t existing;
+    return cbm_remote_repo_load(root_path, &existing) == 0 &&
+           strcmp(existing.remote_url, remote_url) == 0 && strcmp(existing.branch, branch) == 0;
 }
 
 static int write_marker(const char *root_path, const char *remote_url, const char *branch,
@@ -330,14 +377,14 @@ int cbm_remote_repo_prepare(const char *project_name, const char *remote_url, co
         return -1;
     }
 
+    if (!cbm_remote_repo_path_available(root_out, remote_url, branch)) {
+        set_error(error_out, error_out_size,
+                  "managed repository path already exists with different settings; use a different "
+                  "project ID or leave it blank");
+        return -1;
+    }
+
     if (cbm_is_dir(root_out)) {
-        cbm_remote_repo_config_t existing;
-        if (cbm_remote_repo_load(root_out, &existing) != 0 ||
-            strcmp(existing.remote_url, remote_url) != 0 || strcmp(existing.branch, branch) != 0) {
-            set_error(error_out, error_out_size,
-                      "managed repository path already exists with different settings");
-            return -1;
-        }
         if (write_marker(root_out, remote_url, branch, poll_interval_sec) != 0) {
             set_error(error_out, error_out_size, "cannot update remote repository metadata");
             return -1;
@@ -346,14 +393,11 @@ int cbm_remote_repo_prepare(const char *project_name, const char *remote_url, co
     }
 
     char output[REMOTE_OUTPUT_MAX] = {0};
-    const char *const argv[] = {"git", "-c", g_git_ssh_config, "clone", "--no-tags",
-                                "--single-branch", "--branch", branch, "--", remote_url,
-                                root_out, NULL};
+    const char *const argv[] = {
+        "git",  "-c", g_git_ssh_config, "clone",  "--no-tags", "--single-branch", "--branch",
+        branch, "--", remote_url,       root_out, NULL};
     int rc = run_git(argv, output, sizeof(output));
     if (rc != 0 || !cbm_is_dir(root_out)) {
-        if (cbm_is_dir(root_out)) {
-            (void)remove_tree_no_follow(root_out);
-        }
         set_git_error(error_out, error_out_size, output[0] ? output : "git clone failed");
         return -1;
     }
@@ -379,8 +423,9 @@ int cbm_remote_repo_sync(const char *root_path, const cbm_remote_repo_config_t *
     snprintf(remote_ref, sizeof(remote_ref), "+%s:refs/remotes/origin/%s", ref, config->branch);
 
     char output[REMOTE_OUTPUT_MAX] = {0};
-    const char *const ls_argv[] = {"git", "-c", g_git_ssh_config, "ls-remote", "--heads",
-                                   "--exit-code", config->remote_url, ref, NULL};
+    const char *const ls_argv[] = {"git",     "-c",          g_git_ssh_config,   "ls-remote",
+                                   "--heads", "--exit-code", config->remote_url, ref,
+                                   NULL};
     int rc = run_git(ls_argv, output, sizeof(output));
     char remote_sha[65] = {0};
     if (rc != 0 || !parse_sha_for_ref(output, ref, remote_sha, sizeof(remote_sha))) {
@@ -400,8 +445,8 @@ int cbm_remote_repo_sync(const char *root_path, const cbm_remote_repo_config_t *
     }
 
     output[0] = '\0';
-    const char *const fetch_argv[] = {"git", "-c", g_git_ssh_config, "-C", root_path, "fetch",
-                                      "--no-tags", "origin", remote_ref, NULL};
+    const char *const fetch_argv[] = {"git",   "-c",        g_git_ssh_config, "-C",       root_path,
+                                      "fetch", "--no-tags", "origin",         remote_ref, NULL};
     rc = run_git(fetch_argv, output, sizeof(output));
     if (rc != 0) {
         set_git_error(error_out, error_out_size, output[0] ? output : "git fetch failed");
@@ -409,8 +454,7 @@ int cbm_remote_repo_sync(const char *root_path, const cbm_remote_repo_config_t *
     }
 
     output[0] = '\0';
-    const char *const reset_argv[] = {"git", "-C", root_path, "reset", "--hard", remote_sha,
-                                      NULL};
+    const char *const reset_argv[] = {"git", "-C", root_path, "reset", "--hard", remote_sha, NULL};
     rc = run_git(reset_argv, output, sizeof(output));
     if (rc != 0) {
         set_error(error_out, error_out_size, output[0] ? output : "git reset failed");
@@ -476,6 +520,30 @@ static bool plain_directory(const char *path) {
 #endif
 }
 
+#ifdef _WIN32
+/* Git for Windows may mark packed objects read-only. This runs only for a
+ * non-reparse file entry already reached through a validated managed tree. */
+static int remove_owned_regular_file(const char *path) {
+    wchar_t *wide_path = cbm_utf8_to_wide(path);
+    if (!wide_path) {
+        return -1;
+    }
+    DWORD attributes = GetFileAttributesW(wide_path);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        free(wide_path);
+        return -1;
+    }
+    if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
+        !SetFileAttributesW(wide_path, attributes & ~FILE_ATTRIBUTE_READONLY)) {
+        free(wide_path);
+        return -1;
+    }
+    free(wide_path);
+    return cbm_unlink(path);
+}
+#endif
+
 static int remove_tree_no_follow(const char *path) {
     cbm_dir_t *directory = cbm_opendir(path);
     if (!directory) {
@@ -518,7 +586,11 @@ static int remove_tree_no_follow(const char *path) {
             child_result = cbm_unlink(child);
 #endif
         } else {
+#ifdef _WIN32
+            child_result = is_symlink ? cbm_unlink(child) : remove_owned_regular_file(child);
+#else
             child_result = cbm_unlink(child);
+#endif
         }
         if (child_result != 0) {
             result = -1;

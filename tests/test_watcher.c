@@ -94,8 +94,7 @@ static bool remote_fixture_setup(remote_fixture_t *f, const char *project_name) 
         .work_dir = "/tmp/cbm_remote_work_XXXXXX",
         .bare_dir = "/tmp/cbm_remote_bare_XXXXXX",
     };
-    if (!cbm_mkdtemp(f->cache_dir) || !cbm_mkdtemp(f->work_dir) ||
-        !cbm_mkdtemp(f->bare_dir)) {
+    if (!cbm_mkdtemp(f->cache_dir) || !cbm_mkdtemp(f->work_dir) || !cbm_mkdtemp(f->bare_dir)) {
         remote_fixture_teardown(f);
         return false;
     }
@@ -106,11 +105,9 @@ static bool remote_fixture_setup(remote_fixture_t *f, const char *project_name) 
     f->cache_overridden = true;
     wt_file_url(f->bare_dir, f->remote_url, sizeof(f->remote_url));
 
-    if (wt_git(f->bare_dir, "init -q --bare") != 0 ||
-        wt_git(f->work_dir, "init -q") != 0 ||
+    if (wt_git(f->bare_dir, "init -q --bare") != 0 || wt_git(f->work_dir, "init -q") != 0 ||
         wt_git(f->work_dir, "branch -M main") != 0 ||
-        th_write_file(wt_path(f->managed_dir, sizeof(f->managed_dir), f->work_dir,
-                              "file.txt"),
+        th_write_file(wt_path(f->managed_dir, sizeof(f->managed_dir), f->work_dir, "file.txt"),
                       "initial\n") != 0 ||
         wt_git(f->work_dir, "add file.txt") != 0 ||
         wt_git(f->work_dir, "commit -q -m initial") != 0) {
@@ -121,8 +118,7 @@ static bool remote_fixture_setup(remote_fixture_t *f, const char *project_name) 
     char push_args[768];
     snprintf(push_args, sizeof(push_args), "push -q \"%s\" main:main", f->remote_url);
     if (wt_git(f->work_dir, push_args) != 0 ||
-        !cbm_remote_repo_managed_path(project_name, f->managed_dir,
-                                      sizeof(f->managed_dir))) {
+        !cbm_remote_repo_managed_path(project_name, f->managed_dir, sizeof(f->managed_dir))) {
         remote_fixture_teardown(f);
         return false;
     }
@@ -131,8 +127,8 @@ static bool remote_fixture_setup(remote_fixture_t *f, const char *project_name) 
 
 static int remote_fixture_push(remote_fixture_t *f, const char *content) {
     char file_path[512];
-    if (th_append_file(wt_path(file_path, sizeof(file_path), f->work_dir, "file.txt"),
-                       content) != 0 ||
+    if (th_append_file(wt_path(file_path, sizeof(file_path), f->work_dir, "file.txt"), content) !=
+            0 ||
         wt_git(f->work_dir, "add file.txt") != 0 ||
         wt_git(f->work_dir, "commit -q -m update") != 0) {
         return -1;
@@ -2065,8 +2061,14 @@ TEST(watcher_callback_data_passed) {
     if (!cbm_mkdtemp(tmpdir))
         FAIL("cbm_mkdtemp failed");
 
-    if (wt_git(tmpdir, "init -q") != 0) { th_rmtree(tmpdir); FAIL("git init failed"); }
-    { char p[300]; th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "hello\n"); }
+    if (wt_git(tmpdir, "init -q") != 0) {
+        th_rmtree(tmpdir);
+        FAIL("git init failed");
+    }
+    {
+        char p[300];
+        th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "hello\n");
+    }
     wt_git(tmpdir, "add file.txt");
     wt_git(tmpdir, "commit -q -m init");
 
@@ -2180,8 +2182,8 @@ TEST(remote_repo_validates_configuration) {
     ASSERT_FALSE(cbm_remote_repo_validate_url("https://example.com/team/repository.git?ref=main"));
     ASSERT_FALSE(cbm_remote_repo_validate_url("git@example.com"));
     ASSERT_FALSE(cbm_remote_repo_validate_url("git@example.com:team/bad repo.git"));
-    ASSERT_TRUE(cbm_remote_repo_normalize_url("https://github.com/team/repository.git",
-                                              normalized, sizeof(normalized)));
+    ASSERT_TRUE(cbm_remote_repo_normalize_url("https://github.com/team/repository.git", normalized,
+                                              sizeof(normalized)));
     ASSERT_STR_EQ(normalized, "https://github.com/team/repository.git");
     ASSERT_FALSE(cbm_remote_repo_normalize_url("https://example.com:8443/team/repository.git",
                                                normalized, sizeof(normalized)));
@@ -2210,9 +2212,9 @@ TEST(remote_repo_prepare_and_incremental_sync) {
     cbm_remote_repo_config_t config;
     memset(&config, 0, sizeof(config));
 
-    int prepare_rc = cbm_remote_repo_prepare(
-        "remote-sync", fixture.remote_url, "main", 60, fixture.managed_dir,
-        sizeof(fixture.managed_dir), error, sizeof(error));
+    int prepare_rc =
+        cbm_remote_repo_prepare("remote-sync", fixture.remote_url, "main", 60, fixture.managed_dir,
+                                sizeof(fixture.managed_dir), error, sizeof(error));
     bool clone_exists = cbm_is_dir(fixture.managed_dir);
     int load_rc = prepare_rc == 0 ? cbm_remote_repo_load(fixture.managed_dir, &config) : -1;
     int initial_sync_rc = load_rc == 0
@@ -2246,6 +2248,103 @@ TEST(remote_repo_prepare_and_incremental_sync) {
     PASS();
 }
 
+TEST(remote_repo_path_availability_preserves_existing_targets) {
+    remote_fixture_t fixture;
+    if (!remote_fixture_setup(&fixture, "foo-git")) {
+        FAIL("remote fixture setup failed");
+    }
+
+    char local_path[1024];
+    char local_contents[64] = {0};
+    char error[1024] = {0};
+    bool local_available = false;
+    bool different_branch_available = false;
+    int local_prepare_rc = -1;
+    snprintf(local_path, sizeof(local_path), "%s/repos/foo", fixture.cache_dir);
+    char repos_dir[1024];
+    snprintf(repos_dir, sizeof(repos_dir), "%s/repos", fixture.cache_dir);
+    int mkdir_rc = th_mkdir_p(repos_dir);
+    int write_rc = mkdir_rc == 0 ? th_write_file(local_path, "local source\n") : -1;
+    if (write_rc == 0) {
+        local_available = cbm_remote_repo_path_available(local_path, fixture.remote_url, "main");
+        local_prepare_rc =
+            cbm_remote_repo_prepare("foo", fixture.remote_url, "main", 60, local_path,
+                                    sizeof(local_path), error, sizeof(error));
+        FILE *file = fopen(local_path, "rb");
+        if (file) {
+            (void)fread(local_contents, 1, sizeof(local_contents) - 1, file);
+            fclose(file);
+        }
+    }
+
+    char managed_path[1024];
+    snprintf(managed_path, sizeof(managed_path), "%s", fixture.managed_dir);
+    char clone_error[1024] = {0};
+    int clone_rc = cbm_remote_repo_prepare("foo-git", fixture.remote_url, "main", 60, managed_path,
+                                           sizeof(managed_path), clone_error, sizeof(clone_error));
+    int reuse_rc = clone_rc == 0 ? cbm_remote_repo_prepare("foo-git", fixture.remote_url, "main",
+                                                           300, managed_path, sizeof(managed_path),
+                                                           clone_error, sizeof(clone_error))
+                                 : -1;
+    bool same_config_available =
+        reuse_rc == 0 && cbm_remote_repo_path_available(managed_path, fixture.remote_url, "main");
+    different_branch_available = reuse_rc == 0 && !cbm_remote_repo_path_available(
+                                                      managed_path, fixture.remote_url, "release");
+    cbm_remote_repo_config_t config;
+    memset(&config, 0, sizeof(config));
+    int load_rc = reuse_rc == 0 ? cbm_remote_repo_load(managed_path, &config) : -1;
+    int sync_rc = load_rc == 0 ? cbm_remote_repo_sync(managed_path, &config, NULL, 0, clone_error,
+                                                      sizeof(clone_error))
+                               : -1;
+    int remove_rc = sync_rc >= 0 ? cbm_remote_repo_remove_managed("foo-git", managed_path) : -1;
+    bool local_still_exists = cbm_file_exists(local_path);
+
+    remote_fixture_teardown(&fixture);
+
+    ASSERT_EQ(mkdir_rc, 0);
+    ASSERT_EQ(write_rc, 0);
+    ASSERT_FALSE(local_available);
+    ASSERT_EQ(local_prepare_rc, -1);
+    ASSERT_STR_EQ(local_contents, "local source\n");
+    ASSERT_NOT_NULL(strstr(error, "different project ID"));
+    ASSERT_EQ(clone_rc, 0);
+    ASSERT_EQ(reuse_rc, 0);
+    ASSERT_TRUE(same_config_available);
+    ASSERT_TRUE(different_branch_available);
+    ASSERT_EQ(load_rc, 0);
+    ASSERT_EQ(sync_rc, 0);
+    ASSERT_EQ(remove_rc, 1);
+    ASSERT_TRUE(local_still_exists);
+    PASS();
+}
+
+TEST(remote_repo_path_availability_rejects_symlink) {
+#ifdef _WIN32
+    SKIP_PLATFORM("Windows symlinks require elevated privileges");
+#else
+    remote_fixture_t fixture;
+    if (!remote_fixture_setup(&fixture, "link-git")) {
+        FAIL("remote fixture setup failed");
+    }
+
+    char target[1024];
+    char link_path[1024];
+    char repos_dir[1024];
+    snprintf(target, sizeof(target), "%s/local-target", fixture.cache_dir);
+    snprintf(link_path, sizeof(link_path), "%s/repos/link-git", fixture.cache_dir);
+    snprintf(repos_dir, sizeof(repos_dir), "%s/repos", fixture.cache_dir);
+    ASSERT_EQ(th_mkdir_p(repos_dir), 0);
+    ASSERT_EQ(th_mkdir_p(target), 0);
+    ASSERT_EQ(symlink(target, link_path), 0);
+    ASSERT_FALSE(cbm_remote_repo_path_available(link_path, fixture.remote_url, "main"));
+    ASSERT_EQ(cbm_rmdir(target), 0);
+    ASSERT_FALSE(cbm_remote_repo_path_available(link_path, fixture.remote_url, "main"));
+    (void)cbm_unlink(link_path);
+    remote_fixture_teardown(&fixture);
+    PASS();
+#endif
+}
+
 TEST(watcher_polls_changed_remote_branch_once) {
     remote_fixture_t fixture;
     if (!remote_fixture_setup(&fixture, "remote-watcher")) {
@@ -2253,9 +2352,9 @@ TEST(watcher_polls_changed_remote_branch_once) {
     }
 
     char error[1024] = {0};
-    int prepare_rc = cbm_remote_repo_prepare(
-        "remote-watcher", fixture.remote_url, "main", 60, fixture.managed_dir,
-        sizeof(fixture.managed_dir), error, sizeof(error));
+    int prepare_rc = cbm_remote_repo_prepare("remote-watcher", fixture.remote_url, "main", 60,
+                                             fixture.managed_dir, sizeof(fixture.managed_dir),
+                                             error, sizeof(error));
     cbm_store_t *store = prepare_rc == 0 ? cbm_store_open_memory() : NULL;
     cbm_watcher_t *watcher = store ? cbm_watcher_new(store, index_callback, NULL) : NULL;
 
@@ -2299,6 +2398,8 @@ SUITE(watcher) {
     /* Managed remote repositories */
     RUN_TEST(remote_repo_validates_configuration);
     RUN_TEST(remote_repo_prepare_and_incremental_sync);
+    RUN_TEST(remote_repo_path_availability_preserves_existing_targets);
+    RUN_TEST(remote_repo_path_availability_rejects_symlink);
     RUN_TEST(watcher_polls_changed_remote_branch_once);
 
     /* Adaptive interval */

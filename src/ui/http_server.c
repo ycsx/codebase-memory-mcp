@@ -746,8 +746,8 @@ static void handle_processes(cbm_http_conn_t *c) {
     FILE *fp = popen("LC_ALL=C ps -eo pid,pcpu,rss,etime,comm 2>/dev/null"
                      " | grep '[c]odebase-memory-mcp'",
                      "r");
-    int proc_count = 0;
     if (fp) {
+        int proc_count = 0;
         char line[1024];
         while (fgets(line, sizeof(line), fp)) {
             int pid = 0;
@@ -993,11 +993,11 @@ static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
     {
         char esc_parent[2048];
-        char esc_allowed_root[2048];
         cbm_json_escape(esc_parent, (int)sizeof(esc_parent), parent);
         http_appendf(buf, sizeof(buf), &pos, "],\"parent\":\"%s\"", esc_parent);
         append_roots_json(buf, sizeof(buf), &pos, configured_root);
         if (configured_root[0]) {
+            char esc_allowed_root[2048];
             cbm_json_escape(esc_allowed_root, (int)sizeof(esc_allowed_root), configured_root);
             http_appendf(buf, sizeof(buf), &pos, ",\"allowed_root\":\"%s\"", esc_allowed_root);
         } else {
@@ -1585,7 +1585,15 @@ static void *index_thread_fn(void *arg) {
 enum {
     INDEX_JOB_NO_SLOT = -1,
     INDEX_JOB_THREAD_FAILED = -2,
+    INDEX_JOB_SOURCE_CONFLICT = -3,
 };
+
+static bool index_job_matches_source(const index_job_t *job, const char *root_path,
+                                     const char *remote_url, const char *remote_branch) {
+    return strcmp(job->root_path, root_path) == 0 &&
+           strcmp(job->remote_url, remote_url ? remote_url : "") == 0 &&
+           strcmp(job->remote_branch, remote_branch ? remote_branch : "") == 0;
+}
 
 static int start_index_job(cbm_http_server_t *srv, const char *root_path, const char *project_name,
                            const char *remote_url, const char *remote_branch,
@@ -1613,9 +1621,11 @@ static int start_index_job(cbm_http_server_t *srv, const char *root_path, const 
                                      g_index_jobs[i].project_name[0] == '\0' && root_path &&
                                      strcmp(g_index_jobs[i].root_path, root_path) == 0;
             if (status == 1 && (same_named_project || same_unnamed_root)) {
+                bool same_source = index_job_matches_source(&g_index_jobs[i], root_path, remote_url,
+                                                            remote_branch);
                 cbm_mutex_unlock(&g_index_jobs_mutex);
-                /* Starting the same operation twice is idempotent. */
-                return i;
+                /* Only the same source is idempotent; names alone are not identities. */
+                return same_source ? i : INDEX_JOB_SOURCE_CONFLICT;
             }
             bool completed_reaped = (status == 2 || status == 3) && !g_index_jobs[i].thread_valid &&
                                     !g_index_jobs[i].reaping;
@@ -1680,6 +1690,12 @@ static int start_index_job(cbm_http_server_t *srv, const char *root_path, const 
 }
 
 static bool reply_index_job_error(cbm_http_conn_t *c, int result) {
+    if (result == INDEX_JOB_SOURCE_CONFLICT) {
+        cbm_http_replyf(c, 409, g_cors_json,
+                        "{\"error\":\"project ID is indexing another repository or branch; "
+                        "choose a different project ID\"}");
+        return true;
+    }
     if (result == INDEX_JOB_NO_SLOT) {
         cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
         return true;
@@ -1756,7 +1772,74 @@ static void handle_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
                     slot, escaped_path);
 }
 
-/* POST /api/remote-index — clone a managed SSH repository and index it. */
+/* A project ID names both a database and a managed clone. Check both, including
+ * jobs whose clone/database has not been created yet. Never adopt local code. */
+static bool remote_index_project_available(const char *project, const char *managed_path,
+                                           const char *remote_url, const char *branch) {
+    index_jobs_init();
+    cbm_mutex_lock(&g_index_jobs_mutex);
+    for (int i = 0; i < MAX_INDEX_JOBS; i++) {
+        const index_job_t *job = &g_index_jobs[i];
+        if (atomic_load(&job->status) == 1 && strcmp(job->project_name, project) == 0) {
+            bool matches = index_job_matches_source(job, managed_path, remote_url, branch);
+            cbm_mutex_unlock(&g_index_jobs_mutex);
+            return matches;
+        }
+    }
+    cbm_mutex_unlock(&g_index_jobs_mutex);
+
+    if (!cbm_remote_repo_path_available(managed_path, remote_url, branch)) {
+        return false;
+    }
+    char db_path[1024];
+    db_path_for_project(project, db_path, sizeof(db_path));
+    if (!db_path[0]) {
+        return false;
+    }
+    if (cbm_file_exists(db_path)) {
+        char current_root[1024];
+        cbm_remote_repo_config_t config;
+        return root_path_for_project(project, current_root, sizeof(current_root)) &&
+               strcmp(current_root, managed_path) == 0 &&
+               cbm_remote_repo_load(managed_path, &config) == 0 &&
+               strcmp(config.remote_url, remote_url) == 0 && strcmp(config.branch, branch) == 0;
+    }
+    return true;
+}
+
+/* Keep existing names where possible. Only automatically derived IDs receive
+ * a suffix, so explicit IDs remain stable for MCP clients and project ACLs. */
+static bool resolve_remote_index_project(char *project, size_t project_size, bool automatic,
+                                         const char *remote_url, const char *branch,
+                                         char *managed_path, size_t managed_path_size) {
+    char base[CBM_REMOTE_PROJECT_MAX];
+    snprintf(base, sizeof(base), "%s", project);
+    enum { MAX_REMOTE_NAME_CANDIDATES = 100 };
+    for (int attempt = 0; attempt < (automatic ? MAX_REMOTE_NAME_CANDIDATES : 1); attempt++) {
+        if (attempt > 0) {
+            char suffix[24];
+            if (attempt == 1) {
+                snprintf(suffix, sizeof(suffix), "-git");
+            } else {
+                snprintf(suffix, sizeof(suffix), "-git-%d", attempt);
+            }
+            int base_limit = (int)project_size - (int)strlen(suffix) - 1;
+            if (base_limit <= 0) {
+                return false;
+            }
+            snprintf(project, project_size, "%.*s%s", base_limit, base, suffix);
+        }
+        if (!cbm_remote_repo_managed_path(project, managed_path, managed_path_size)) {
+            return false;
+        }
+        if (remote_index_project_available(project, managed_path, remote_url, branch)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* POST /api/remote-index — clone a managed Git repository and index it. */
 static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c,
                                       const cbm_http_req_t *req) {
     if (req->body_len == 0 || req->body_len > 4096) {
@@ -1819,17 +1902,12 @@ static void handle_remote_index_start(cbm_http_server_t *srv, cbm_http_conn_t *c
     }
 
     char managed_path[1024];
-    if (!cbm_remote_repo_managed_path(project_name, managed_path, sizeof(managed_path))) {
-        yyjson_doc_free(doc);
-        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"cannot resolve managed path\"}");
-        return;
-    }
-    char current_root[1024];
-    if (root_path_for_project(project_name, current_root, sizeof(current_root)) &&
-        strcmp(current_root, managed_path) != 0) {
+    if (!resolve_remote_index_project(project_name, sizeof(project_name), !requested_project[0],
+                                      normalized_url, branch, managed_path, sizeof(managed_path))) {
         yyjson_doc_free(doc);
         cbm_http_replyf(c, 409, g_cors_json,
-                        "{\"error\":\"project ID is already used by another repository\"}");
+                        "{\"error\":\"project ID or managed directory is already in use; "
+                        "choose a different project ID or leave it blank for automatic naming\"}");
         return;
     }
 
