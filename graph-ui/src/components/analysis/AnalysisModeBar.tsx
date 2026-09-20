@@ -1,6 +1,6 @@
-import { BookOpen, ClipboardCheck, Flame, GitCompareArrows, Orbit, SearchCode } from "lucide-react";
+import { BookOpen, ClipboardCheck, Flame, GitCompareArrows, Orbit, SearchCode, TableProperties } from "lucide-react";
 
-export type AnalysisMode = "explore" | "query" | "impact" | "hotspots" | "context" | "review";
+export type AnalysisMode = "explore" | "query" | "impact" | "hotspots" | "context" | "review" | "coverage";
 
 interface AnalysisModeBarProps {
   mode: AnalysisMode;
@@ -14,13 +14,14 @@ const MODES = [
   { id: "hotspots", label: "热点", icon: Flame },
   { id: "context", label: "上下文", icon: BookOpen },
   { id: "review", label: "评审", icon: ClipboardCheck },
+  { id: "coverage", label: "文档覆盖", icon: TableProperties },
 ] as const;
 
 export function AnalysisModeBar({ mode, onChange }: AnalysisModeBarProps) {
   return (
-    <div className="h-11 shrink-0 border-b border-border/30 bg-[#0b1920]/75 px-4 flex items-center justify-between">
+    <div className="h-11 min-w-0 shrink-0 overflow-x-auto border-b border-border/30 bg-[#0b1920]/75 px-4 flex items-center justify-between gap-3">
       <div
-        className="inline-flex h-8 items-center rounded-md border border-border/40 bg-black/15 p-0.5"
+        className="inline-flex h-8 shrink-0 items-center rounded-md border border-border/40 bg-black/15 p-0.5"
         role="tablist"
         aria-label="分析视图"
       >
@@ -31,7 +32,7 @@ export function AnalysisModeBar({ mode, onChange }: AnalysisModeBarProps) {
             role="tab"
             aria-selected={mode === id}
             onClick={() => onChange(id)}
-            className={`h-7 px-3 inline-flex items-center gap-1.5 rounded text-[11px] font-medium transition-colors ${
+            className={`h-7 shrink-0 whitespace-nowrap px-3 inline-flex items-center gap-1.5 rounded text-[11px] font-medium transition-colors ${
               mode === id
                 ? "bg-white/[0.09] text-foreground shadow-sm"
                 : "text-foreground/35 hover:text-foreground/65"
@@ -42,7 +43,7 @@ export function AnalysisModeBar({ mode, onChange }: AnalysisModeBarProps) {
           </button>
         ))}
       </div>
-      <p className="hidden md:block text-[10px] text-foreground/25">
+      <p className="hidden shrink-0 md:block text-[10px] text-foreground/25">
         {mode === "explore"
           ? "完整依赖图"
           : mode === "query"
@@ -53,7 +54,7 @@ export function AnalysisModeBar({ mode, onChange }: AnalysisModeBarProps) {
               ? "高入度风险"
               : mode === "context"
                 ? "任务证据包"
-                : "Git 变更评审"}
+                : mode === "coverage" ? "索引引用覆盖" : "Git 变更评审"}
       </p>
     </div>
   );

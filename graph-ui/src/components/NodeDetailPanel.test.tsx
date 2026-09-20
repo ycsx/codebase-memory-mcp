@@ -43,7 +43,7 @@ describe("NodeDetailPanel code preview + deep-link", () => {
   it("renders fetched source as escaped text, never as injected HTML", async () => {
     /* A payload that would execute if the code were rendered as raw HTML. */
     const payload = "<script>window.__pwned = true;</script>\nconst answer = 42;";
-    callToolMock.mockResolvedValueOnce({ source: payload });
+    callToolMock.mockImplementation((name: string) => Promise.resolve(name === "get_code_snippet" ? { source: payload } : { references: [], status: "ok" }));
 
     const { container } = render(
       <NodeDetailPanel

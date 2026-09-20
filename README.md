@@ -9,7 +9,7 @@
 
 - **本地优先**：索引、查询、向量语义搜索和 LSP 辅助解析均在本机执行；项目不内置大模型，也不要求 API Key、Docker 或语言运行时。
 - **结构化图谱**：包含 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource 等节点，以及 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等关系。
-- **20 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Markdown 文档及正反向引用查询、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
+- **22 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Markdown 文档及正反向引用查询、文档覆盖与复核确认、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
 - **文档与代码关联**：Markdown 的明确文件路径与完整限定名可生成带行号证据的 `REFERENCES`；上下文、影响分析和变更评审可按需带上相关文档，不把引用当作调用关系或文档过期结论。
 - **Tree-sitter + Hybrid LSP**：内置多语言、配置、模板和基础设施文件解析；对 Python、TypeScript/JavaScript/JSX/TSX、PHP、C#、Go、C/C++、Java、Kotlin、Rust、Perl 等语言提供类型和调用解析增强。具体结果以当前二进制的 `get_architecture` 和 `index_status` 为准。
 - **覆盖度可审计**：索引结果会区分 `parse_partial`、`skipped` 和按规则排除的 `not_indexed` 文件。没有记录缺口不等于证明仓库完整覆盖，重要结论应使用 `check_index_coverage` 并在必要时回退源码检查。
@@ -140,7 +140,7 @@ codebase-memory-mcp install -y
 重启客户端后检查 MCP 列表中是否出现 `codebase-memory-mcp`。若工具不可见，先重启或重新连接客户端，不要再次下载或重复安装二进制。
 
 ## MCP 工具
-<!-- mcp-tool-contract: total=20 -->
+<!-- mcp-tool-contract: total=22 -->
 
 | 类别 | 工具 | 用途 |
 |---|---|---|
@@ -151,7 +151,7 @@ codebase-memory-mcp install -y
 | 源码 | `get_code_snippet` | 根据 `search_graph` 返回的限定名读取函数、类或符号源码。 |
 | 分析 | `get_architecture`、`explain_impact`、`detect_changes`、`review_change` | 架构概览、单点影响、Git diff 和确定性变更评审。 |
 | 上下文 | `build_context` | 按任务、目标和 Token 预算编译可回溯的证据包；目标模糊时返回候选。 |
-| 文档 | `get_document`、`get_related_documents` | 读取文档章节与代码引用；从准确符号或文件反查相关文档及证据。 |
+| 文档 | `get_document`、`get_related_documents`、`get_document_coverage`、`update_document_review` | 读取章节与引用、反查相关文档、分页查看覆盖情况；显式确认或重新打开复核。 |
 | 校验 | `check_index_coverage`、`get_graph_schema` | 检查文件/目录覆盖度和图谱 schema。 |
 | 深度/记录 | `query_graph`、`manage_adr`、`ingest_traces` | 只读 Cypher 查询、架构决策记录和运行时调用 trace。 |
 

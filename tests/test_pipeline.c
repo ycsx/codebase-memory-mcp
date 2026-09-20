@@ -15,6 +15,7 @@
 #include "store/store.h"
 #include "git/git_context.h"
 #include "foundation/dump_verify.h"
+#include "foundation/log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -313,6 +314,15 @@ TEST(pipeline_adr_survives_full_reindex) {
     cbm_store_t *s1 = cbm_store_open_path(db_path);
     ASSERT_NOT_NULL(s1);
     ASSERT_EQ(cbm_store_adr_store(s1, project_copy, adr_text), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s1, project_copy, "doc:guide", "file:main.py",
+                                           "review-v1"), CBM_STORE_OK);
+    char *review_token = NULL;
+    char *reviewed_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(s1, project_copy, "doc:guide", "file:main.py",
+                                           &review_token, &reviewed_at), CBM_STORE_OK);
+    free(review_token);
+    /* No hashes guarantees the full-reindex path, independent of thresholds. */
+    ASSERT_EQ(cbm_store_delete_file_hashes(s1, project_copy), CBM_STORE_OK);
     cbm_store_close(s1);
 
     /* Force a full re-index: add enough files to exceed the incremental
@@ -339,6 +349,15 @@ TEST(pipeline_adr_survives_full_reindex) {
     ASSERT_NOT_NULL(adr.content);
     ASSERT_STR_EQ(adr.content, adr_text);
     cbm_store_adr_free(&adr);
+    char *restored_token = NULL;
+    char *restored_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(s2, project_copy, "doc:guide", "file:main.py",
+                                           &restored_token, &restored_at), CBM_STORE_OK);
+    ASSERT_STR_EQ(restored_token, "review-v1");
+    ASSERT_STR_EQ(restored_at, reviewed_at);
+    free(restored_token);
+    free(restored_at);
+    free(reviewed_at);
     cbm_store_close(s2);
 
     rm_rf(tmp);
@@ -6228,6 +6247,17 @@ TEST(incremental_detects_changed_file) {
     char *project = strdup(cbm_pipeline_project_name(p));
     cbm_pipeline_free(p);
 
+    cbm_store_t *before = cbm_store_open_path(g_incr_dbpath);
+    ASSERT_NOT_NULL(before);
+    ASSERT_EQ(cbm_store_document_review_set(before, project, "doc:guide", "file:helper.go",
+                                           "review-v1"), CBM_STORE_OK);
+    char *review_token = NULL;
+    char *reviewed_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(before, project, "doc:guide", "file:helper.go",
+                                           &review_token, &reviewed_at), CBM_STORE_OK);
+    free(review_token);
+    cbm_store_close(before);
+
     /* Modify helper.go — add a new function */
     char path[512];
     snprintf(path, sizeof(path), "%s/helper.go", g_incr_tmpdir);
@@ -6248,6 +6278,15 @@ TEST(incremental_detects_changed_file) {
     ASSERT_NOT_NULL(s);
     int nodes_after = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_after, 0);
+    char *restored_token = NULL;
+    char *restored_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(s, project, "doc:guide", "file:helper.go",
+                                           &restored_token, &restored_at), CBM_STORE_OK);
+    ASSERT_STR_EQ(restored_token, "review-v1");
+    ASSERT_STR_EQ(restored_at, reviewed_at);
+    free(restored_token);
+    free(restored_at);
+    free(reviewed_at);
     cbm_store_close(s);
     cbm_pipeline_free(p);
     free(project);
@@ -6299,6 +6338,126 @@ TEST(incremental_aborts_when_previous_coverage_is_unreadable) {
     free(project);
 
     cleanup_incremental_repo();
+    PASS();
+}
+
+static struct {
+    cbm_pipeline_t *pipeline;
+    const char *project;
+    bool incremental;
+    bool cancel;
+    bool fired;
+    int result;
+    char *reviewed_at;
+} g_review_during_reindex;
+
+/* Deterministically interleave a review write after full reindex removed its
+ * old graph, or after incremental graph publication, without timing sleeps. */
+static void review_during_reindex_log(const char *line) {
+    if (g_review_during_reindex.fired ||
+        (g_review_during_reindex.incremental
+             ? !strstr(line, "msg=incremental.dump")
+             : (!strstr(line, "msg=pipeline.route") || !strstr(line, "path=full")))) {
+        return;
+    }
+    g_review_during_reindex.fired = true;
+    cbm_store_t *s = cbm_store_open_path(g_incr_dbpath);
+    if (!s) {
+        g_review_during_reindex.result = CBM_STORE_ERR;
+        return;
+    }
+    g_review_during_reindex.result = cbm_store_document_review_set(
+        s, g_review_during_reindex.project, "doc:guide", "file:helper.go", "late-review");
+    char *token = NULL;
+    if (g_review_during_reindex.result == CBM_STORE_OK) {
+        g_review_during_reindex.result = cbm_store_document_review_get(
+            s, g_review_during_reindex.project, "doc:guide", "file:helper.go", &token,
+            &g_review_during_reindex.reviewed_at);
+    }
+    free(token);
+    cbm_store_close(s);
+    if (g_review_during_reindex.cancel) {
+        cbm_pipeline_cancel(g_review_during_reindex.pipeline);
+    }
+}
+
+TEST(pipeline_document_reviews_survive_interleaved_update_and_cancel) {
+    for (int scenario = 0; scenario < 3; scenario++) {
+        if (setup_incremental_repo() != 0) {
+            FAIL("setup failed");
+        }
+        cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+        ASSERT_NOT_NULL(p);
+        ASSERT_EQ(cbm_pipeline_run(p), 0);
+        char *project = strdup(cbm_pipeline_project_name(p));
+        cbm_pipeline_free(p);
+
+        cbm_store_t *s = cbm_store_open_path(g_incr_dbpath);
+        ASSERT_NOT_NULL(s);
+        ASSERT_EQ(cbm_store_document_review_set(s, project, "doc:guide", "file:helper.go",
+                                               "review-v1"), CBM_STORE_OK);
+        if (scenario != 2) {
+            ASSERT_EQ(cbm_store_delete_file_hashes(s, project), CBM_STORE_OK);
+        }
+        cbm_store_close(s);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/helper.go", g_incr_tmpdir);
+        ASSERT_EQ(th_append_file(path, "\nfunc AfterReview() int { return 7 }\n"), 0);
+
+        p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+        ASSERT_NOT_NULL(p);
+        memset(&g_review_during_reindex, 0, sizeof(g_review_during_reindex));
+        g_review_during_reindex.pipeline = p;
+        g_review_during_reindex.project = project;
+        g_review_during_reindex.incremental = scenario == 2;
+        g_review_during_reindex.cancel = scenario == 1;
+        CBMLogLevel old_level = cbm_log_get_level();
+        CBMLogFormat old_format = cbm_log_get_format();
+        cbm_log_set_level(CBM_LOG_INFO);
+        cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
+        cbm_log_set_sink(review_during_reindex_log);
+        int run_rc = cbm_pipeline_run(p);
+        cbm_log_set_sink(NULL);
+        cbm_log_set_level(old_level);
+        cbm_log_set_format(old_format);
+        cbm_pipeline_free(p);
+        ASSERT_TRUE(g_review_during_reindex.fired);
+        ASSERT_EQ(g_review_during_reindex.result, CBM_STORE_OK);
+        if (scenario == 1) {
+            ASSERT_TRUE(run_rc != 0);
+        } else {
+            ASSERT_EQ(run_rc, 0);
+        }
+        s = cbm_store_open_path(g_incr_dbpath);
+        ASSERT_NOT_NULL(s);
+        char *token = NULL;
+        char *reviewed_at = NULL;
+        ASSERT_EQ(cbm_store_document_review_get(s, project, "doc:guide", "file:helper.go",
+                                               &token, &reviewed_at), CBM_STORE_OK);
+        ASSERT_STR_EQ(token, "late-review");
+        ASSERT_STR_EQ(reviewed_at, g_review_during_reindex.reviewed_at);
+        free(token);
+        free(reviewed_at);
+        cbm_store_close(s);
+        /* Restart with a new pipeline object, without any captured review state. */
+        p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+        ASSERT_NOT_NULL(p);
+        ASSERT_EQ(cbm_pipeline_run(p), 0);
+        cbm_pipeline_free(p);
+        s = cbm_store_open_path(g_incr_dbpath);
+        ASSERT_NOT_NULL(s);
+        ASSERT_EQ(cbm_store_document_review_get(s, project, "doc:guide", "file:helper.go",
+                                               &token, &reviewed_at), CBM_STORE_OK);
+        ASSERT_STR_EQ(token, "late-review");
+        ASSERT_STR_EQ(reviewed_at, g_review_during_reindex.reviewed_at);
+        free(token);
+        free(reviewed_at);
+        free(g_review_during_reindex.reviewed_at);
+        g_review_during_reindex.reviewed_at = NULL;
+        cbm_store_close(s);
+        free(project);
+        cleanup_incremental_repo();
+    }
     PASS();
 }
 
@@ -7671,6 +7830,7 @@ SUITE(pipeline) {
     RUN_TEST(incremental_full_then_noop);
     RUN_TEST(incremental_detects_changed_file);
     RUN_TEST(incremental_aborts_when_previous_coverage_is_unreadable);
+    RUN_TEST(pipeline_document_reviews_survive_interleaved_update_and_cancel);
     RUN_TEST(incremental_detects_deleted_file);
     RUN_TEST(incremental_new_file_added);
     RUN_TEST(incremental_fast_preserves_mode_skipped_tools_dir);

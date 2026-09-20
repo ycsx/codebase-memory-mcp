@@ -180,9 +180,134 @@ TEST(document_refs_limit_cap) {
     PASS();
 }
 
+TEST(document_coverage_scope_filter_and_pagination) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    int64_t file = refs_node(store, "demo", "File", "demo.core", "src/core.c", "{}");
+    refs_node(store, "demo", "File", "demo.unused", "docs/example.py", "{}");
+    refs_node(store, "demo", "File", "demo.md", "README.MD", "{}");
+    refs_node(store, "demo", "File", "demo.mdx", "docs/page.mdx", "{}");
+    refs_node(store, "demo", "File", "demo.duplicate", "src/core.c", "{}");
+    int64_t symbol = refs_node(store, "demo", "Function", "demo.compute", "src/core.c", "{}");
+    int64_t doc = refs_node(store, "demo", "Document", "demo.guide", "docs/guide.md", refs_ok);
+    int64_t section = refs_node(store, "demo", "Section", "demo.section", "docs/guide.md", "{}");
+    int64_t foreign = refs_node(store, "other", "Document", "other.guide", "docs/guide.md", refs_ok);
+    int64_t foreign_target = refs_node(store, "other", "File", "other.core", "docs/example.py", "{}");
+    int64_t unreferenced = refs_node(store, "demo", "File", "demo.last", "z.c", "{}");
+    refs_edge(store, "demo", doc, file, 2, "document_links");
+    refs_edge(store, "demo", section, symbol, 3, "document_links");
+    refs_edge(store, "demo", foreign, unreferenced, 2, "document_links");
+    refs_edge(store, "demo", symbol, unreferenced, 2, "document_links");
+    refs_edge(store, "demo", doc, foreign_target, 2, "document_links");
+    refs_edge(store, "demo", doc, unreferenced, 2, "manual");
+    char *raw = cbm_document_coverage_json(store, "demo", "code", NULL, 0, 1);
+    ASSERT_NOT_NULL(raw);
+    yyjson_doc *json = yyjson_read(raw, strlen(raw), 0);
+    yyjson_val *root = yyjson_doc_get_root(json);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 3);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "has_more")));
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "next_offset")), 1);
+    yyjson_val *summary = yyjson_obj_get(root, "summary");
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(summary, "indexed_code_files")), 3);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(summary, "referenced_code_files")), 1);
+    yyjson_val *item = yyjson_arr_get(yyjson_obj_get(root, "items"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(item, "file_path")), "docs/example.py");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(item, "status")), "not_referenced");
+    yyjson_doc_free(json);
+    free(raw);
+    raw = cbm_document_coverage_json(store, "demo", "code", "referenced", 0, 100);
+    ASSERT_NOT_NULL(raw);
+    json = yyjson_read(raw, strlen(raw), 0);
+    root = yyjson_doc_get_root(json);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 1);
+    ASSERT_TRUE(yyjson_is_null(yyjson_obj_get(root, "next_offset")));
+    item = yyjson_arr_get(yyjson_obj_get(root, "items"), 0);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(item, "reference_count")), 2);
+    yyjson_doc_free(json);
+    free(raw);
+    raw = cbm_document_coverage_json(store, "demo", "code", "not_referenced", 1, 100);
+    ASSERT_NOT_NULL(raw);
+    json = yyjson_read(raw, strlen(raw), 0);
+    root = yyjson_doc_get_root(json);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 2);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "returned")), 1);
+    item = yyjson_arr_get(yyjson_obj_get(root, "items"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(item, "file_path")), "z.c");
+    yyjson_doc_free(json);
+    free(raw);
+    cbm_store_close(store);
+    PASS();
+}
+
+TEST(document_coverage_document_status_and_limits) {
+    cbm_store_t *store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(store);
+    refs_node(store, "demo", "Document", "demo.ok", "a.md", refs_ok);
+    refs_node(store, "demo", "Document", "demo.limited", "b.md",
+              "{\"document_links\":{\"status\":\"limited\",\"reason\":\"unsupported_multiline_code\","
+              "\"index_version\":1}}");
+    refs_node(store, "demo", "Document", "demo.unknown", "c.md", "bad-json");
+    refs_node(store, "demo", "Document", "demo.version", "d.md",
+              "{\"document_links\":{\"status\":\"ok\",\"index_version\":2}}");
+    char *raw = cbm_document_coverage_json(store, "demo", "documents", "limited", 0, 10);
+    ASSERT_NOT_NULL(raw);
+    yyjson_doc *json = yyjson_read(raw, strlen(raw), 0);
+    yyjson_val *root = yyjson_doc_get_root(json);
+    yyjson_val *summary = yyjson_obj_get(root, "summary");
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(summary, "indexed_documents")), 4);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(summary, "limited_documents")), 1);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(summary, "unknown_documents")), 2);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 1);
+    yyjson_val *item = yyjson_arr_get(yyjson_obj_get(root, "items"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(item, "qualified_name")), "demo.limited");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(yyjson_obj_get(item, "reasons"), 0)),
+                  "unsupported_multiline_code");
+    yyjson_doc_free(json);
+    free(raw);
+    raw = cbm_document_coverage_json(store, "demo", "documents", "unknown", 0, 10);
+    ASSERT_NOT_NULL(raw);
+    json = yyjson_read(raw, strlen(raw), 0);
+    root = yyjson_doc_get_root(json);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 2);
+    item = yyjson_arr_get(yyjson_obj_get(root, "items"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_arr_get(yyjson_obj_get(item, "reasons"), 0)),
+                  "reindex_required");
+    yyjson_doc_free(json);
+    free(raw);
+    for (int i = 0; i < 105; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "file%03d.c", i);
+        refs_node(store, "demo", "File", qn, qn, "{}");
+    }
+    raw = cbm_document_coverage_json(store, "demo", "code", "", 0, 1000);
+    ASSERT_NOT_NULL(raw);
+    json = yyjson_read(raw, strlen(raw), 0);
+    root = yyjson_doc_get_root(json);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "returned")), 100);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "next_offset")), 100);
+    yyjson_doc_free(json);
+    free(raw);
+    raw = cbm_document_coverage_json(store, "demo", "code", NULL, 999, 10);
+    ASSERT_NOT_NULL(raw);
+    json = yyjson_read(raw, strlen(raw), 0);
+    root = yyjson_doc_get_root(json);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "returned")), 0);
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(root, "has_more")));
+    yyjson_doc_free(json);
+    free(raw);
+    ASSERT_NULL(cbm_document_coverage_json(store, "demo", "code", "ok", 0, 10));
+    ASSERT_NULL(cbm_document_coverage_json(store, "demo", "documents", "referenced", 0, 10));
+    ASSERT_NULL(cbm_document_coverage_json(store, "demo", "invalid", NULL, 0, 10));
+    ASSERT_NULL(cbm_document_coverage_json(store, "demo", "code", NULL, -1, 10));
+    cbm_store_close(store);
+    PASS();
+}
+
 SUITE(document_refs) {
     RUN_TEST(document_refs_order_evidence_and_dedup);
     RUN_TEST(document_refs_project_and_producer_isolation);
     RUN_TEST(document_refs_analysis_is_not_negative_proof);
     RUN_TEST(document_refs_limit_cap);
+    RUN_TEST(document_coverage_scope_filter_and_pagination);
+    RUN_TEST(document_coverage_document_status_and_limits);
 }

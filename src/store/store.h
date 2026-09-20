@@ -297,6 +297,23 @@ int cbm_store_get_project(cbm_store_t *s, const char *name, cbm_project_t *out);
 int cbm_store_list_projects(cbm_store_t *s, cbm_project_t **out, int *count);
 int cbm_store_delete_project(cbm_store_t *s, const char *name);
 
+/* File-backed reviews live in <db_path>.reviews.sqlite, independent of graph
+ * replacement. An in-memory store uses its own table. A query-only graph
+ * handle may explicitly write reviews; reads never create the sidecar.
+ * NULL token deletes an acknowledgement.
+ * get returns OK, NOT_FOUND, or ERR; both outputs are initialized to NULL and
+ * successful outputs are heap strings the caller must free(). */
+int cbm_store_document_review_get(cbm_store_t *s, const char *project,
+                                  const char *source_qualified_name,
+                                  const char *target_qualified_name, char **token,
+                                  char **reviewed_at);
+int cbm_store_document_review_set(cbm_store_t *s, const char *project,
+                                  const char *source_qualified_name,
+                                  const char *target_qualified_name, const char *token);
+/* Delete only this project's sidecar rows, even if the graph file is absent.
+ * Missing sidecars succeed; empty sidecars remain to avoid racing writers. */
+int cbm_store_document_reviews_delete(const char *graph_db_path, const char *project);
+
 /* Fetch/free the stable metadata for the project's current generation. */
 int cbm_store_project_metadata_create(const char *indexed_commit, cbm_project_metadata_t *out);
 int cbm_store_set_project_metadata(cbm_store_t *s, const char *name,

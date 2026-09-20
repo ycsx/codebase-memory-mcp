@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -15,6 +15,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { colorForLabel } from "../lib/colors";
 import { graphNodeLabel, graphRelationshipLabel } from "../lib/graphLabels";
 import { callTool } from "../api/rpc";
+import { RelatedDocumentsPanel } from "./RelatedDocuments";
 import { graphEdgeEndpointKey, graphNodeKey, type GraphEdge, type GraphNode, type RepoInfo } from "../lib/types";
 
 const CONNECTION_PREVIEW_LIMIT = 25;
@@ -99,6 +100,9 @@ export function NodeDetailPanel({
   const [codeError, setCodeError] = useState<string | null>(null);
   const [connectionQuery, setConnectionQuery] = useState("");
   const [showAllConnections, setShowAllConnections] = useState(false);
+  const codeRequest = useRef<AbortController | null>(null);
+  const nodeProject = node.graph_project ?? project;
+  const selectedKey = `${nodeProject}:${graphNodeKey(node)}:${node.qualified_name}`;
 
   useEffect(() => {
     setCode(null);
@@ -106,10 +110,13 @@ export function NodeDetailPanel({
     setCodeLoading(false);
     setConnectionQuery("");
     setShowAllConnections(false);
-  }, [graphNodeKey(node)]);
+    return () => codeRequest.current?.abort();
+  }, [selectedKey]);
 
-  const nodeProject = node.graph_project ?? project;
   const canFetchCode = Boolean(nodeProject && node.qualified_name);
+  const documentTarget = node.label === "File" && node.file_path
+    ? `file:${node.file_path}`
+    : node.qualified_name;
   /* The primary repo metadata cannot safely build a deep link for a satellite
    * project; avoid presenting a link that points at the wrong repository. */
   const ghUrl =
@@ -119,18 +126,21 @@ export function NodeDetailPanel({
 
   const loadCode = async () => {
     if (!nodeProject || !node.qualified_name) return;
+    codeRequest.current?.abort();
+    const controller = new AbortController();
+    codeRequest.current = controller;
     setCodeLoading(true);
     setCodeError(null);
     try {
       const result = await callTool<SnippetResult>("get_code_snippet", {
         qualified_name: node.qualified_name,
         project: nodeProject,
-      });
-      setCode(result.source ?? "(source not available)");
+      }, controller.signal);
+      if (!controller.signal.aborted) setCode(result.source ?? "(source not available)");
     } catch (error) {
-      setCodeError(error instanceof Error ? error.message : "代码加载失败");
+      if (!controller.signal.aborted) setCodeError(error instanceof Error ? error.message : "代码加载失败");
     } finally {
-      setCodeLoading(false);
+      if (!controller.signal.aborted) setCodeLoading(false);
     }
   };
 
@@ -346,6 +356,9 @@ export function NodeDetailPanel({
 
       <ScrollArea className="min-h-0 flex-1">
         <div className={`space-y-5 py-3 ${expanded ? "px-5" : "px-4"}`}>
+          {nodeProject && documentTarget && node.label !== "Document" && node.label !== "Section" && (
+            <RelatedDocumentsPanel key={`${selectedKey}:${documentTarget}`} project={nodeProject} target={documentTarget} />
+          )}
           {filteredOutbound.length > 0 && (
             <ConnectionSection
               title="引用"

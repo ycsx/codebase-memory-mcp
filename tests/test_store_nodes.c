@@ -198,6 +198,141 @@ TEST(store_generation_migrates_legacy_database_to_unknown) {
     PASS();
 }
 
+TEST(store_document_review_roundtrip_and_isolation) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    char *token = NULL;
+    char *reviewed_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_NOT_FOUND);
+    ASSERT_NULL(token);
+    ASSERT_NULL(reviewed_at);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", "first"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s, "other", "doc", "code", "isolated"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "other", "target"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "other", "code", "source"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", "second"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "second");
+    ASSERT_EQ(strlen(reviewed_at), 20);
+    ASSERT_EQ(reviewed_at[10], 'T');
+    ASSERT_EQ(reviewed_at[19], 'Z');
+    free(token);
+    free(reviewed_at);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", NULL), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", NULL), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_NOT_FOUND);
+    ASSERT_EQ(cbm_store_document_review_get(s, "other", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "isolated");
+    free(token);
+    free(reviewed_at);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "other", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "target");
+    free(token);
+    free(reviewed_at);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "other", "code", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "source");
+    free(token);
+    free(reviewed_at);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_document_review_survives_graph_reset_and_reopen) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/cbm_store_review_%d.db", cbm_tmpdir(), (int)getpid());
+    unlink(path);
+    char review_path[544];
+    snprintf(review_path, sizeof(review_path), "%s.reviews.sqlite", path);
+    unlink(review_path);
+    cbm_store_t *s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+    char *token = NULL;
+    char *reviewed_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_NOT_FOUND);
+    ASSERT_TRUE(access(review_path, F_OK) != 0);
+    ASSERT_EQ(cbm_store_upsert_project(s, "p", "/project"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", "remember"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_delete_nodes_by_project(s, "p"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_delete_project(s, "p"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_upsert_project(s, "p", "/project"), CBM_STORE_OK);
+    cbm_store_close(s);
+    /* Replace the entire graph file, not just its nodes. */
+    ASSERT_EQ(unlink(path), 0);
+    s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_upsert_project(s, "p", "/project"), CBM_STORE_OK);
+    cbm_store_close(s);
+    s = cbm_store_open_path_query(path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "remember");
+    free(token);
+    free(reviewed_at);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", "query-handle"),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "query-handle");
+    free(token);
+    free(reviewed_at);
+    ASSERT_EQ(cbm_store_document_review_set(s, "other", "doc", "code", "other-project"),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_exec(s, "DELETE FROM projects;"), CBM_STORE_ERR);
+    cbm_store_close(s);
+    unlink(path);
+    ASSERT_EQ(cbm_store_document_reviews_delete(path, "p"), CBM_STORE_OK);
+    s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_NOT_FOUND);
+    ASSERT_EQ(cbm_store_document_review_get(s, "other", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(token, "other-project");
+    free(token);
+    free(reviewed_at);
+    cbm_store_close(s);
+    unlink(path);
+    unlink(review_path);
+    ASSERT_EQ(cbm_store_document_reviews_delete(path, "p"), CBM_STORE_OK);
+    char sidecar[544];
+    snprintf(sidecar, sizeof(sidecar), "%s-wal", path);
+    unlink(sidecar);
+    snprintf(sidecar, sizeof(sidecar), "%s-shm", path);
+    unlink(sidecar);
+    PASS();
+}
+
+TEST(store_document_review_legacy_and_invalid_arguments) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    char *token = NULL;
+    char *reviewed_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_set(NULL, "p", "doc", "code", "v"), CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_document_review_set(s, "", "doc", "code", "v"), CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", NULL, "code", "v"), CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "", "v"), CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_document_review_set(s, "p", "doc", "code", ""), CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", NULL, &reviewed_at),
+              CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &token),
+              CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_exec(s, "DROP TABLE document_reviews;"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_document_review_get(s, "p", "doc", "code", &token, &reviewed_at),
+              CBM_STORE_NOT_FOUND);
+    ASSERT_NULL(token);
+    ASSERT_NULL(reviewed_at);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(store_project_delete) {
     cbm_store_t *s = cbm_store_open_memory();
     cbm_store_upsert_project(s, "test", "/tmp/test");
@@ -2042,6 +2177,9 @@ TEST(store_coverage_replace_rolls_back_when_shadow_rebuild_fails) {
 }
 
 SUITE(store_nodes) {
+    RUN_TEST(store_document_review_roundtrip_and_isolation);
+    RUN_TEST(store_document_review_survives_graph_reset_and_reopen);
+    RUN_TEST(store_document_review_legacy_and_invalid_arguments);
     RUN_TEST(store_coverage_roundtrip_prune_shadow);
     RUN_TEST(store_coverage_targeted_path_and_scope_lookup);
     RUN_TEST(store_coverage_meta_zero_row_truncation_and_delete);

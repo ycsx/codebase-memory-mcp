@@ -8,6 +8,7 @@
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "../src/foundation/constants.h"
 #include "../src/foundation/log.h"
+#include "../src/foundation/platform.h"
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <cli/cli.h>
@@ -453,6 +454,8 @@ TEST(mcp_tools_have_behavior_annotations) {
         {"search_code", true, false, true, false},
         {"get_document", true, false, true, false},
         {"get_related_documents", true, false, true, false},
+        {"get_document_coverage", true, false, true, false},
+        {"update_document_review", false, false, true, false},
         {"list_projects", true, false, true, false},
         {"delete_project", false, true, true, false},
         {"index_status", true, false, true, false},
@@ -1139,7 +1142,7 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     /* The first page contains eight tools; the second page advertises the
      * final three-item page through nextCursor. */
     ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\":\"16\""));
-    ASSERT_NOT_NULL(strstr(resp, "index_status"));
+    ASSERT_NOT_NULL(strstr(resp, "get_document_coverage"));
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/"
@@ -1176,6 +1179,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
         "build_context",    "review_change",        "get_code_snippet", "get_graph_schema",
         "get_architecture", "search_code",          "get_document",     "list_projects",
         "index_status",     "check_index_coverage", "detect_changes",   "get_related_documents",
+        "get_document_coverage",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1214,7 +1218,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":223,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_EQ(mcp_response_tool_count(resp), 10U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 11U);
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search_graph"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace_path"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "explain_impact"));
@@ -1225,6 +1229,8 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "check_index_coverage"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_document"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_related_documents"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_document_coverage"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "update_document_review"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_code"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_graph_schema"));
@@ -2090,6 +2096,112 @@ TEST(tool_get_related_documents_exact_file_and_limit) {
         free(response);
     }
     cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_document_review_content_bound_lifecycle) {
+    char repo[512], path[640];
+    snprintf(repo, sizeof(repo), "%s/cbm-doc-review-state-XXXXXX", cbm_tmpdir());
+    ASSERT_TRUE(cbm_mkdtemp(repo));
+    snprintf(path, sizeof(path), "%s/mod.py", repo);
+    ASSERT_EQ(th_write_file(path, "def compute():\n    return 1\n"), 0);
+    snprintf(path, sizeof(path), "%s/guide.md", repo);
+    ASSERT_EQ(th_write_file(path, "# Guide\n[code](mod.py)\n"), 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(related_documents_fixture(srv, repo));
+    snprintf(path, sizeof(path), "%s/related-documents.db", repo);
+    ASSERT_EQ(cbm_store_dump_to_file(cbm_mcp_server_store(srv), path), CBM_STORE_OK);
+    cbm_mcp_server_free(srv);
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", repo, 1);
+    /* Real cache-backed queries are read-only; mutations must reopen the same DB. */
+    srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    const char *query =
+        "{\"project\":\"related-documents\",\"target\":\"related-documents.mod.compute\"}";
+    char token[65] = {0};
+    for (int step = 0; step < 5; step++) {
+        char *response = cbm_mcp_handle_tool(srv, "get_related_documents", query);
+        char *text = extract_text_content(response);
+        ASSERT_NOT_NULL(text);
+        yyjson_doc *doc = yyjson_read(text, strlen(text), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *ref = yyjson_arr_get(
+            yyjson_obj_get(yyjson_doc_get_root(doc), "references"), 0);
+        yyjson_val *review = yyjson_obj_get(ref, "review");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(review, "state")),
+                      step == 1 ? "confirmed" : step == 4 ? "unavailable" : "pending");
+        const char *fresh = yyjson_get_str(yyjson_obj_get(review, "token"));
+        if (step < 4) {
+            ASSERT_NOT_NULL(fresh);
+            ASSERT_EQ(strlen(fresh), 64U);
+        } else {
+            ASSERT_TRUE(yyjson_is_null(yyjson_obj_get(review, "token")));
+        }
+        if (step == 0 || step == 2) {
+            snprintf(token, sizeof(token), "%s", fresh);
+        }
+        yyjson_doc_free(doc);
+        free(text);
+        free(response);
+        char args[1024];
+        snprintf(args, sizeof(args),
+                 "{\"project\":\"related-documents\","
+                 "\"source_qualified_name\":\"related-documents.guide.md.Usage\","
+                 "\"target_qualified_name\":\"related-documents.mod.compute\","
+                 "\"token\":\"%s\",\"action\":\"%s\"}", token,
+                 step == 1 ? "reopen" : "confirm");
+        if (step < 3) {
+            response = cbm_mcp_handle_tool(srv, "update_document_review", args);
+            ASSERT_NOT_NULL(response);
+            ASSERT_NULL(strstr(response, "\"isError\":true"));
+            free(response);
+        }
+        if (step == 2) {
+            snprintf(path, sizeof(path), "%s/mod.py", repo);
+            ASSERT_EQ(th_write_file(path, "def compute():\n    return 2\n"), 0);
+            response = cbm_mcp_handle_tool(srv, "update_document_review", args);
+            ASSERT_NOT_NULL(strstr(response, "stale review token"));
+            free(response);
+        }
+        if (step == 3) {
+            snprintf(path, sizeof(path), "%s/guide.md", repo);
+            ASSERT_EQ(remove(path), 0);
+        }
+    }
+    char *response = cbm_mcp_handle_tool(
+        srv, "get_document_coverage",
+        "{\"project\":\"related-documents\",\"view\":\"documents\",\"limit\":1}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NOT_NULL(strstr(response, "indexed_documents"));
+    free(response);
+    response = cbm_mcp_handle_tool(
+        srv, "get_document_coverage",
+        "{\"project\":\"related-documents\",\"view\":\"code\",\"status\":\"missing\"}");
+    ASSERT_NOT_NULL(strstr(response, "\"isError\":true"));
+    free(response);
+    snprintf(path, sizeof(path), "%s/related-documents.db.reviews.sqlite", repo);
+    ASSERT_TRUE(cbm_file_exists(path));
+    response = cbm_mcp_handle_tool(srv, "delete_project",
+                                   "{\"project\":\"related-documents\"}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NULL(strstr(response, "\"isError\":true"));
+    free(response);
+    snprintf(path, sizeof(path), "%s/related-documents.db", repo);
+    cbm_store_t *recreated = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(recreated);
+    char *saved_token = NULL, *saved_at = NULL;
+    ASSERT_EQ(cbm_store_document_review_get(
+                  recreated, "related-documents", "related-documents.guide.md.Usage",
+                  "related-documents.mod.compute", &saved_token, &saved_at),
+              CBM_STORE_NOT_FOUND);
+    cbm_store_close(recreated);
+    cbm_mcp_server_free(srv);
+    restore_cache_dir(saved_copy);
+    free(saved_copy);
+    th_rmtree(repo);
     PASS();
 }
 
@@ -5201,8 +5313,26 @@ TEST(tool_review_change_related_documents_toggle_and_budget) {
         } else {
             ASSERT_NOT_NULL(related);
             ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(related, "total")), 2);
+            yyjson_val *basis = yyjson_obj_get(related, "review_basis");
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(basis, "requested_ref")), "main");
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(basis, "freshness")), "stale");
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(basis, "reference_snapshot")),
+                          "current_index");
             if (i == 0) {
                 ASSERT_EQ(yyjson_arr_size(yyjson_obj_get(related, "references")), 2);
+                size_t ri, rn;
+                yyjson_val *item;
+                yyjson_arr_foreach(yyjson_obj_get(related, "references"), ri, rn, item) {
+                    yyjson_val *review = yyjson_obj_get(item, "review");
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(review, "status")), "review");
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(review, "reason")),
+                                  "referenced_file_changed");
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(review, "changed_file")), "mod.py");
+                    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(review, "document_changed")));
+                    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(review, "target_qualified_name")),
+                                  yyjson_get_str(yyjson_obj_get(yyjson_obj_get(item, "target"),
+                                                                "qualified_name")));
+                }
             } else {
                 ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(related, "budget_truncated")));
                 ASSERT_TRUE(yyjson_arr_size(yyjson_obj_get(related, "references")) < 2);
@@ -5214,6 +5344,96 @@ TEST(tool_review_change_related_documents_toggle_and_budget) {
     }
     cbm_mcp_server_free(srv);
     th_rmtree(repo);
+    PASS();
+}
+
+TEST(tool_review_change_document_reminder_scope) {
+    for (int scenario = 0; scenario < 3; scenario++) {
+        char repo[512], path[640];
+        snprintf(repo, sizeof(repo), "%s/cbm-doc-reminder-XXXXXX", cbm_tmpdir());
+        ASSERT_TRUE(cbm_mkdtemp(repo));
+        snprintf(path, sizeof(path), "%s/docs", repo);
+        cbm_mkdir(path);
+        const char *code_path = scenario == 2 ? "docs/example.py" : "mod.py";
+        snprintf(path, sizeof(path), "%s/%s", repo, code_path);
+        ASSERT_EQ(th_write_file(path, "def compute():\n    return 1\n"), 0);
+        snprintf(path, sizeof(path), "%s/guide.md", repo);
+        ASSERT_EQ(th_write_file(path, "# Guide\n"), 0);
+        ASSERT_TRUE(detect_changes_git_step(repo, "init -q"));
+        ASSERT_TRUE(detect_changes_git_step(repo, "add -A"));
+        ASSERT_TRUE(detect_changes_git_step(repo, "commit -q -m initial"));
+        ASSERT_EQ(th_write_file(path, "# Updated guide\n"), 0);
+        if (scenario != 1) {
+            snprintf(path, sizeof(path), "%s/%s", repo, code_path);
+            ASSERT_EQ(th_write_file(path, "def compute():\n    return 2\n"), 0);
+        }
+        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        ASSERT_NOT_NULL(srv);
+        ASSERT_TRUE(related_documents_fixture(srv, repo));
+        cbm_store_t *store = cbm_mcp_server_store(srv);
+        if (scenario == 2) {
+            cbm_node_t *nodes = NULL;
+            int count = 0;
+            ASSERT_EQ(
+                cbm_store_find_nodes_by_file(store, "related-documents", "mod.py", &nodes, &count),
+                CBM_STORE_OK);
+            for (int ni = 0; ni < count; ni++) {
+                const char *old_path = nodes[ni].file_path;
+                nodes[ni].file_path = code_path;
+                ASSERT_TRUE(cbm_store_upsert_node(store, &nodes[ni]) > 0);
+                nodes[ni].file_path = old_path;
+            }
+            cbm_store_free_nodes(nodes, count);
+        }
+        cbm_project_metadata_t metadata = {0};
+        ASSERT_EQ(cbm_store_project_metadata_create(NULL, &metadata), CBM_STORE_OK);
+        ASSERT_EQ(cbm_store_set_project_metadata(store, "related-documents", &metadata),
+                  CBM_STORE_OK);
+        cbm_store_project_metadata_clear(&metadata);
+        char *response =
+            cbm_mcp_handle_tool(srv, "review_change",
+                                "{\"project\":\"related-documents\",\"since\":\"HEAD\","
+                                "\"base_branch\":\"nonexistent-ref\",\"token_budget\":8000}");
+        ASSERT_NOT_NULL(response);
+        char *text = extract_text_content(response);
+        ASSERT_NOT_NULL(text);
+        yyjson_doc *parsed = yyjson_read(text, strlen(text), 0);
+        ASSERT_NOT_NULL(parsed);
+        yyjson_val *root = yyjson_doc_get_root(parsed);
+        yyjson_val *related = yyjson_obj_get(root, "related_documentation");
+        ASSERT_NOT_NULL(related);
+        yyjson_val *basis = yyjson_obj_get(related, "review_basis");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(basis, "requested_ref")), "HEAD");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(basis, "freshness")), "stale");
+        ASSERT_EQ(yyjson_arr_size(yyjson_obj_get(related, "references")), scenario == 1 ? 0 : 2);
+        size_t ri, rn;
+        yyjson_val *item;
+        yyjson_arr_foreach(yyjson_obj_get(related, "references"), ri, rn, item) {
+            yyjson_val *review = yyjson_obj_get(item, "review");
+            ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(review, "document_changed")));
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(review, "changed_file")), code_path);
+        }
+        char *without = cbm_mcp_handle_tool(srv, "review_change",
+                                            "{\"project\":\"related-documents\",\"since\":\"HEAD\","
+                                            "\"include_docs\":false,\"token_budget\":8000}");
+        char *without_text = extract_text_content(without);
+        ASSERT_NOT_NULL(without_text);
+        yyjson_doc *without_doc = yyjson_read(without_text, strlen(without_text), 0);
+        ASSERT_NOT_NULL(without_doc);
+        yyjson_val *without_root = yyjson_doc_get_root(without_doc);
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(root, "risk")),
+                      yyjson_get_str(yyjson_obj_get(without_root, "risk")));
+        ASSERT_TRUE(
+            yyjson_equals(yyjson_obj_get(root, "rules"), yyjson_obj_get(without_root, "rules")));
+        yyjson_doc_free(without_doc);
+        free(without_text);
+        free(without);
+        yyjson_doc_free(parsed);
+        free(text);
+        free(response);
+        cbm_mcp_server_free(srv);
+        th_rmtree(repo);
+    }
     PASS();
 }
 
@@ -8263,9 +8483,11 @@ SUITE(mcp) {
     RUN_TEST(tool_get_document_returns_ordered_sections);
     RUN_TEST(tool_get_document_returns_reference_evidence_and_limit);
     RUN_TEST(tool_get_related_documents_exact_file_and_limit);
+    RUN_TEST(tool_document_review_content_bound_lifecycle);
     RUN_TEST(tool_get_related_documents_does_not_guess_short_names);
     RUN_TEST(tool_explain_impact_related_documents_do_not_change_code_risk);
     RUN_TEST(tool_review_change_related_documents_toggle_and_budget);
+    RUN_TEST(tool_review_change_document_reminder_scope);
     RUN_TEST(mcp_resource_discovery_methods_return_empty_lists);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_dispatch_normalizes_null_arguments);

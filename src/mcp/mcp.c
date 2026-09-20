@@ -60,6 +60,7 @@ enum {
 #include "mcp/usage_stats.h"
 #include "context/build_context.h"
 #include "context/document_refs.h"
+#include "foundation/sha256.h"
 #include "foundation/str_util.h"
 #include "foundation/workspace.h"
 #include "foundation/dump_verify.h"
@@ -614,6 +615,24 @@ static const tool_def_t TOOLS[] = {
 
     {"list_projects", "List projects", "List all indexed projects",
      "{\"type\":\"object\",\"properties\":{}}"},
+    {"get_document_coverage", "Get document coverage",
+     "Paginated indexed file/document reference coverage. Not referenced does not mean missing "
+     "documentation. Counts describe the current index and supported explicit links only.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"view\":{\"type\":\"string\",\"enum\":[\"code\",\"documents\"],\"default\":\"code\"},"
+     "\"status\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},"
+     "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":50}},"
+     "\"required\":[\"project\"]}"},
+    {"update_document_review", "Update document review",
+     "Confirm or reopen a current indexed document reference. Requires the current token from "
+     "get_related_documents or review_change. Confirmation is bound to both current file contents; "
+     "stale tokens are rejected. Does not modify files or declare documentation correct.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"source_qualified_name\":{\"type\":\"string\"},"
+     "\"target_qualified_name\":{\"type\":\"string\"},\"token\":{\"type\":\"string\"},"
+     "\"action\":{\"type\":\"string\",\"enum\":[\"confirm\",\"reopen\"]}},"
+     "\"required\":[\"project\",\"source_qualified_name\",\"target_qualified_name\",\"token\","
+     "\"action\"]}"},
     {"delete_project", "Delete project", "Delete a project from the index",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
@@ -700,6 +719,8 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"search_code", true, false, true, false},
     {"get_document", true, false, true, false},
     {"get_related_documents", true, false, true, false},
+    {"get_document_coverage", true, false, true, false},
+    {"update_document_review", false, false, true, false},
     {"list_projects", true, false, true, false},
     {"delete_project", false, true, true, false},
     {"index_status", true, false, true, false},
@@ -757,12 +778,14 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         "build_context",        "review_change",  "get_code_snippet", "get_graph_schema",
         "get_architecture",     "search_code",    "list_projects",    "index_status",
         "check_index_coverage", "detect_changes", "get_document",     "get_related_documents",
+        "get_document_coverage",
     };
     static const char *const scout_tools[] = {
         "search_graph",          "trace_path",           "explain_impact",
         "get_code_snippet",      "get_architecture",     "list_projects",
         "index_status",          "check_index_coverage", "get_document",
         "get_related_documents",
+        "get_document_coverage",
     };
     if (!name) {
         return false;
@@ -790,6 +813,9 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
 static bool mcp_authz_tool_allowed(const cbm_mcp_authz_t *authz, const char *name) {
     if (!authz || !authz->enabled || !name) {
         return true;
+    }
+    if (strcmp(name, "update_document_review") == 0) {
+        return authz->index_write && authz->source_read;
     }
     if (strcmp(name, "get_code_snippet") == 0 || strcmp(name, "search_code") == 0 ||
         strcmp(name, "get_document") == 0 || strcmp(name, "get_related_documents") == 0 ||
@@ -3959,6 +3985,13 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     if (!name) {
         return cbm_mcp_text_result("project is required", true);
     }
+    char path[CBM_SZ_1K];
+    project_db_path(name, path, sizeof(path));
+    cbm_store_t *resolved = resolve_store(srv, name);
+    const char *resolved_path = resolved ? cbm_store_db_path(resolved) : NULL;
+    if (resolved_path) {
+        snprintf(path, sizeof(path), "%s", resolved_path);
+    }
 
     /* Close store if it's the project being deleted */
     if (srv->current_project && strcmp(srv->current_project, name) == 0) {
@@ -3974,9 +4007,6 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     cbm_pipeline_lock();
 
     /* Delete the .db file + WAL/SHM */
-    char path[CBM_SZ_1K];
-    project_db_path(name, path, sizeof(path));
-
     char wal[CBM_SZ_1K];
     char shm[CBM_SZ_1K];
     snprintf(wal, sizeof(wal), "%s-wal", path);
@@ -3986,6 +4016,9 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     const char *status = "not_found";
     const char *error_detail = NULL;
     bool is_error = false;
+    char reviews[CBM_SZ_1K + 32];
+    snprintf(reviews, sizeof(reviews), "%s.reviews.sqlite", path);
+    bool reviews_exist = cbm_file_exists(reviews);
 
     if (exists) {
         int rc = cbm_unlink(path);
@@ -4000,6 +4033,18 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
         }
     } else {
         is_error = true;
+    }
+    /* Review state is durable user data, deliberately outside disposable graph
+     * snapshots. Explicit project deletion removes it even if the graph is gone. */
+    if ((!exists || !strcmp(status, "deleted")) && reviews_exist) {
+        if (cbm_store_document_reviews_delete(path, name) != CBM_STORE_OK) {
+            status = "delete_failed";
+            error_detail = "could not remove project document review state";
+            is_error = true;
+        } else {
+            status = "deleted";
+            is_error = false;
+        }
     }
 
     cbm_pipeline_unlock();
@@ -6287,11 +6332,186 @@ static const char *impact_risk_code(cbm_risk_level_t risk) {
     }
 }
 
+typedef struct {
+    char **changed_paths;
+    int changed_path_count;
+    const char *requested_ref;
+    const char *freshness;
+} document_review_context_t;
+
+/* Hash actual bytes, including uncommitted changes. Oversized/unreadable paths cannot
+ * be acknowledged; use the same project containment guard as source snippets. */
+static bool document_review_hash_file(cbm_sha256_ctx *hash, const char *root, const char *path) {
+    if (!root || !path || !path[0]) {
+        return false;
+    }
+    size_t length = strlen(root) + strlen(path) + 2;
+    char *absolute = malloc(length);
+    if (!absolute) {
+        return false;
+    }
+    snprintf(absolute, length, "%s/%s", root, path);
+    FILE *file = cbm_path_within_root(root, absolute) ? cbm_fopen(absolute, "rb") : NULL;
+    free(absolute);
+    if (!file) {
+        return false;
+    }
+    unsigned char buffer[8192];
+    size_t total = 0, count;
+    cbm_sha256_ctx file_hash;
+    cbm_sha256_init(&file_hash);
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        total += count;
+        if (total > 16U * 1024U * 1024U) {
+            fclose(file);
+            return false;
+        }
+        cbm_sha256_update(&file_hash, buffer, count);
+    }
+    bool ok = !ferror(file);
+    fclose(file);
+    unsigned char digest[CBM_SHA256_DIGEST_LEN];
+    cbm_sha256_final(&file_hash, digest);
+    cbm_sha256_update(hash, digest, sizeof(digest));
+    return ok;
+}
+
+static bool document_review_token(cbm_store_t *store, const char *project,
+                                   const cbm_node_t *source, const cbm_node_t *target,
+                                   char token[CBM_SHA256_HEX_LEN + 1]) {
+    cbm_project_t info = {0};
+    if (cbm_store_get_project(store, project, &info) != CBM_STORE_OK) {
+        return false;
+    }
+    cbm_sha256_ctx hash;
+    cbm_sha256_init(&hash);
+    const char *parts[] = {"document-review-v1", project, source->qualified_name,
+                           target->qualified_name, source->file_path ? source->file_path : "",
+                           target->file_path ? target->file_path : ""};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        cbm_sha256_update(&hash, parts[i], strlen(parts[i]) + 1);
+    }
+    bool ok = document_review_hash_file(&hash, info.root_path, source->file_path) &&
+              document_review_hash_file(&hash, info.root_path, target->file_path);
+    cbm_project_free_fields(&info);
+    unsigned char digest[CBM_SHA256_DIGEST_LEN];
+    cbm_sha256_final(&hash, digest);
+    if (ok) {
+        static const char hex[] = "0123456789abcdef";
+        for (size_t i = 0; i < sizeof(digest); i++) {
+            token[i * 2] = hex[digest[i] >> 4];
+            token[i * 2 + 1] = hex[digest[i] & 15];
+        }
+        token[CBM_SHA256_HEX_LEN] = '\0';
+    }
+    return ok;
+}
+
+static bool document_review_states(cbm_store_t *store, const char *project,
+                                    yyjson_mut_doc *doc, yyjson_mut_val *payload) {
+    size_t index, max;
+    yyjson_mut_val *item;
+    yyjson_mut_arr_foreach(yyjson_mut_obj_get(payload, "references"), index, max, item) {
+        yyjson_mut_val *source_json = yyjson_mut_obj_get(item, "source");
+        yyjson_mut_val *target_json = yyjson_mut_obj_get(item, "target");
+        const char *source_qn =
+            yyjson_mut_get_str(yyjson_mut_obj_get(source_json, "qualified_name"));
+        const char *target_qn =
+            yyjson_mut_get_str(yyjson_mut_obj_get(target_json, "qualified_name"));
+        cbm_node_t source = {0}, target = {0};
+        char token[CBM_SHA256_HEX_LEN + 1] = {0};
+        bool available = source_qn && target_qn &&
+                         cbm_store_find_node_by_qn(store, project, source_qn, &source) ==
+                             CBM_STORE_OK &&
+                         cbm_store_find_node_by_qn(store, project, target_qn, &target) ==
+                             CBM_STORE_OK &&
+                         document_review_token(store, project, &source, &target, token);
+        char *saved = NULL, *reviewed_at = NULL;
+        int rc = available ? cbm_store_document_review_get(store, project, source_qn, target_qn,
+                                                           &saved, &reviewed_at)
+                           : CBM_STORE_NOT_FOUND;
+        if (rc == CBM_STORE_ERR) {
+            available = false;
+        }
+        bool confirmed = available && saved && !strcmp(saved, token);
+        yyjson_mut_val *review = yyjson_mut_obj_get(item, "review");
+        if (!review) {
+            review = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc, item, "review", review);
+        }
+        bool ok = review &&
+                  yyjson_mut_obj_add_str(doc, review, "state",
+                                         !available ? "unavailable"
+                                         : confirmed ? "confirmed" : "pending") &&
+                  (available ? yyjson_mut_obj_add_strcpy(doc, review, "token", token)
+                             : yyjson_mut_obj_add_null(doc, review, "token")) &&
+                  (confirmed ? yyjson_mut_obj_add_strcpy(doc, review, "reviewed_at", reviewed_at)
+                             : yyjson_mut_obj_add_null(doc, review, "reviewed_at"));
+        free(saved);
+        free(reviewed_at);
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool document_review_path_changed(const document_review_context_t *review,
+                                         const char *path) {
+    for (int i = 0; path && i < review->changed_path_count; i++) {
+        if (!strcmp(path, review->changed_paths[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool document_review_add(yyjson_mut_doc *doc, yyjson_mut_val *payload,
+                                const document_review_context_t *review) {
+    yyjson_mut_val *basis = yyjson_mut_obj(doc);
+    bool ok =
+        basis && yyjson_mut_obj_add_str(doc, basis, "changed_files_source", "detect_changes") &&
+        yyjson_mut_obj_add_strcpy(doc, basis, "requested_ref", review->requested_ref) &&
+        yyjson_mut_obj_add_str(doc, basis, "comparison", "merge_base_to_head_plus_worktree") &&
+        yyjson_mut_obj_add_str(doc, basis, "reference_snapshot", "current_index") &&
+        yyjson_mut_obj_add_strcpy(doc, basis, "freshness", review->freshness) &&
+        yyjson_mut_obj_add_str(
+            doc, basis, "limitation",
+            "Current indexed references only; references lost after target deletion or "
+            "rename cannot be recovered. File changes do not prove symbol changes or "
+            "outdated documentation.") &&
+        yyjson_mut_obj_add_val(doc, payload, "review_basis", basis);
+    size_t index, max;
+    yyjson_mut_val *item;
+    yyjson_mut_arr_foreach(yyjson_mut_obj_get(payload, "references"), index, max, item) {
+        yyjson_mut_val *target = yyjson_mut_obj_get(item, "target");
+        yyjson_mut_val *source = yyjson_mut_obj_get(item, "source");
+        const char *path = yyjson_mut_get_str(yyjson_mut_obj_get(target, "file_path"));
+        const char *qn = yyjson_mut_get_str(yyjson_mut_obj_get(target, "qualified_name"));
+        const char *document = yyjson_mut_get_str(yyjson_mut_obj_get(source, "file_path"));
+        yyjson_mut_val *reminder = yyjson_mut_obj(doc);
+        ok = ok && path && qn && reminder &&
+             yyjson_mut_obj_add_str(doc, reminder, "status", "review") &&
+             yyjson_mut_obj_add_str(doc, reminder, "reason", "referenced_file_changed") &&
+             yyjson_mut_obj_add_strcpy(doc, reminder, "changed_file", path) &&
+             yyjson_mut_obj_add_strcpy(doc, reminder, "target_qualified_name", qn) &&
+             yyjson_mut_obj_add_bool(doc, reminder, "document_changed",
+                                     document_review_path_changed(review, document)) &&
+             yyjson_mut_obj_add_str(doc, reminder, "message_zh",
+                                    "建议复核：被引用文件发生变更；这不表示文档已过期。") &&
+             yyjson_mut_obj_add_val(doc, item, "review", reminder);
+    }
+    return ok;
+}
+
 /* Documentation evidence is a separate channel, never an inbound dependency. */
 static bool add_related_documentation(cbm_store_t *store, const char *project,
                                       const cbm_node_t *targets, int target_count, int limit,
                                       int token_budget, yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                      bool *was_truncated) {
+                                      bool *was_truncated,
+                                      const document_review_context_t *review) {
     char *json = cbm_document_refs_json(store, project, targets, target_count, limit);
     yyjson_doc *parsed = json ? yyjson_read(json, strlen(json), 0) : NULL;
     free(json);
@@ -6301,13 +6521,18 @@ static bool add_related_documentation(cbm_store_t *store, const char *project,
     yyjson_val *payload = yyjson_doc_get_root(parsed);
     yyjson_mut_val *copy = yyjson_val_mut_copy(doc, payload);
     yyjson_mut_val *references = copy ? yyjson_mut_obj_get(copy, "references") : NULL;
+    if (!copy || !references || (review && !document_review_add(doc, copy, review)) ||
+        !document_review_states(store, project, doc, copy)) {
+        yyjson_doc_free(parsed);
+        return false;
+    }
     bool budget_truncated = false;
     int estimated_tokens = 0;
     size_t index, max;
-    yyjson_val *item;
-    yyjson_arr_foreach(yyjson_obj_get(payload, "references"), index, max, item) {
+    yyjson_mut_val *item;
+    yyjson_mut_arr_foreach(references, index, max, item) {
         size_t length = 0;
-        char *encoded = yyjson_val_write(item, 0, &length);
+        char *encoded = yyjson_mut_val_write(item, 0, &length);
         if (!encoded) {
             yyjson_doc_free(parsed);
             return false;
@@ -6588,7 +6813,7 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
 
     bool docs_ok =
         !include_docs || add_related_documentation(store, roots[0].project, roots, root_count,
-                                                   document_limit, -1, doc, root, NULL);
+                                                   document_limit, -1, doc, root, NULL, NULL);
     char *json = docs_ok ? yy_doc_to_str(doc) : NULL;
     yyjson_mut_doc_free(doc);
     cbm_store_traverse_free(&traversal);
@@ -9988,8 +10213,8 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
     }
 
     /* resolve_store opens file-backed projects READ-ONLY (query stores must
-     * not mutate the DB). manage_adr is the only resolve_store caller that
-     * WRITES, so it needs a writable handle. For a file-backed project open a
+     * not mutate the DB). Mutating tools need a writable handle.
+     * For a file-backed project open a
      * dedicated read-write handle to the same DB file (the project is verified
      * to exist via resolve_store, so cbm_store_open_path won't create a ghost
      * DB). For an in-memory / embedded store (db_path == NULL) the resolved
@@ -10303,12 +10528,9 @@ static yyjson_val *review_payload(const char *response, yyjson_doc **doc_out, bo
     return yyjson_doc_get_root(payload_doc);
 }
 
-static bool review_is_doc_path(const char *path) {
+static bool review_has_doc_extension(const char *path) {
     if (!path) {
         return false;
-    }
-    if (strstr(path, "docs/") || strstr(path, "docs\\")) {
-        return true;
     }
     const char *dot = strrchr(path, '.');
     if (!dot) {
@@ -10327,6 +10549,11 @@ static bool review_is_doc_path(const char *path) {
         }
     }
     return false;
+}
+
+static bool review_is_doc_path(const char *path) {
+    return path &&
+           (strstr(path, "docs/") || strstr(path, "docs\\") || review_has_doc_extension(path));
 }
 
 static void review_add_rule(yyjson_mut_doc *doc, yyjson_mut_val *rules, const char *id,
@@ -10951,6 +11178,9 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
         cbm_node_t *document_targets = NULL;
         int document_target_count = 0;
         for (int i = 0; i < changed_path_count && json_ok; i++) {
+            if (review_has_doc_extension(changed_paths[i])) {
+                continue;
+            }
             cbm_node_t *nodes = NULL;
             int count = 0;
             if (cbm_store_find_nodes_by_file(store, project, changed_paths[i], &nodes, &count) !=
@@ -10983,9 +11213,24 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
         int remaining = used_bytes / 4U + 1024U >= (size_t)token_budget
                             ? 0
                             : token_budget - (int)((used_bytes + 3U) / 4U) - 1024;
-        json_ok = json_ok && current_json &&
-                  add_related_documentation(store, project, document_targets, document_target_count,
-                                            20, remaining, doc, root, &docs_truncated);
+        char *requested_ref = cbm_mcp_get_string_arg(args, "since");
+        if (!requested_ref || !requested_ref[0]) {
+            free(requested_ref);
+            requested_ref = cbm_mcp_get_string_arg(args, "base_branch");
+        }
+        document_review_context_t review_context = {
+            .changed_paths = changed_paths,
+            .changed_path_count = changed_path_count,
+            .requested_ref = requested_ref ? requested_ref : "main",
+            .freshness = freshness_current ? "current"
+                         : freshness_stale ? "stale"
+                                           : "unknown",
+        };
+        json_ok =
+            json_ok && current_json &&
+            add_related_documentation(store, project, document_targets, document_target_count, 20,
+                                      remaining, doc, root, &docs_truncated, &review_context);
+        free(requested_ref);
         free(current_json);
         cbm_store_free_nodes(document_targets, document_target_count);
         impact_truncated = impact_truncated || docs_truncated;
@@ -11265,6 +11510,16 @@ static char *handle_get_related_documents(cbm_mcp_server_t *srv, const char *arg
     char *json = count > 0 && rc == CBM_STORE_OK
                      ? cbm_document_refs_json(store, project, targets, count, limit)
                      : NULL;
+    if (json) {
+        yyjson_doc *parsed = yyjson_read(json, strlen(json), 0);
+        yyjson_mut_doc *mutable = parsed ? yyjson_doc_mut_copy(parsed, NULL) : NULL;
+        free(json);
+        json = mutable && document_review_states(store, project, mutable,
+                                                 yyjson_mut_doc_get_root(mutable))
+                   ? yyjson_mut_write(mutable, 0, NULL) : NULL;
+        yyjson_mut_doc_free(mutable);
+        yyjson_doc_free(parsed);
+    }
     char *result =
         json ? cbm_mcp_text_result(json, false)
              : cbm_mcp_text_result(rc != CBM_STORE_OK && rc != CBM_STORE_NOT_FOUND
@@ -11277,6 +11532,134 @@ static char *handle_get_related_documents(cbm_mcp_server_t *srv, const char *arg
     cbm_store_free_nodes(targets, count);
     free(target);
     free(project);
+    return result;
+}
+
+static char *handle_get_document_coverage(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    cbm_store_t *store = resolve_store(srv, project);
+    REQUIRE_STORE(store, project);
+    char *view = cbm_mcp_get_string_arg(args, "view");
+    char *status = cbm_mcp_get_string_arg(args, "status");
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int limit = cbm_mcp_get_int_arg(args, "limit", 50);
+    const char *mode = view ? view : "code";
+    bool code = !strcmp(mode, "code"), documents = !strcmp(mode, "documents");
+    bool valid_status = !status ||
+                        (code && (!strcmp(status, "referenced") ||
+                                  !strcmp(status, "not_referenced"))) ||
+                        (documents && (!strcmp(status, "ok") || !strcmp(status, "limited") ||
+                                       !strcmp(status, "unknown")));
+    char *error = verify_project_indexed(store, project);
+    char *json = !error && (code || documents) && valid_status && offset >= 0 &&
+                         limit >= 1 && limit <= 100
+                     ? cbm_document_coverage_json(store, project, mode, status, offset, limit)
+                     : NULL;
+    char *result = error ? error : cbm_mcp_text_result(
+        json ? json : "invalid coverage view/status/offset/limit or coverage unavailable", !json);
+    free(json);
+    free(view);
+    free(status);
+    free(project);
+    return result;
+}
+
+static char *handle_update_document_review(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    cbm_pipeline_lock();
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!store) {
+        cbm_pipeline_unlock();
+        free(project);
+        return cbm_mcp_text_result("could not open existing project for document review", true);
+    }
+    char *source_qn = cbm_mcp_get_string_arg(args, "source_qualified_name");
+    char *target_qn = cbm_mcp_get_string_arg(args, "target_qualified_name");
+    char *token = cbm_mcp_get_string_arg(args, "token");
+    char *action = cbm_mcp_get_string_arg(args, "action");
+    const char *error = NULL;
+    cbm_node_t source = {0}, target = {0};
+    cbm_edge_t *edges = NULL;
+    int count = 0;
+    if (!source_qn || !target_qn || !token || !action ||
+        (strcmp(action, "confirm") && strcmp(action, "reopen"))) {
+        error = "source_qualified_name, target_qualified_name, token and confirm/reopen action required";
+    } else if (cbm_store_find_node_by_qn(store, project, source_qn, &source) != CBM_STORE_OK ||
+               cbm_store_find_node_by_qn(store, project, target_qn, &target) != CBM_STORE_OK ||
+               (!source.label || (strcmp(source.label, "Document") &&
+                                  strcmp(source.label, "Section")))) {
+        error = "current document reference not found";
+    }
+    bool found = false;
+    if (!error && cbm_store_find_edges_by_source_type(store, source.id, "REFERENCES",
+                                                     &edges, &count) == CBM_STORE_OK) {
+        for (int i = 0; i < count; i++) {
+            if (edges[i].target_id != target.id || !edges[i].project ||
+                strcmp(edges[i].project, project)) {
+                continue;
+            }
+            const char *raw = edges[i].properties_json;
+            yyjson_doc *props = raw ? yyjson_read(raw, strlen(raw), 0) : NULL;
+            const char *producer = yyjson_get_str(yyjson_obj_get(
+                yyjson_doc_get_root(props), "producer"));
+            found = producer && !strcmp(producer, "document_links");
+            yyjson_doc_free(props);
+            if (found) {
+                break;
+            }
+        }
+    }
+    char current[CBM_SHA256_HEX_LEN + 1] = {0};
+    if (!error && !found) {
+        error = "current document reference not found";
+    }
+    if (!error && !document_review_token(store, project, &source, &target, current)) {
+        error = "review unavailable: current source or target cannot be read";
+    }
+    if (!error && strcmp(current, token)) {
+        error = "stale review token; reload the reference before confirming";
+    }
+    bool confirm = action && !strcmp(action, "confirm");
+    if (!error && cbm_store_document_review_set(store, project, source_qn, target_qn,
+                                               confirm ? current : NULL) != CBM_STORE_OK) {
+        error = "could not persist document review";
+    }
+    char *saved = NULL, *reviewed_at = NULL;
+    if (!error && confirm &&
+        cbm_store_document_review_get(store, project, source_qn, target_qn, &saved,
+                                      &reviewed_at) != CBM_STORE_OK) {
+        error = "could not read persisted document review";
+    }
+    char *result = NULL;
+    if (error) {
+        result = cbm_mcp_text_result(error, true);
+    } else {
+        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_str(doc, root, "state", confirm ? "confirmed" : "pending");
+        yyjson_mut_obj_add_strcpy(doc, root, "token", current);
+        if (reviewed_at) {
+            yyjson_mut_obj_add_strcpy(doc, root, "reviewed_at", reviewed_at);
+        } else {
+            yyjson_mut_obj_add_null(doc, root, "reviewed_at");
+        }
+        char *json = yyjson_mut_write(doc, 0, NULL);
+        result = cbm_mcp_text_result(json ? json : "could not encode review", !json);
+        free(json);
+        yyjson_mut_doc_free(doc);
+    }
+    free(saved);
+    free(reviewed_at);
+    cbm_store_free_edges(edges, count);
+    cbm_node_free_fields(&source);
+    cbm_node_free_fields(&target);
+    free(project);
+    free(source_qn);
+    free(target_qn);
+    free(token);
+    free(action);
+    cbm_pipeline_unlock();
     return result;
 }
 
@@ -11513,6 +11896,12 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "get_related_documents") == 0) {
         return handle_get_related_documents(srv, args_json);
+    }
+    if (strcmp(tool_name, "get_document_coverage") == 0) {
+        return handle_get_document_coverage(srv, args_json);
+    }
+    if (strcmp(tool_name, "update_document_review") == 0) {
+        return handle_update_document_review(srv, args_json);
     }
     if (strcmp(tool_name, "detect_changes") == 0) {
         return handle_detect_changes(srv, args_json);

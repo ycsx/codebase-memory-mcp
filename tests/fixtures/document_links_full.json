@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "review_status": "maintainer_review_pending",
+  "scope": "Independent full-context evidence expectations layered on the unchanged 63 source candidates. No expected positive target is removed.",
+  "document_analysis": {
+    "docs/EVALUATION_PLAN.md": {
+      "status": "limited",
+      "reason": "unsupported_multiline_code",
+      "rationale": "The complete document contains multiline inline code, e.g. the span from subagent_type on line 185 to SendMessage on line 186. Negative candidates here remain bounded observations, not evidence of complete analysis."
+    }
+  },
+  "evidence_overrides": {
+    "doc-009": {"evidence_line": 30, "rationale": "Repeated tests/test_pipeline.c target; first retained document reference is line 30."},
+    "doc-013": {"evidence_line": 30, "rationale": "Repeated tests/test_pipeline.c target; first retained document reference is line 30."},
+    "doc-014": {"evidence_line": 95, "rationale": "Repeated scripts/format.sh target; first supported inline reference is line 95, not fenced command lines."},
+    "doc-015": {"evidence_line": 29, "rationale": "Repeated scripts/test.sh target; prose inline reference appears on line 29 before the candidate at 216."},
+    "doc-016": {"evidence_line": 97, "rationale": "Repeated scripts/lint.sh target; first supported inline reference is line 97."},
+    "doc-026": {"evidence_line": 294, "rationale": "README configuration link already appears on line 294 before the documentation list."},
+    "doc-027": {"evidence_line": 258, "rationale": "README remote MCP link already appears on line 258 before the documentation list."}
+  }
+}

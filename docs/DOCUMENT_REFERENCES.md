@@ -98,9 +98,77 @@ codebase-memory-mcp cli review_change '{"project":"example","since":"HEAD","incl
 `documentation_references.status` 为 `not_requested`；另外两个工具关闭时不附该对象。
 文档引用与调用影响分开返回，不增加依赖影响数量，也不会直接判定文档漂移或过期。
 
+### 变更后的建议复核
+
+`review_change` 成功读取 Git 变更并启用文档时，返回的每条代码引用新增 `review`：
+
+- `status:"review"`、`reason:"referenced_file_changed"`：被引用文件发生了变化，建议回读文档。
+- `changed_file`、`target_qualified_name`：触发文件和当前索引中的目标，不声称目标函数本身必然改变。
+- `document_changed`：同一比较范围是否也修改了来源文档；为 true 不代表文档已正确更新。
+- `message_zh`：明确提醒不等同于“文档已过期”。
+
+`related_documentation.review_basis` 保留请求的 `since` / `base_branch`、
+Git 比较口径、`current_index` 引用快照和 `current/stale/unknown` 新鲜度。
+纯文档文件变更不会触发代码变更提醒，`docs/` 下的代码文件仍可触发。
+提醒不提升原有风险等级、不新增阻断规则，字段开销在证据预算裁剪前计算。
+索引已删除的历史引用无法凭当前图谱恢复：删除或重命名后若边已清理，
+可能无法列出旧文档。这不是持久化漂移追踪或历史图谱对比。
+
 检查 `truncated`、`budget_truncated`，以及上下文的 `targets_truncated`。
 估算 token 不是特定模型 tokenizer 的硬性响应长度保证；文档证据被裁剪时，
 仍可用反向查询单独读取。
+
+## 在界面中阅读引用
+
+代码详情的“相关文档”按当前节点查询引用；文件节点聚合文件内符号引用，
+函数节点只显示直接引用，不会把仅引用文件的文档当作函数引用。
+评审页启用“文档”后显示复核提醒、比较依据与索引新鲜度。
+
+点击引用旁的阅读按钮，可读取对应 Document/Section 的 Markdown 原文，
+并高亮证据行。原文以纯文本显示，不执行文档中的 HTML。
+如果当前内容与索引证据不一致，界面提示重新索引，不错误高亮。
+读取失败可重试；切换节点或项目会取消旧请求。
+提醒仍是文件级建议复核，不表示文档过期，也不表示同步修改的文档已验收。
+
+## 覆盖矩阵与复核状态
+
+“文档覆盖”页提供代码文件与文档两个视图、状态筛选和分页。
+代码行可反查引用，文档行可读取原文；“未被引用”不等于缺少文档。
+统计范围仅是当前索引中的非 Markdown File 节点和 Document 节点，
+不表示全仓所有可执行代码均已索引，也不计算语义上的文档完备率。
+
+```bash
+codebase-memory-mcp cli get_document_coverage '{"project":"example","view":"code","status":"not_referenced","offset":0,"limit":25}'
+codebase-memory-mcp cli get_document_coverage '{"project":"example","view":"documents","status":"limited","offset":0,"limit":25}'
+```
+
+`view` 为 `code`（默认）或 `documents`。代码状态支持 `referenced`、
+`not_referenced`，文档状态支持 `ok`、`limited`、`unknown`；省略 `status`
+表示全部。`offset` 默认 0，`limit` 默认 50、范围 1-100。
+检查 `total/returned/has_more/next_offset`，不要用单页作全仓结论。
+
+反向引用和变更评审中的 `review.state` 为 `pending/confirmed/unavailable`。
+通过界面的“确认已复核”或下面的工具显式记录人工处理状态：
+
+```bash
+codebase-memory-mcp cli update_document_review '{"project":"example","source_qualified_name":"<引用的来源 QN>","target_qualified_name":"<引用目标 QN>","token":"<当前 review.token>","action":"confirm"}'
+```
+
+`action:"reopen"` 清除确认，使引用回到待复核状态。token 必须取自刚读取的
+同一项目、来源和目标，服务端拒绝旧 token；失败后刷新引用并重新核对，
+不要把写入失败视为已确认。确认时间在重复确认同一 token 时保持不变。
+此工具属于写入操作，不进入 `analysis/scout` 只读档位；
+启用授权时需要 `index_write` 和 `source_read`。
+
+确认记录保存在独立的本地 SQLite 状态库，不依赖浏览器存储，
+不会随图谱索引重建而被替换；显式删除项目会清除该项目的确认。
+token 绑定来源和目标
+整个文件的实际内容，包括未提交修改；任一内容变化都会显示待复核。
+这是内容版本而非提交历史：恢复到已确认的完全相同内容会重新显示已确认。
+缺失、越出项目范围、不可读取或超过 16 MiB 的文件暂不可确认。
+文档内容变更并不代表索引自动更新，应按需要重新索引。
+确认只表示用户已处理这条证据，不是文档正确性的认证。
+已经从当前图谱清理的删除/重命名引用仍不能恢复为历史记录。
 
 ## 状态与排错
 
@@ -123,14 +191,26 @@ codebase-memory-mcp cli review_change '{"project":"example","since":"HEAD","incl
 python scripts/eval-document-links.py --check-sources
 python scripts/eval-document-links.py build/c/codebase-memory-mcp
 python -m unittest discover -s tests -p test_eval_document_links.py
+python scripts/eval-document-links-full.py build/c/codebase-memory-mcp
+python -m unittest discover -s tests -p 'test_eval_document_links*.py'
+python scripts/eval-document-workflow.py build/c/codebase-memory-mcp --repo . --repo /path/to/another/local/repo --output .tmp/document-workflow.json
+python -m unittest discover -s tests -p 'test_eval_document*.py'
 bash scripts/eval-build-context.sh ./build/c/codebase-memory-mcp
 ```
 
 Windows 使用 `.exe`；文档评测可加 `--temp-root C:/msys64/tmp` 指定可写的非系统
 ASCII 临时目录。评测创建独立缓存，不修改真实项目索引。
+跨项目工作流评测需要至少两个不同的本地 Git 仓库，复制有界真实源码与文档，
+再用独立生成的 fixture 验证确认、重建、内容变化、删除、重命名和项目隔离。
+它核对原文件哈希不变，报告采样上限、解析受限项，不将生成测试当作真实文档标注。
+本轮也通过了 Windows 中文临时路径下的确认持久化验证。
 
 63 个候选来自 8 份真实文档的单行摘录（33 正例、30 反例），以最小目标文件桩测试引用。
-它不验证完整原文块上下文，也不是代表性全仓 precision/recall；标注仍是
+摘录测试本身不验证完整原文块上下文。另有完整原文回归：复制 923 个真实
+Git 跟踪文件，在 8 份完整文档中检查 63 个候选，63/63 通过；
+排除范围和 7 处较早去重证据见
+[完整文档报告](reports/DOCUMENT_REFERENCES_FULL_2026-09-20.md)。
+两者都不是代表性全仓 precision/recall；标注仍是
 `maintainer_review_pending`。源码指引修改后要核对出处，不能静默改变预期标签。
 新增功能、回归结果及未完成项见 [MILESTONE_ACCEPTANCE.md](MILESTONE_ACCEPTANCE.md)；
 阶段方案与尚未实现的关系/UI 见 [DOCUMENT_KNOWLEDGE_GRAPH_PLAN.md](DOCUMENT_KNOWLEDGE_GRAPH_PLAN.md)。

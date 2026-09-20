@@ -31,11 +31,13 @@ codebase-memory-mcp --help
 
 ## 文档与代码引用
 
-当前工作区源码定义 20 个 MCP 工具（`all` 档位），其中 `analysis` 为 16 个、
-`scout` 为 10 个；权限控制可进一步缩小实际工具列表。
+当前工作区源码定义 22 个 MCP 工具（`all` 档位），其中 `analysis` 为 17 个、
+`scout` 为 11 个；权限控制可进一步缩小实际工具列表。
 `get_document` 提供 Markdown 文档到文件/完整限定名符号的显式引用和行号证据，
 `get_related_documents` 支持反向查询；`build_context`、`explain_impact`、
 `review_change` 可按需返回有数量与预算限制的相关文档。
+`get_document_coverage` 分页展示索引覆盖；`update_document_review` 显式确认或重新打开复核，
+属于写入工具，不进入只读档位。确认绑定代码与文档内容，后续变化需要重新复核。
 
 本轮未核验 PyPI 或 GitHub Release 是否已经包含这些源码改动。使用包含改动的构建，
 确认客户端指向该二进制、重启 MCP/AI 客户端，并对已有项目重新索引后生效。

@@ -46,6 +46,7 @@ static int profile_has_mutator(const char *profile) {
         "delete_project",
         "manage_adr",
         "ingest_traces",
+        "update_document_review",
     };
     for (size_t i = 0U; i < sizeof(mutators) / sizeof(mutators[0]); i++) {
         if (strstr(profile, mutators[i])) {
@@ -116,6 +117,7 @@ TEST(agent_profiles_tiers_encode_distinct_evidence_budgets) {
                 strstr(verify, "scope coverage before negative claims") &&
                 strstr(verify, "mcp__codebase-memory-mcp__query_graph") &&
                 strstr(verify, "mcp__codebase-memory-mcp__detect_changes") &&
+                strstr(verify, "mcp__codebase-memory-mcp__get_document_coverage") &&
                 strstr(audit, "bounded scope") && strstr(audit, "current graph generation") &&
                 strstr(audit, "complete relevant pagination") && strstr(audit, "scope coverage") &&
                 strstr(audit, "source fallback") &&

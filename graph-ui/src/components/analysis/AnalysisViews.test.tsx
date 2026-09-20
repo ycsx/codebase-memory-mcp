@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GraphData } from "../../lib/types";
 import { HotspotsView } from "./HotspotsView";
@@ -295,6 +295,42 @@ describe("ReviewChangeView", () => {
       evidence_level: "analysis",
       include_tests: true,
       include_docs: true,
+    }, expect.any(AbortSignal));
+  });
+
+  it("renders evidence-based document review without graph nodes and hides it when docs are disabled", async () => {
+    callToolMock.mockResolvedValue({
+      status: "pass", summary_zh: "完成",
+      related_documentation: {
+        status: "ok", references: [{
+          source: { qualified_name: "demo.docs.guide", file_path: "docs/guide.md", name: "Guide" },
+          target: { qualified_name: "demo.src.core.run" },
+          properties: { document_span: { start_line: 8 } },
+          review: { status: "review", changed_file: "src/core.ts", document_changed: false },
+        }],
+        review_basis: { requested_ref: "HEAD", reference_snapshot: "current_index", freshness: "current" },
+      },
     });
+    render(<ReviewChangeView project="demo" data={DATA} onOpenExplore={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "评审变更" }));
+    expect(await screen.findByText("建议复核")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /阅读文档 docs\/guide.md 第 8 行/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "文档" }));
+    expect(screen.queryByLabelText("文档复核提醒")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "评审变更" }));
+    await waitFor(() => expect(callToolMock).toHaveBeenLastCalledWith("review_change", expect.objectContaining({ include_docs: false }), expect.any(AbortSignal)));
+  });
+
+  it("discards review responses after switching projects", async () => {
+    let resolve!: (value: unknown) => void;
+    callToolMock.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const { rerender } = render(<ReviewChangeView project="demo" data={DATA} onOpenExplore={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "评审变更" }));
+    const signal = callToolMock.mock.calls[0][2] as AbortSignal;
+    rerender(<ReviewChangeView project="other" data={DATA} onOpenExplore={() => {}} />);
+    await act(async () => resolve({ status: "pass", summary_zh: "旧项目评审" }));
+    expect(signal.aborted).toBe(true);
+    expect(screen.queryByText("旧项目评审")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "评审变更" })).not.toBeDisabled();
   });
 });

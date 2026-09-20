@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardCheck, FileCode2, GitCompareArrows, LoaderCircle, Search, TriangleAlert } from "lucide-react";
 import { callTool } from "../../api/rpc";
 import type { GraphData, GraphNode } from "../../lib/types";
 import { shortPath } from "./analysis";
+import { RelatedDocuments, type RelatedDocumentsResult } from "../RelatedDocuments";
 
 interface ReviewChangeViewProps {
   project: string;
@@ -32,6 +33,7 @@ interface ReviewResult {
   impacts?: ReviewItem[];
   tests?: string[];
   documentation?: string[];
+  related_documentation?: RelatedDocumentsResult;
   rules?: ReviewRule[];
   limitations?: string[];
   summary?: {
@@ -111,13 +113,20 @@ export function ReviewChangeView({ project, data, onOpenExplore }: ReviewChangeV
   const [result, setResult] = useState<ReviewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const request = useRef<AbortController | null>(null);
 
-  useEffect(() => { setResult(null); setError(null); }, [project]);
+  useEffect(() => {
+    setResult(null); setError(null); setLoading(false);
+    return () => request.current?.abort();
+  }, [project]);
 
   const run = async (event?: FormEvent) => {
     event?.preventDefault();
     if (!ref.trim() || depth < 1 || budget <= 0) return;
-    setLoading(true); setError(null);
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setLoading(true); setError(null); setResult(null);
     try {
       const next = await callTool<ReviewResult>("review_change", {
         project,
@@ -127,10 +136,11 @@ export function ReviewChangeView({ project, data, onOpenExplore }: ReviewChangeV
         evidence_level: "analysis",
         include_tests: includeTests,
         include_docs: includeDocs,
-      });
+      }, controller.signal);
+      if (controller.signal.aborted) return;
       if (next.error) setError(next.error); else setResult(next);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "变更评审失败。"); }
-    finally { setLoading(false); }
+    } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "变更评审失败。"); }
+    finally { if (!controller.signal.aborted) setLoading(false); }
   };
 
   const changedSymbols = result?.changed_symbols ?? [];
@@ -159,6 +169,7 @@ export function ReviewChangeView({ project, data, onOpenExplore }: ReviewChangeV
       <ResultList title="变更文件" items={(result.changed_files ?? []).map((file) => ({ file_path: file }))} empty="没有变更文件" data={data} onOpenExplore={onOpenExplore} />
       <ResultList title="变更符号" items={changedSymbols} empty="没有解析出变更符号" data={data} onOpenExplore={onOpenExplore} />
       <ResultList title="影响节点" items={impacts} empty="没有发现已索引的入站影响" data={data} onOpenExplore={onOpenExplore} />
+      {includeDocs && result.related_documentation && <div className="border-b border-border/20 px-4 py-4"><RelatedDocuments key={project} project={project} result={result.related_documentation} title="文档复核提醒" onRefresh={() => void run()} /></div>}
       <section className="grid grid-cols-1 gap-0 border-b border-border/20 sm:grid-cols-2"><div className="border-b border-border/20 p-4 sm:border-b-0 sm:border-r"><h3 className="text-[10px] uppercase tracking-wide text-foreground/45">测试候选</h3>{(result.tests?.length ?? 0) ? <ul className="mt-2 space-y-1">{result.tests?.slice(0, 50).map((item) => <li key={item} className="truncate font-mono text-[9px] text-emerald-200/55">{shortPath(item, 6)}</li>)}</ul> : <p className="mt-2 text-[10px] text-foreground/25">未发现测试候选</p>}</div><div className="p-4"><h3 className="text-[10px] uppercase tracking-wide text-foreground/45">文档候选</h3>{(result.documentation?.length ?? 0) ? <ul className="mt-2 space-y-1">{result.documentation?.slice(0, 50).map((item) => <li key={item} className="truncate font-mono text-[9px] text-cyan-200/55">{shortPath(item, 6)}</li>)}</ul> : <p className="mt-2 text-[10px] text-foreground/25">未发现文档候选</p>}</div></section>
       {(result.limitations?.length ?? 0) > 0 && <section className="px-4 py-4"><div className="flex items-start gap-2"><TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/55" aria-hidden="true" /><div className="space-y-1">{result.limitations?.map((item) => <p key={item} className="text-[9px] leading-4 text-foreground/30">{item}</p>)}</div></div></section>}
     </div>}

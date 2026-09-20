@@ -76,6 +76,7 @@ enum {
 #include "xxhash/xxhash.h"
 
 #include <sqlite3.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -336,6 +337,15 @@ static int init_schema(cbm_store_t *s) {
         "  local_name_gen TEXT GENERATED ALWAYS AS (CASE WHEN type='IMPORTS'"
         "    THEN coalesce(json_extract(properties,'$.local_name'),'') ELSE '' END),"
         "  UNIQUE(source_id, target_id, type, local_name_gen)"
+        ");"
+        /* No node/project foreign keys: reindexing can replace those rows. */
+        "CREATE TABLE IF NOT EXISTS document_reviews ("
+        "  project TEXT NOT NULL,"
+        "  source_qualified_name TEXT NOT NULL,"
+        "  target_qualified_name TEXT NOT NULL,"
+        "  state_token TEXT NOT NULL,"
+        "  reviewed_at TEXT NOT NULL,"
+        "  PRIMARY KEY (project, source_qualified_name, target_qualified_name)"
         ");"
         "CREATE TABLE IF NOT EXISTS project_summaries ("
         "  project TEXT PRIMARY KEY,"
@@ -1484,6 +1494,263 @@ int cbm_store_list_projects(cbm_store_t *s, cbm_project_t **out, int *count) {
     *out = arr;
     *count = n;
     return CBM_STORE_OK;
+}
+
+static int document_review_get(cbm_store_t *s, const char *project,
+                                  const char *source_qualified_name,
+                                  const char *target_qualified_name, char **token,
+                                  char **reviewed_at) {
+    if (token) {
+        *token = NULL;
+    }
+    if (reviewed_at) {
+        *reviewed_at = NULL;
+    }
+    if (!s || !s->db || !project || !project[0] || !source_qualified_name ||
+        !source_qualified_name[0] || !target_qualified_name || !target_qualified_name[0] ||
+        !token || !reviewed_at || token == reviewed_at) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT state_token, reviewed_at FROM document_reviews "
+                      "WHERE project=?1 AND source_qualified_name=?2 AND target_qualified_name=?3;";
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        /* Read-only legacy databases have not received the additive table. */
+        sqlite3_stmt *probe = NULL;
+        int probe_rc = sqlite3_prepare_v2(
+            s->db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_reviews';",
+            CBM_NOT_FOUND, &probe, NULL);
+        if (probe_rc == SQLITE_OK) {
+            probe_rc = sqlite3_step(probe);
+        }
+        sqlite3_finalize(probe);
+        if (probe_rc == SQLITE_DONE) {
+            return CBM_STORE_NOT_FOUND;
+        }
+        store_set_error_sqlite(s, "document review get prepare");
+        return CBM_STORE_ERR;
+    }
+    int rc = bind_text(stmt, ST_COL_1, project);
+    if (rc == SQLITE_OK) {
+        rc = bind_text(stmt, ST_COL_2, source_qualified_name);
+    }
+    if (rc == SQLITE_OK) {
+        rc = bind_text(stmt, ST_COL_3, target_qualified_name);
+    }
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(stmt);
+    }
+    if (rc == SQLITE_ROW) {
+        *token = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
+        *reviewed_at = heap_strdup((const char *)sqlite3_column_text(stmt, ST_COL_1));
+        sqlite3_finalize(stmt);
+        if (!*token || !*reviewed_at) {
+            free(*token);
+            free(*reviewed_at);
+            *token = NULL;
+            *reviewed_at = NULL;
+            store_set_error(s, "document review allocation failed");
+            return CBM_STORE_ERR;
+        }
+        return CBM_STORE_OK;
+    }
+    sqlite3_finalize(stmt);
+    if (rc == SQLITE_DONE) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    store_set_error_sqlite(s, "document review get");
+    return CBM_STORE_ERR;
+}
+
+static int document_review_set(cbm_store_t *s, const char *project,
+                                  const char *source_qualified_name,
+                                  const char *target_qualified_name, const char *token) {
+    if (!s || !s->db || !project || !project[0] || !source_qualified_name ||
+        !source_qualified_name[0] || !target_qualified_name || !target_qualified_name[0] ||
+        (token && !token[0])) {
+        return CBM_STORE_ERR;
+    }
+    const char *sql = token
+        ? "INSERT INTO document_reviews "
+          "(project,source_qualified_name,target_qualified_name,state_token,reviewed_at) "
+          "VALUES (?1,?2,?3,?4,?5) ON CONFLICT(project,source_qualified_name,target_qualified_name) "
+          "DO UPDATE SET state_token=excluded.state_token,reviewed_at=excluded.reviewed_at "
+          "WHERE document_reviews.state_token <> excluded.state_token;"
+        : "DELETE FROM document_reviews WHERE project=?1 "
+          "AND source_qualified_name=?2 AND target_qualified_name=?3;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "document review set prepare");
+        return CBM_STORE_ERR;
+    }
+    int rc = bind_text(stmt, ST_COL_1, project);
+    if (rc == SQLITE_OK) {
+        rc = bind_text(stmt, ST_COL_2, source_qualified_name);
+    }
+    if (rc == SQLITE_OK) {
+        rc = bind_text(stmt, ST_COL_3, target_qualified_name);
+    }
+    if (token && rc == SQLITE_OK) {
+        char now[ST_BUF_64];
+        iso_now(now, sizeof(now));
+        rc = bind_text(stmt, ST_COL_4, token);
+        if (rc == SQLITE_OK) {
+            rc = bind_text(stmt, ST_COL_5, now);
+        }
+    }
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        store_set_error_sqlite(s, "document review set");
+        return CBM_STORE_ERR;
+    }
+    return CBM_STORE_OK;
+}
+
+static char *document_review_sidecar_path(const char *graph_db_path) {
+    size_t len = strlen(graph_db_path) + sizeof(".reviews.sqlite");
+    char *path = malloc(len);
+    if (path) {
+        snprintf(path, len, "%s.reviews.sqlite", graph_db_path);
+    }
+    return path;
+}
+
+static int document_review_sidecar_open(cbm_store_t *s, bool write, cbm_store_t *sidecar) {
+    char *path = document_review_sidecar_path(s->db_path);
+    if (!path) {
+        store_set_error(s, "document review path allocation failed");
+        return CBM_STORE_ERR;
+    }
+    cbm_file_stat_t st;
+    if (!write && cbm_stat_utf8(path, &st) != 0) {
+        int saved_errno = errno;
+        free(path);
+        if (saved_errno == ENOENT) {
+            return CBM_STORE_NOT_FOUND;
+        }
+        store_set_error(s, "cannot inspect document review sidecar");
+        return CBM_STORE_ERR;
+    }
+    int flags = write ? SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE : SQLITE_OPEN_READONLY;
+    int rc = sqlite3_open_v2(path, &sidecar->db, flags, NULL);
+    free(path);
+    if (rc != SQLITE_OK) {
+        store_set_error_sqlite(sidecar, "document review sidecar open");
+        store_set_error(s, sidecar->errbuf);
+        close_sqlite_connection(&sidecar->db);
+        return CBM_STORE_ERR;
+    }
+    sqlite3_busy_timeout(sidecar->db, 5000);
+    if (write &&
+        exec_sql(sidecar,
+                 "CREATE TABLE IF NOT EXISTS document_reviews (project TEXT NOT NULL,"
+                 "source_qualified_name TEXT NOT NULL,target_qualified_name TEXT NOT NULL,"
+                 "state_token TEXT NOT NULL,reviewed_at TEXT NOT NULL,"
+                 "PRIMARY KEY(project,source_qualified_name,target_qualified_name));") !=
+            CBM_STORE_OK) {
+        store_set_error(s, sidecar->errbuf);
+        close_sqlite_connection(&sidecar->db);
+        return CBM_STORE_ERR;
+    }
+    return CBM_STORE_OK;
+}
+
+int cbm_store_document_review_get(cbm_store_t *s, const char *project,
+                                  const char *source_qualified_name,
+                                  const char *target_qualified_name, char **token,
+                                  char **reviewed_at) {
+    if (token) {
+        *token = NULL;
+    }
+    if (reviewed_at) {
+        *reviewed_at = NULL;
+    }
+    if (!s || !s->db || !project || !project[0] || !source_qualified_name ||
+        !source_qualified_name[0] || !target_qualified_name || !target_qualified_name[0] ||
+        !token || !reviewed_at || token == reviewed_at) {
+        return CBM_STORE_ERR;
+    }
+    if (!s->db_path) {
+        return document_review_get(s, project, source_qualified_name, target_qualified_name,
+                                   token, reviewed_at);
+    }
+    cbm_store_t sidecar = {0};
+    int rc = document_review_sidecar_open(s, false, &sidecar);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
+    rc = document_review_get(&sidecar, project, source_qualified_name, target_qualified_name,
+                             token, reviewed_at);
+    if (rc == CBM_STORE_ERR) {
+        store_set_error(s, sidecar.errbuf);
+    }
+    close_sqlite_connection(&sidecar.db);
+    return rc;
+}
+
+int cbm_store_document_review_set(cbm_store_t *s, const char *project,
+                                  const char *source_qualified_name,
+                                  const char *target_qualified_name, const char *token) {
+    if (!s || !s->db || !project || !project[0] || !source_qualified_name ||
+        !source_qualified_name[0] || !target_qualified_name || !target_qualified_name[0] ||
+        (token && !token[0])) {
+        return CBM_STORE_ERR;
+    }
+    if (!s->db_path) {
+        return document_review_set(s, project, source_qualified_name, target_qualified_name,
+                                   token);
+    }
+    cbm_store_t sidecar = {0};
+    int rc = document_review_sidecar_open(s, true, &sidecar);
+    if (rc != CBM_STORE_OK) {
+        return rc;
+    }
+    rc = document_review_set(&sidecar, project, source_qualified_name, target_qualified_name,
+                             token);
+    if (rc == CBM_STORE_ERR) {
+        store_set_error(s, sidecar.errbuf);
+    }
+    close_sqlite_connection(&sidecar.db);
+    return rc;
+}
+
+int cbm_store_document_reviews_delete(const char *graph_db_path, const char *project) {
+    if (!graph_db_path || !graph_db_path[0] || !project || !project[0]) {
+        return CBM_STORE_ERR;
+    }
+    char *path = document_review_sidecar_path(graph_db_path);
+    if (!path) {
+        return CBM_STORE_ERR;
+    }
+    cbm_file_stat_t st;
+    if (cbm_stat_utf8(path, &st) != 0) {
+        int saved_errno = errno;
+        free(path);
+        return saved_errno == ENOENT ? CBM_STORE_OK : CBM_STORE_ERR;
+    }
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL);
+    free(path);
+    if (rc != SQLITE_OK) {
+        close_sqlite_connection(&db);
+        return CBM_STORE_ERR;
+    }
+    sqlite3_busy_timeout(db, 5000);
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "DELETE FROM document_reviews WHERE project=?1;",
+                            CBM_NOT_FOUND, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        rc = bind_text(stmt, ST_COL_1, project);
+    }
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+    close_sqlite_connection(&db);
+    return rc == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
 int cbm_store_delete_project(cbm_store_t *s, const char *name) {

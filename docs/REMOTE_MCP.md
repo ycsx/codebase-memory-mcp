@@ -119,8 +119,10 @@ IP 只代表网络来源，不一定对应单个用户。NAT、共享工作站�
 
 ### 文档引用查询权限
 
-当前源码的 `analysis` 和 `scout` 档位分别包含 16 和 10 个工具（权限过滤前）。
-`get_document` 和 `get_related_documents` 均属于只读工具，两个档位都提供，
+当前源码的 `analysis` 和 `scout` 档位分别包含 17 和 11 个工具（权限过滤前）。
+`update_document_review` 是显式写入工具，不进入这两个只读档位；
+授权开启时需要 `index_write` 与 `source_read`，不能通过只读查询隐式确认。
+`get_document`、`get_related_documents` 和 `get_document_coverage` 均属于只读工具，两个档位都提供，
 但托管 Key 还必须有对应项目 ACL 和 `source_read` 权限。只读不等于可绕过源码读取权限。
 
 `build_context`、`review_change` 本身也要求 `source_read`。

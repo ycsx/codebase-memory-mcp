@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 enum { DOCUMENT_REFS_MAX = 100 };
 
@@ -258,5 +259,231 @@ cleanup:
     }
     cbm_store_free_nodes(documents, document_count);
     free(ids);
+    return result;
+}
+
+typedef struct {
+    cbm_node_t *node;
+    int64_t count;
+} coverage_file_t;
+
+static int coverage_compare_files(const void *lhs, const void *rhs) {
+    const coverage_file_t *a = lhs;
+    const coverage_file_t *b = rhs;
+    int order = strcmp(text(a->node->file_path), text(b->node->file_path));
+    return order ? order : strcmp(text(a->node->qualified_name), text(b->node->qualified_name));
+}
+
+static int coverage_find_file(coverage_file_t *files, int count, const char *path) {
+    int lo = 0;
+    int hi = count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int order = strcmp(text(files[mid].node->file_path), text(path));
+        if (order < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo < count && !strcmp(text(files[lo].node->file_path), text(path)) ? lo : -1;
+}
+
+static bool coverage_markdown(const char *path) {
+    const char *ext = strrchr(text(path), '.');
+    if (!ext || strlen(ext) >= 16) {
+        return false;
+    }
+    char lower[16];
+    size_t i = 0;
+    for (; ext[i]; i++) {
+        lower[i] = (char)tolower((unsigned char)ext[i]);
+    }
+    lower[i] = '\0';
+    return !strcmp(lower, ".md") || !strcmp(lower, ".mdx") || !strcmp(lower, ".markdown");
+}
+
+static const char *coverage_document_status(yyjson_val *analysis) {
+    const char *status = yyjson_get_str(yyjson_obj_get(analysis, "status"));
+    if (yyjson_get_int(yyjson_obj_get(analysis, "index_version")) != 1 || !status ||
+        (strcmp(status, "ok") && strcmp(status, "limited"))) {
+        return "unknown";
+    }
+    return status;
+}
+
+char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const char *view,
+                                const char *status, int offset, int limit) {
+    if (!store || !project || !project[0] || !view || offset < 0 ||
+        (strcmp(view, "code") && strcmp(view, "documents"))) {
+        return NULL;
+    }
+    bool code_view = !strcmp(view, "code");
+    if (status && status[0] &&
+        (code_view ? strcmp(status, "referenced") && strcmp(status, "not_referenced")
+                   : strcmp(status, "ok") && strcmp(status, "limited") &&
+                         strcmp(status, "unknown"))) {
+        return NULL;
+    }
+    limit = limit < 0 ? 0 : limit > DOCUMENT_REFS_MAX ? DOCUMENT_REFS_MAX : limit;
+    cbm_node_t *nodes = NULL;
+    cbm_node_t *documents = NULL;
+    cbm_edge_t *edges = NULL;
+    coverage_file_t *files = NULL;
+    coverage_file_t *docs = NULL;
+    int node_count = 0, document_count = 0, edge_count = 0, file_count = 0;
+    int referenced = 0, limited = 0, unknown = 0;
+    yyjson_mut_doc *json = NULL;
+    char *result = NULL;
+    if (cbm_store_find_nodes_by_label(store, project, "File", &nodes, &node_count) != CBM_STORE_OK ||
+        cbm_store_find_nodes_by_label(store, project, "Document", &documents, &document_count) !=
+            CBM_STORE_OK ||
+        cbm_store_find_edges_by_type(store, project, "REFERENCES", &edges, &edge_count) !=
+            CBM_STORE_OK) {
+        goto coverage_cleanup;
+    }
+    files = calloc((size_t)node_count + 1, sizeof(*files));
+    docs = calloc((size_t)document_count + 1, sizeof(*docs));
+    if (!files || !docs) {
+        goto coverage_cleanup;
+    }
+    for (int i = 0; i < document_count; i++) {
+        docs[i].node = &documents[i];
+        const char *raw = text(documents[i].properties_json);
+        yyjson_doc *props = yyjson_read(raw, strlen(raw), 0);
+        const char *state = coverage_document_status(
+            yyjson_obj_get(yyjson_doc_get_root(props), "document_links"));
+        limited += !strcmp(state, "limited");
+        unknown += !strcmp(state, "unknown");
+        yyjson_doc_free(props);
+    }
+    qsort(docs, (size_t)document_count, sizeof(*docs), coverage_compare_files);
+    for (int i = 0; i < node_count; i++) {
+        if (!text(nodes[i].file_path)[0] || coverage_markdown(nodes[i].file_path) ||
+            coverage_find_file(docs, document_count, nodes[i].file_path) >= 0) {
+            continue;
+        }
+        files[file_count++].node = &nodes[i];
+    }
+    qsort(files, (size_t)file_count, sizeof(*files), coverage_compare_files);
+    int unique = 0;
+    for (int i = 0; i < file_count; i++) {
+        if (!unique || strcmp(files[i].node->file_path, files[unique - 1].node->file_path)) {
+            files[unique++] = files[i];
+        }
+    }
+    file_count = unique;
+    /* Scan project references once, then map symbol targets to sorted file paths. */
+    for (int i = 0; i < edge_count; i++) {
+        const char *raw = text(edges[i].properties_json);
+        yyjson_doc *props = yyjson_read(raw, strlen(raw), 0);
+        const char *producer =
+            yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(props), "producer"));
+        bool eligible = producer && !strcmp(producer, "document_links") &&
+                        !strcmp(text(edges[i].project), project);
+        yyjson_doc_free(props);
+        if (!eligible) {
+            continue;
+        }
+        cbm_node_t source = {0}, target = {0};
+        int source_rc = cbm_store_find_node_by_id(store, edges[i].source_id, &source);
+        int target_rc = cbm_store_find_node_by_id(store, edges[i].target_id, &target);
+        if ((source_rc != CBM_STORE_OK && source_rc != CBM_STORE_NOT_FOUND) ||
+            (target_rc != CBM_STORE_OK && target_rc != CBM_STORE_NOT_FOUND)) {
+            cbm_node_free_fields(&source);
+            cbm_node_free_fields(&target);
+            goto coverage_cleanup;
+        }
+        if (source_rc == CBM_STORE_OK && target_rc == CBM_STORE_OK &&
+            !strcmp(text(source.project), project) && !strcmp(text(target.project), project) &&
+            (!strcmp(text(source.label), "Document") || !strcmp(text(source.label), "Section"))) {
+            int index = coverage_find_file(files, file_count, target.file_path);
+            if (index >= 0) {
+                files[index].count++;
+            }
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    for (int i = 0; i < file_count; i++) {
+        referenced += files[i].count > 0;
+    }
+    json = yyjson_mut_doc_new(NULL);
+    if (!json) {
+        goto coverage_cleanup;
+    }
+    yyjson_mut_val *root = yyjson_mut_obj(json);
+    yyjson_mut_val *summary = yyjson_mut_obj(json);
+    yyjson_mut_val *items = yyjson_mut_arr(json);
+    if (!root || !summary || !items) {
+        goto coverage_cleanup;
+    }
+    yyjson_mut_doc_set_root(json, root);
+    int total = 0, returned = 0;
+    for (int i = 0; i < (code_view ? file_count : document_count); i++) {
+        cbm_node_t *node = code_view ? files[i].node : docs[i].node;
+        const char *raw = text(node->properties_json);
+        yyjson_doc *props = code_view ? NULL : yyjson_read(raw, strlen(raw), 0);
+        yyjson_val *analysis = yyjson_obj_get(yyjson_doc_get_root(props), "document_links");
+        const char *state = code_view ? (files[i].count ? "referenced" : "not_referenced")
+                                     : coverage_document_status(analysis);
+        if (status && status[0] && strcmp(status, state)) {
+            yyjson_doc_free(props);
+            continue;
+        }
+        if (total++ < offset || returned >= limit) {
+            yyjson_doc_free(props);
+            continue;
+        }
+        yyjson_mut_val *item = yyjson_mut_obj(json);
+        bool ok = item && yyjson_mut_obj_add_strcpy(json, item, "file_path", text(node->file_path)) &&
+                  yyjson_mut_obj_add_strcpy(json, item, "status", state);
+        if (code_view) {
+            ok = ok && yyjson_mut_obj_add_int(json, item, "reference_count", files[i].count);
+        } else {
+            yyjson_mut_val *reasons = yyjson_mut_arr(json);
+            const char *reason = !strcmp(state, "unknown") ? "reindex_required"
+                : yyjson_get_str(yyjson_obj_get(analysis, "reason"));
+            ok = ok && reasons &&
+                 yyjson_mut_obj_add_strcpy(json, item, "qualified_name", text(node->qualified_name)) &&
+                 yyjson_mut_obj_add_val(json, item, "reasons", reasons) &&
+                 (!reason || yyjson_mut_arr_add_strcpy(json, reasons, reason));
+        }
+        yyjson_doc_free(props);
+        if (!ok || !yyjson_mut_arr_add_val(items, item)) {
+            goto coverage_cleanup;
+        }
+        returned++;
+    }
+    bool has_more = offset < total && returned < total - offset;
+    if (!yyjson_mut_obj_add_strcpy(json, root, "project", project) ||
+        !yyjson_mut_obj_add_strcpy(json, root, "view", view) ||
+        !yyjson_mut_obj_add_int(json, root, "total", total) ||
+        !yyjson_mut_obj_add_int(json, root, "offset", offset) ||
+        !yyjson_mut_obj_add_int(json, root, "returned", returned) ||
+        !yyjson_mut_obj_add_bool(json, root, "has_more", has_more) ||
+        !(has_more ? yyjson_mut_obj_add_int(json, root, "next_offset", (int64_t)offset + returned)
+                   : yyjson_mut_obj_add_null(json, root, "next_offset")) ||
+        !yyjson_mut_obj_add_val(json, root, "summary", summary) ||
+        !yyjson_mut_obj_add_val(json, root, "items", items) ||
+        !yyjson_mut_obj_add_int(json, summary, "indexed_code_files", file_count) ||
+        !yyjson_mut_obj_add_int(json, summary, "referenced_code_files", referenced) ||
+        !yyjson_mut_obj_add_int(json, summary, "indexed_documents", document_count) ||
+        !yyjson_mut_obj_add_int(json, summary, "limited_documents", limited) ||
+        !yyjson_mut_obj_add_int(json, summary, "unknown_documents", unknown) ||
+        !yyjson_mut_obj_add_str(json, root, "limitation",
+            "Current indexed File nodes and document_links REFERENCES only; reference_count counts "
+            "edges, including symbol targets in each file. Unreferenced files are not proof of "
+            "missing documentation. Parser status describes only the supported Markdown subset.")) {
+        goto coverage_cleanup;
+    }
+    result = yyjson_mut_write(json, 0, NULL);
+coverage_cleanup:
+    yyjson_mut_doc_free(json);
+    free(files);
+    free(docs);
+    cbm_store_free_nodes(nodes, node_count);
+    cbm_store_free_nodes(documents, document_count);
+    cbm_store_free_edges(edges, edge_count);
     return result;
 }

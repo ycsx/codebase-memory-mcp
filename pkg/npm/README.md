@@ -51,7 +51,8 @@ codebase-memory-mcp cli get_architecture '{"project":"my-project"}'
 
 ## MCP 工具
 
-当前工作区源码定义 20 个工具（`all` 档位），其中 `analysis` 为 16 个、`scout` 为 10 个；启用权限控制后实际可见工具可能更少。工具包括索引/项目管理、图谱搜索、任务上下文编译、调用链、源码读取、架构和影响分析、覆盖度检查、Cypher、ADR、运行时 trace，以及 Markdown 文档与代码的双向引用查询。
+当前工作区源码定义 22 个工具（`all` 档位），其中 `analysis` 为 17 个、`scout` 为 11 个；启用权限控制后实际可见工具可能更少。工具包括索引/项目管理、图谱搜索、任务上下文编译、调用链、源码读取、架构和影响分析、覆盖度检查、Cypher、ADR、运行时 trace，以及 Markdown 文档与代码的双向引用查询、覆盖矩阵和复核状态。
+`get_document_coverage` 分页查询覆盖；`update_document_review` 是显式写入工具，不进入只读档位。确认绑定代码与文档内容，后续变化需要重新复核。
 
 `get_document` 返回文档到代码的引用和行号证据；`get_related_documents` 从文件或完整限定名符号反查文档。`build_context`、`explain_impact` 和 `review_change` 可按需返回有数量与预算限制的相关文档证据。空结果不代表不存在相关文档，显式引用也不代表语义理解或完整覆盖。
 

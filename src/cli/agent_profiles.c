@@ -38,6 +38,7 @@ typedef enum {
     PROFILE_TOOL_REVIEW_CHANGE,
     PROFILE_TOOL_GET_DOCUMENT,
     PROFILE_TOOL_GET_RELATED_DOCUMENTS,
+    PROFILE_TOOL_GET_DOCUMENT_COVERAGE,
     PROFILE_TOOL_COUNT
 } profile_tool_t;
 
@@ -56,6 +57,7 @@ static const profile_tool_t verified_tools[] = {
     PROFILE_TOOL_CHECK_INDEX_COVERAGE,  PROFILE_TOOL_BUILD_CONTEXT,
     PROFILE_TOOL_REVIEW_CHANGE,         PROFILE_TOOL_GET_DOCUMENT,
     PROFILE_TOOL_GET_RELATED_DOCUMENTS,
+    PROFILE_TOOL_GET_DOCUMENT_COVERAGE,
 };
 
 static const char *const tool_base_names[PROFILE_TOOL_COUNT] = {
@@ -63,6 +65,7 @@ static const char *const tool_base_names[PROFILE_TOOL_COUNT] = {
     "get_architecture", "search_code",    "get_graph_schema",      "list_projects",
     "index_status",     "detect_changes", "check_index_coverage",  "build_context",
     "review_change",    "get_document",   "get_related_documents",
+    "get_document_coverage",
 };
 
 static bool tier_valid(cbm_graph_tier_t tier) {
