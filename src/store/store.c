@@ -1497,9 +1497,8 @@ int cbm_store_list_projects(cbm_store_t *s, cbm_project_t **out, int *count) {
 }
 
 static int document_review_get(cbm_store_t *s, const char *project,
-                                  const char *source_qualified_name,
-                                  const char *target_qualified_name, char **token,
-                                  char **reviewed_at) {
+                               const char *source_qualified_name, const char *target_qualified_name,
+                               char **token, char **reviewed_at) {
     if (token) {
         *token = NULL;
     }
@@ -1563,21 +1562,22 @@ static int document_review_get(cbm_store_t *s, const char *project,
 }
 
 static int document_review_set(cbm_store_t *s, const char *project,
-                                  const char *source_qualified_name,
-                                  const char *target_qualified_name, const char *token) {
+                               const char *source_qualified_name, const char *target_qualified_name,
+                               const char *token) {
     if (!s || !s->db || !project || !project[0] || !source_qualified_name ||
         !source_qualified_name[0] || !target_qualified_name || !target_qualified_name[0] ||
         (token && !token[0])) {
         return CBM_STORE_ERR;
     }
-    const char *sql = token
-        ? "INSERT INTO document_reviews "
-          "(project,source_qualified_name,target_qualified_name,state_token,reviewed_at) "
-          "VALUES (?1,?2,?3,?4,?5) ON CONFLICT(project,source_qualified_name,target_qualified_name) "
-          "DO UPDATE SET state_token=excluded.state_token,reviewed_at=excluded.reviewed_at "
-          "WHERE document_reviews.state_token <> excluded.state_token;"
-        : "DELETE FROM document_reviews WHERE project=?1 "
-          "AND source_qualified_name=?2 AND target_qualified_name=?3;";
+    const char *sql =
+        token ? "INSERT INTO document_reviews "
+                "(project,source_qualified_name,target_qualified_name,state_token,reviewed_at) "
+                "VALUES (?1,?2,?3,?4,?5) ON "
+                "CONFLICT(project,source_qualified_name,target_qualified_name) "
+                "DO UPDATE SET state_token=excluded.state_token,reviewed_at=excluded.reviewed_at "
+                "WHERE document_reviews.state_token <> excluded.state_token;"
+              : "DELETE FROM document_reviews WHERE project=?1 "
+                "AND source_qualified_name=?2 AND target_qualified_name=?3;";
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
         store_set_error_sqlite(s, "document review set prepare");
@@ -1645,11 +1645,10 @@ static int document_review_sidecar_open(cbm_store_t *s, bool write, cbm_store_t 
     }
     sqlite3_busy_timeout(sidecar->db, 5000);
     if (write &&
-        exec_sql(sidecar,
-                 "CREATE TABLE IF NOT EXISTS document_reviews (project TEXT NOT NULL,"
-                 "source_qualified_name TEXT NOT NULL,target_qualified_name TEXT NOT NULL,"
-                 "state_token TEXT NOT NULL,reviewed_at TEXT NOT NULL,"
-                 "PRIMARY KEY(project,source_qualified_name,target_qualified_name));") !=
+        exec_sql(sidecar, "CREATE TABLE IF NOT EXISTS document_reviews (project TEXT NOT NULL,"
+                          "source_qualified_name TEXT NOT NULL,target_qualified_name TEXT NOT NULL,"
+                          "state_token TEXT NOT NULL,reviewed_at TEXT NOT NULL,"
+                          "PRIMARY KEY(project,source_qualified_name,target_qualified_name));") !=
             CBM_STORE_OK) {
         store_set_error(s, sidecar->errbuf);
         close_sqlite_connection(&sidecar->db);
@@ -1674,16 +1673,16 @@ int cbm_store_document_review_get(cbm_store_t *s, const char *project,
         return CBM_STORE_ERR;
     }
     if (!s->db_path) {
-        return document_review_get(s, project, source_qualified_name, target_qualified_name,
-                                   token, reviewed_at);
+        return document_review_get(s, project, source_qualified_name, target_qualified_name, token,
+                                   reviewed_at);
     }
     cbm_store_t sidecar = {0};
     int rc = document_review_sidecar_open(s, false, &sidecar);
     if (rc != CBM_STORE_OK) {
         return rc;
     }
-    rc = document_review_get(&sidecar, project, source_qualified_name, target_qualified_name,
-                             token, reviewed_at);
+    rc = document_review_get(&sidecar, project, source_qualified_name, target_qualified_name, token,
+                             reviewed_at);
     if (rc == CBM_STORE_ERR) {
         store_set_error(s, sidecar.errbuf);
     }
@@ -1700,16 +1699,15 @@ int cbm_store_document_review_set(cbm_store_t *s, const char *project,
         return CBM_STORE_ERR;
     }
     if (!s->db_path) {
-        return document_review_set(s, project, source_qualified_name, target_qualified_name,
-                                   token);
+        return document_review_set(s, project, source_qualified_name, target_qualified_name, token);
     }
     cbm_store_t sidecar = {0};
     int rc = document_review_sidecar_open(s, true, &sidecar);
     if (rc != CBM_STORE_OK) {
         return rc;
     }
-    rc = document_review_set(&sidecar, project, source_qualified_name, target_qualified_name,
-                             token);
+    rc =
+        document_review_set(&sidecar, project, source_qualified_name, target_qualified_name, token);
     if (rc == CBM_STORE_ERR) {
         store_set_error(s, sidecar.errbuf);
     }
@@ -1740,8 +1738,8 @@ int cbm_store_document_reviews_delete(const char *graph_db_path, const char *pro
     }
     sqlite3_busy_timeout(db, 5000);
     sqlite3_stmt *stmt = NULL;
-    rc = sqlite3_prepare_v2(db, "DELETE FROM document_reviews WHERE project=?1;",
-                            CBM_NOT_FOUND, &stmt, NULL);
+    rc = sqlite3_prepare_v2(db, "DELETE FROM document_reviews WHERE project=?1;", CBM_NOT_FOUND,
+                            &stmt, NULL);
     if (rc == SQLITE_OK) {
         rc = bind_text(stmt, ST_COL_1, project);
     }

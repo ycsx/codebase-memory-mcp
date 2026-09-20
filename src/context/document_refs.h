@@ -16,6 +16,6 @@ char *cbm_document_refs_json(cbm_store_t *store, const char *project, const cbm_
  * view is code or documents; status is NULL/empty or a status for that view.
  * offset is nonnegative; limit is clamped to 0..100. Returns malloc-owned JSON. */
 char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const char *view,
-                                const char *status, int offset, int limit);
+                                 const char *status, int offset, int limit);
 
 #endif

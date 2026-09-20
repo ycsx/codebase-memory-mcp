@@ -313,16 +313,16 @@ static const char *coverage_document_status(yyjson_val *analysis) {
 }
 
 char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const char *view,
-                                const char *status, int offset, int limit) {
+                                 const char *status, int offset, int limit) {
     if (!store || !project || !project[0] || !view || offset < 0 ||
         (strcmp(view, "code") && strcmp(view, "documents"))) {
         return NULL;
     }
     bool code_view = !strcmp(view, "code");
     if (status && status[0] &&
-        (code_view ? strcmp(status, "referenced") && strcmp(status, "not_referenced")
-                   : strcmp(status, "ok") && strcmp(status, "limited") &&
-                         strcmp(status, "unknown"))) {
+        (code_view
+             ? strcmp(status, "referenced") && strcmp(status, "not_referenced")
+             : strcmp(status, "ok") && strcmp(status, "limited") && strcmp(status, "unknown"))) {
         return NULL;
     }
     limit = limit < 0 ? 0 : limit > DOCUMENT_REFS_MAX ? DOCUMENT_REFS_MAX : limit;
@@ -335,7 +335,8 @@ char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const 
     int referenced = 0, limited = 0, unknown = 0;
     yyjson_mut_doc *json = NULL;
     char *result = NULL;
-    if (cbm_store_find_nodes_by_label(store, project, "File", &nodes, &node_count) != CBM_STORE_OK ||
+    if (cbm_store_find_nodes_by_label(store, project, "File", &nodes, &node_count) !=
+            CBM_STORE_OK ||
         cbm_store_find_nodes_by_label(store, project, "Document", &documents, &document_count) !=
             CBM_STORE_OK ||
         cbm_store_find_edges_by_type(store, project, "REFERENCES", &edges, &edge_count) !=
@@ -351,8 +352,8 @@ char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const 
         docs[i].node = &documents[i];
         const char *raw = text(documents[i].properties_json);
         yyjson_doc *props = yyjson_read(raw, strlen(raw), 0);
-        const char *state = coverage_document_status(
-            yyjson_obj_get(yyjson_doc_get_root(props), "document_links"));
+        const char *state =
+            coverage_document_status(yyjson_obj_get(yyjson_doc_get_root(props), "document_links"));
         limited += !strcmp(state, "limited");
         unknown += !strcmp(state, "unknown");
         yyjson_doc_free(props);
@@ -426,7 +427,7 @@ char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const 
         yyjson_doc *props = code_view ? NULL : yyjson_read(raw, strlen(raw), 0);
         yyjson_val *analysis = yyjson_obj_get(yyjson_doc_get_root(props), "document_links");
         const char *state = code_view ? (files[i].count ? "referenced" : "not_referenced")
-                                     : coverage_document_status(analysis);
+                                      : coverage_document_status(analysis);
         if (status && status[0] && strcmp(status, state)) {
             yyjson_doc_free(props);
             continue;
@@ -436,16 +437,19 @@ char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const 
             continue;
         }
         yyjson_mut_val *item = yyjson_mut_obj(json);
-        bool ok = item && yyjson_mut_obj_add_strcpy(json, item, "file_path", text(node->file_path)) &&
+        bool ok = item &&
+                  yyjson_mut_obj_add_strcpy(json, item, "file_path", text(node->file_path)) &&
                   yyjson_mut_obj_add_strcpy(json, item, "status", state);
         if (code_view) {
             ok = ok && yyjson_mut_obj_add_int(json, item, "reference_count", files[i].count);
         } else {
             yyjson_mut_val *reasons = yyjson_mut_arr(json);
-            const char *reason = !strcmp(state, "unknown") ? "reindex_required"
-                : yyjson_get_str(yyjson_obj_get(analysis, "reason"));
+            const char *reason = !strcmp(state, "unknown")
+                                     ? "reindex_required"
+                                     : yyjson_get_str(yyjson_obj_get(analysis, "reason"));
             ok = ok && reasons &&
-                 yyjson_mut_obj_add_strcpy(json, item, "qualified_name", text(node->qualified_name)) &&
+                 yyjson_mut_obj_add_strcpy(json, item, "qualified_name",
+                                           text(node->qualified_name)) &&
                  yyjson_mut_obj_add_val(json, item, "reasons", reasons) &&
                  (!reason || yyjson_mut_arr_add_strcpy(json, reasons, reason));
         }
@@ -471,7 +475,8 @@ char *cbm_document_coverage_json(cbm_store_t *store, const char *project, const 
         !yyjson_mut_obj_add_int(json, summary, "indexed_documents", document_count) ||
         !yyjson_mut_obj_add_int(json, summary, "limited_documents", limited) ||
         !yyjson_mut_obj_add_int(json, summary, "unknown_documents", unknown) ||
-        !yyjson_mut_obj_add_str(json, root, "limitation",
+        !yyjson_mut_obj_add_str(
+            json, root, "limitation",
             "Current indexed File nodes and document_links REFERENCES only; reference_count counts "
             "edges, including symbol targets in each file. Unreferenced files are not proof of "
             "missing documentation. Parser status describes only the supported Markdown subset.")) {

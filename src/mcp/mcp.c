@@ -774,17 +774,18 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
 
 static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
-        "search_graph",         "query_graph",    "trace_path",       "explain_impact",
-        "build_context",        "review_change",  "get_code_snippet", "get_graph_schema",
-        "get_architecture",     "search_code",    "list_projects",    "index_status",
-        "check_index_coverage", "detect_changes", "get_document",     "get_related_documents",
+        "search_graph",          "query_graph",    "trace_path",       "explain_impact",
+        "build_context",         "review_change",  "get_code_snippet", "get_graph_schema",
+        "get_architecture",      "search_code",    "list_projects",    "index_status",
+        "check_index_coverage",  "detect_changes", "get_document",     "get_related_documents",
         "get_document_coverage",
     };
     static const char *const scout_tools[] = {
-        "search_graph",          "trace_path",           "explain_impact",
-        "get_code_snippet",      "get_architecture",     "list_projects",
-        "index_status",          "check_index_coverage", "get_document",
-        "get_related_documents",
+        "search_graph",          "trace_path",
+        "explain_impact",        "get_code_snippet",
+        "get_architecture",      "list_projects",
+        "index_status",          "check_index_coverage",
+        "get_document",          "get_related_documents",
         "get_document_coverage",
     };
     if (!name) {
@@ -6376,17 +6377,19 @@ static bool document_review_hash_file(cbm_sha256_ctx *hash, const char *root, co
     return ok;
 }
 
-static bool document_review_token(cbm_store_t *store, const char *project,
-                                   const cbm_node_t *source, const cbm_node_t *target,
-                                   char token[CBM_SHA256_HEX_LEN + 1]) {
+static bool document_review_token(cbm_store_t *store, const char *project, const cbm_node_t *source,
+                                  const cbm_node_t *target, char token[CBM_SHA256_HEX_LEN + 1]) {
     cbm_project_t info = {0};
     if (cbm_store_get_project(store, project, &info) != CBM_STORE_OK) {
         return false;
     }
     cbm_sha256_ctx hash;
     cbm_sha256_init(&hash);
-    const char *parts[] = {"document-review-v1", project, source->qualified_name,
-                           target->qualified_name, source->file_path ? source->file_path : "",
+    const char *parts[] = {"document-review-v1",
+                           project,
+                           source->qualified_name,
+                           target->qualified_name,
+                           source->file_path ? source->file_path : "",
                            target->file_path ? target->file_path : ""};
     for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
         cbm_sha256_update(&hash, parts[i], strlen(parts[i]) + 1);
@@ -6407,8 +6410,8 @@ static bool document_review_token(cbm_store_t *store, const char *project,
     return ok;
 }
 
-static bool document_review_states(cbm_store_t *store, const char *project,
-                                    yyjson_mut_doc *doc, yyjson_mut_val *payload) {
+static bool document_review_states(cbm_store_t *store, const char *project, yyjson_mut_doc *doc,
+                                   yyjson_mut_val *payload) {
     size_t index, max;
     yyjson_mut_val *item;
     yyjson_mut_arr_foreach(yyjson_mut_obj_get(payload, "references"), index, max, item) {
@@ -6420,12 +6423,11 @@ static bool document_review_states(cbm_store_t *store, const char *project,
             yyjson_mut_get_str(yyjson_mut_obj_get(target_json, "qualified_name"));
         cbm_node_t source = {0}, target = {0};
         char token[CBM_SHA256_HEX_LEN + 1] = {0};
-        bool available = source_qn && target_qn &&
-                         cbm_store_find_node_by_qn(store, project, source_qn, &source) ==
-                             CBM_STORE_OK &&
-                         cbm_store_find_node_by_qn(store, project, target_qn, &target) ==
-                             CBM_STORE_OK &&
-                         document_review_token(store, project, &source, &target, token);
+        bool available =
+            source_qn && target_qn &&
+            cbm_store_find_node_by_qn(store, project, source_qn, &source) == CBM_STORE_OK &&
+            cbm_store_find_node_by_qn(store, project, target_qn, &target) == CBM_STORE_OK &&
+            document_review_token(store, project, &source, &target, token);
         char *saved = NULL, *reviewed_at = NULL;
         int rc = available ? cbm_store_document_review_get(store, project, source_qn, target_qn,
                                                            &saved, &reviewed_at)
@@ -6441,8 +6443,9 @@ static bool document_review_states(cbm_store_t *store, const char *project,
         }
         bool ok = review &&
                   yyjson_mut_obj_add_str(doc, review, "state",
-                                         !available ? "unavailable"
-                                         : confirmed ? "confirmed" : "pending") &&
+                                         !available  ? "unavailable"
+                                         : confirmed ? "confirmed"
+                                                     : "pending") &&
                   (available ? yyjson_mut_obj_add_strcpy(doc, review, "token", token)
                              : yyjson_mut_obj_add_null(doc, review, "token")) &&
                   (confirmed ? yyjson_mut_obj_add_strcpy(doc, review, "reviewed_at", reviewed_at)
@@ -11516,7 +11519,8 @@ static char *handle_get_related_documents(cbm_mcp_server_t *srv, const char *arg
         free(json);
         json = mutable && document_review_states(store, project, mutable,
                                                  yyjson_mut_doc_get_root(mutable))
-                   ? yyjson_mut_write(mutable, 0, NULL) : NULL;
+                   ? yyjson_mut_write(mutable, 0, NULL)
+                   : NULL;
         yyjson_mut_doc_free(mutable);
         yyjson_doc_free(parsed);
     }
@@ -11545,18 +11549,21 @@ static char *handle_get_document_coverage(cbm_mcp_server_t *srv, const char *arg
     int limit = cbm_mcp_get_int_arg(args, "limit", 50);
     const char *mode = view ? view : "code";
     bool code = !strcmp(mode, "code"), documents = !strcmp(mode, "documents");
-    bool valid_status = !status ||
-                        (code && (!strcmp(status, "referenced") ||
-                                  !strcmp(status, "not_referenced"))) ||
-                        (documents && (!strcmp(status, "ok") || !strcmp(status, "limited") ||
-                                       !strcmp(status, "unknown")));
+    bool valid_status =
+        !status || (code && (!strcmp(status, "referenced") || !strcmp(status, "not_referenced"))) ||
+        (documents &&
+         (!strcmp(status, "ok") || !strcmp(status, "limited") || !strcmp(status, "unknown")));
     char *error = verify_project_indexed(store, project);
-    char *json = !error && (code || documents) && valid_status && offset >= 0 &&
-                         limit >= 1 && limit <= 100
-                     ? cbm_document_coverage_json(store, project, mode, status, offset, limit)
-                     : NULL;
-    char *result = error ? error : cbm_mcp_text_result(
-        json ? json : "invalid coverage view/status/offset/limit or coverage unavailable", !json);
+    char *json =
+        !error && (code || documents) && valid_status && offset >= 0 && limit >= 1 && limit <= 100
+            ? cbm_document_coverage_json(store, project, mode, status, offset, limit)
+            : NULL;
+    char *result =
+        error
+            ? error
+            : cbm_mcp_text_result(
+                  json ? json : "invalid coverage view/status/offset/limit or coverage unavailable",
+                  !json);
     free(json);
     free(view);
     free(status);
@@ -11583,16 +11590,17 @@ static char *handle_update_document_review(cbm_mcp_server_t *srv, const char *ar
     int count = 0;
     if (!source_qn || !target_qn || !token || !action ||
         (strcmp(action, "confirm") && strcmp(action, "reopen"))) {
-        error = "source_qualified_name, target_qualified_name, token and confirm/reopen action required";
+        error = "source_qualified_name, target_qualified_name, token and confirm/reopen action "
+                "required";
     } else if (cbm_store_find_node_by_qn(store, project, source_qn, &source) != CBM_STORE_OK ||
                cbm_store_find_node_by_qn(store, project, target_qn, &target) != CBM_STORE_OK ||
-               (!source.label || (strcmp(source.label, "Document") &&
-                                  strcmp(source.label, "Section")))) {
+               (!source.label ||
+                (strcmp(source.label, "Document") && strcmp(source.label, "Section")))) {
         error = "current document reference not found";
     }
     bool found = false;
-    if (!error && cbm_store_find_edges_by_source_type(store, source.id, "REFERENCES",
-                                                     &edges, &count) == CBM_STORE_OK) {
+    if (!error && cbm_store_find_edges_by_source_type(store, source.id, "REFERENCES", &edges,
+                                                      &count) == CBM_STORE_OK) {
         for (int i = 0; i < count; i++) {
             if (edges[i].target_id != target.id || !edges[i].project ||
                 strcmp(edges[i].project, project)) {
@@ -11600,8 +11608,8 @@ static char *handle_update_document_review(cbm_mcp_server_t *srv, const char *ar
             }
             const char *raw = edges[i].properties_json;
             yyjson_doc *props = raw ? yyjson_read(raw, strlen(raw), 0) : NULL;
-            const char *producer = yyjson_get_str(yyjson_obj_get(
-                yyjson_doc_get_root(props), "producer"));
+            const char *producer =
+                yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(props), "producer"));
             found = producer && !strcmp(producer, "document_links");
             yyjson_doc_free(props);
             if (found) {
@@ -11621,13 +11629,13 @@ static char *handle_update_document_review(cbm_mcp_server_t *srv, const char *ar
     }
     bool confirm = action && !strcmp(action, "confirm");
     if (!error && cbm_store_document_review_set(store, project, source_qn, target_qn,
-                                               confirm ? current : NULL) != CBM_STORE_OK) {
+                                                confirm ? current : NULL) != CBM_STORE_OK) {
         error = "could not persist document review";
     }
     char *saved = NULL, *reviewed_at = NULL;
     if (!error && confirm &&
-        cbm_store_document_review_get(store, project, source_qn, target_qn, &saved,
-                                      &reviewed_at) != CBM_STORE_OK) {
+        cbm_store_document_review_get(store, project, source_qn, target_qn, &saved, &reviewed_at) !=
+            CBM_STORE_OK) {
         error = "could not read persisted document review";
     }
     char *result = NULL;

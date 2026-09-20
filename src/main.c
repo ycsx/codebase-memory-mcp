@@ -578,7 +578,8 @@ static void print_help(void) {
     printf("  list_projects, delete_project, index_status, detect_changes,\n");
     printf("  explain_impact, build_context, review_change, check_index_coverage, manage_adr, "
            "ingest_traces,\n");
-    printf("  get_document, get_related_documents, get_document_coverage, update_document_review\n");
+    printf(
+        "  get_document, get_related_documents, get_document_coverage, update_document_review\n");
     printf("  Document references: get_document by path/name; get_related_documents by exact\n");
     printf("  qualified symbol or file:relative/path (includes symbols in that file).\n");
     printf("  include_docs defaults: build_context/explain_impact=false, review_change=true.\n");
