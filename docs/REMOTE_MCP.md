@@ -2,7 +2,9 @@
 
 标准 headless 二进制可以通过 MCP Streamable HTTP 向 Codex 或其他客户端提供图谱工具。一键部署使用带嵌入式前端的 UI Release：MCP 和可视化控制台分别运行在两个 loopback 服务中，再由同一个 Nginx HTTP 入口分流。TLS 应由公司的统一反向代理终止。
 
-## 本机管理接口（W5）
+> 当前迭代优先交付本地 stdio/CLI 功能，HTTP 并发验收仍暂停，不应把本地测试通过解读为远程部署验收完成。文档引用功能无需 HTTP 服务；见[文档引用使用指引](DOCUMENT_REFERENCES.md)。以下新增工具说明对应工作区源码，本轮未核验 Release 是否已包含这些改动。
+
+## 本机管理接口
 
 嵌入式 UI 服务另外提供一组仅供本机控制台使用的管理接口：`GET /healthz`、`GET /readyz`、`GET /metrics`，以及项目和任务目录 `GET /admin/v1/projects`、`GET /admin/v1/jobs`。索引操作可通过 `POST /admin/v1/index` 或 `POST /admin/v1/remote-index` 提交；这些接口复用控制台已有的索引队列和去重逻辑。
 
@@ -114,6 +116,20 @@ sudo cbm-server allowed-root
 - 审计：每个请求记录 IP、会话、方法/工具、脱敏目标、状态、耗时和字节数；不会记录 Token 和完整查询正文。
 
 IP 只代表网络来源，不一定对应单个用户。NAT、共享工作站和代理可能让多个用户使用同一个 IP；审计中的 `principal` 为后续用户级凭据保留字段。
+
+### 文档引用查询权限
+
+当前源码的 `analysis` 和 `scout` 档位分别包含 16 和 10 个工具（权限过滤前）。
+`get_document` 和 `get_related_documents` 均属于只读工具，两个档位都提供，
+但托管 Key 还必须有对应项目 ACL 和 `source_read` 权限。只读不等于可绕过源码读取权限。
+
+`build_context`、`review_change` 本身也要求 `source_read`。
+`explain_impact` 可在没有该权限时执行图谱分析，但不会返回相关文档内容或引用证据。
+若工具不可见或请求被拒绝，应检查档位、项目范围和权限，而不是放宽服务端校验。
+新增文档证据的数量、预算、截断及分析状态语义与本地接口一致。
+
+升级时需使用包含改动的二进制并重启服务，随后重新索引项目补建引用。
+部署脚本下载的 Release 不应仅因本文提及新工具就被视为已经包含它们。
 
 ## 服务配置
 

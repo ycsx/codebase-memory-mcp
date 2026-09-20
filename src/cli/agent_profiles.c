@@ -36,6 +36,8 @@ typedef enum {
     PROFILE_TOOL_CHECK_INDEX_COVERAGE,
     PROFILE_TOOL_BUILD_CONTEXT,
     PROFILE_TOOL_REVIEW_CHANGE,
+    PROFILE_TOOL_GET_DOCUMENT,
+    PROFILE_TOOL_GET_RELATED_DOCUMENTS,
     PROFILE_TOOL_COUNT
 } profile_tool_t;
 
@@ -46,18 +48,21 @@ static const profile_tool_t scout_tools[] = {
 };
 
 static const profile_tool_t verified_tools[] = {
-    PROFILE_TOOL_SEARCH_GRAPH,     PROFILE_TOOL_TRACE_PATH,           PROFILE_TOOL_GET_CODE_SNIPPET,
-    PROFILE_TOOL_QUERY_GRAPH,      PROFILE_TOOL_GET_ARCHITECTURE,     PROFILE_TOOL_SEARCH_CODE,
-    PROFILE_TOOL_GET_GRAPH_SCHEMA, PROFILE_TOOL_LIST_PROJECTS,        PROFILE_TOOL_INDEX_STATUS,
-    PROFILE_TOOL_DETECT_CHANGES,   PROFILE_TOOL_CHECK_INDEX_COVERAGE, PROFILE_TOOL_BUILD_CONTEXT,
-    PROFILE_TOOL_REVIEW_CHANGE,
+    PROFILE_TOOL_SEARCH_GRAPH,          PROFILE_TOOL_TRACE_PATH,
+    PROFILE_TOOL_GET_CODE_SNIPPET,      PROFILE_TOOL_QUERY_GRAPH,
+    PROFILE_TOOL_GET_ARCHITECTURE,      PROFILE_TOOL_SEARCH_CODE,
+    PROFILE_TOOL_GET_GRAPH_SCHEMA,      PROFILE_TOOL_LIST_PROJECTS,
+    PROFILE_TOOL_INDEX_STATUS,          PROFILE_TOOL_DETECT_CHANGES,
+    PROFILE_TOOL_CHECK_INDEX_COVERAGE,  PROFILE_TOOL_BUILD_CONTEXT,
+    PROFILE_TOOL_REVIEW_CHANGE,         PROFILE_TOOL_GET_DOCUMENT,
+    PROFILE_TOOL_GET_RELATED_DOCUMENTS,
 };
 
 static const char *const tool_base_names[PROFILE_TOOL_COUNT] = {
-    "search_graph",     "trace_path",     "get_code_snippet",     "query_graph",
-    "get_architecture", "search_code",    "get_graph_schema",     "list_projects",
-    "index_status",     "detect_changes", "check_index_coverage", "build_context",
-    "review_change",
+    "search_graph",     "trace_path",     "get_code_snippet",      "query_graph",
+    "get_architecture", "search_code",    "get_graph_schema",      "list_projects",
+    "index_status",     "detect_changes", "check_index_coverage",  "build_context",
+    "review_change",    "get_document",   "get_related_documents",
 };
 
 static bool tier_valid(cbm_graph_tier_t tier) {
@@ -238,6 +243,17 @@ char *cbm_render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access) 
             "perform state-changing actions. Return tier, project, generation, checked "
             "paths/scopes, "
             "graph evidence, source fallback, and limitations.\n");
+        if (tier != CBM_GRAPH_TIER_SCOUT) {
+            profile_buffer_append(
+                &buffer,
+                "For explicit Markdown reference evidence, use get_document by document path/name "
+                "or get_related_documents by exact qualified symbol or file:relative/path "
+                "(including its symbols). Reverse lookup defaults to 20 results (maximum 100); "
+                "get_document caps references at 100. Check analysis status and truncation. "
+                "build_context defaults include_docs=false; review_change defaults true. "
+                "Empty results are not proof of complete documentation coverage, and explicit "
+                "references are not semantic relevance. Respect token budgets and limitations.\n");
+        }
     } else {
         switch (tier) {
         case CBM_GRAPH_TIER_SCOUT:

@@ -146,6 +146,11 @@ int cbm_gbuf_edge_count_by_type(const cbm_gbuf_t *gb, const char *type);
 /* Delete all edges of a type. */
 int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type);
 
+/* Delete matching edges without changing unrelated producers' edges.
+ * The predicate must not mutate the buffer. Returns the deleted count, or -1. */
+typedef bool (*cbm_gbuf_edge_predicate_fn)(const cbm_gbuf_edge_t *edge, void *userdata);
+int cbm_gbuf_delete_edges_if(cbm_gbuf_t *gb, cbm_gbuf_edge_predicate_fn predicate, void *userdata);
+
 /* ── Vector storage (for semantic embeddings) ───────────────────── */
 
 /* Store an int8-quantized vector for a node. The vector data is copied.

@@ -182,6 +182,7 @@ CYPHER_SRCS = src/cypher/cypher.c
 # MCP server module (new)
 MCP_SRCS = src/mcp/mcp.c src/mcp/analysis_meta.c src/mcp/index_supervisor.c src/mcp/compact_out.c \
     src/context/build_context.c \
+    src/context/document_refs.c \
     src/mcp/usage_stats.c \
     src/mcp/remote_auth.c \
     src/mcp/http_transport.c
@@ -216,6 +217,7 @@ PIPELINE_SRCS = \
     src/pipeline/pass_gitdiff.c \
     src/pipeline/pass_configures.c \
     src/pipeline/pass_configlink.c \
+    src/pipeline/pass_document_links.c \
     src/pipeline/pass_route_nodes.c \
     src/pipeline/pass_enrichment.c \
     src/pipeline/pass_envscan.c \
@@ -365,7 +367,7 @@ TEST_DISCOVER_SRCS = \
 
 TEST_GRAPH_BUFFER_SRCS = tests/test_graph_buffer.c
 
-TEST_PIPELINE_SRCS = tests/test_registry.c tests/test_pipeline.c tests/test_fqn.c tests/test_route_canon.c tests/test_path_alias.c tests/test_configlink.c tests/test_infrascan.c tests/test_worker_pool.c tests/test_parallel.c tests/test_index_resilience.c
+TEST_PIPELINE_SRCS = tests/test_registry.c tests/test_pipeline.c tests/test_document_links.c tests/test_document_refs.c tests/test_context_documents.c tests/test_fqn.c tests/test_route_canon.c tests/test_path_alias.c tests/test_configlink.c tests/test_infrascan.c tests/test_worker_pool.c tests/test_parallel.c tests/test_index_resilience.c
 
 TEST_WATCHER_SRCS = tests/test_watcher.c
 

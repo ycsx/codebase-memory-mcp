@@ -25,6 +25,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
+#include "yyjson/yyjson.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -32,6 +33,33 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include <sys/stat.h>
 #include <stdatomic.h>
 #include <stdint.h>
+
+static bool incremental_document_links_missing(cbm_store_t *store, const char *project) {
+    cbm_node_t *documents = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_label(store, project, "Document", &documents, &count) !=
+        CBM_STORE_OK) {
+        return true;
+    }
+    bool missing = false;
+    for (int i = 0; i < count && !missing; i++) {
+        const char *properties = documents[i].properties_json;
+        yyjson_doc *json = properties ? yyjson_read(properties, strlen(properties), 0) : NULL;
+        yyjson_val *links =
+            json ? yyjson_obj_get(yyjson_doc_get_root(json), "document_links") : NULL;
+        missing = yyjson_get_int(yyjson_obj_get(links, "index_version")) != 1;
+        const char *status = yyjson_get_str(yyjson_obj_get(links, "status"));
+        const char *reason = yyjson_get_str(yyjson_obj_get(links, "reason"));
+        if (status && strcmp(status, "limited") == 0 && reason &&
+            (strcmp(reason, "read_failed") == 0 || strcmp(reason, "allocation_failed") == 0 ||
+             strcmp(reason, "cancelled") == 0)) {
+            missing = true;
+        }
+        yyjson_doc_free(json);
+    }
+    cbm_store_free_nodes(documents, count);
+    return missing;
+}
 
 static bool incremental_is_markdown_ext(const char *ext) {
     if (!ext || ext[0] != '.') {
@@ -770,7 +798,8 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     /* Fast path: nothing changed → skip. The on-disk DB is left untouched,
      * which means existing hash rows (including for any mode-skipped files
      * that were already preserved by an earlier run) remain intact. */
-    if (n_changed == 0 && deleted_count == 0) {
+    if (n_changed == 0 && deleted_count == 0 &&
+        !incremental_document_links_missing(store, project)) {
         cbm_log_info("incremental.noop", "reason", "no_changes");
         free(is_changed);
         free(deleted);
@@ -1018,6 +1047,13 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_log_info("incremental.edge_relink", "relinked", itoa_buf(relinked), "captured",
                  itoa_buf(edge_cap.count), "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
     incr_free_edge_capture(&edge_cap);
+
+    /* Rebuild after restoring inbound edges so old document evidence cannot
+     * overwrite current references when only the code target changed. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    cbm_pipeline_pass_document_links(&ctx);
+    cbm_log_info("pass.timing", "pass", "incr_document_links", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
 
     /* Step 7: Dump to disk (preserves mode-skipped hash rows so the next
      * reindex can correctly classify those files instead of seeing them

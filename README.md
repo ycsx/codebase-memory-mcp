@@ -9,7 +9,8 @@
 
 - **本地优先**：索引、查询、向量语义搜索和 LSP 辅助解析均在本机执行；项目不内置大模型，也不要求 API Key、Docker 或语言运行时。
 - **结构化图谱**：包含 Project、Folder、File、Module、Class、Function、Method、Interface、Route、Resource 等节点，以及 `CALLS`、`IMPORTS`、`HTTP_CALLS`、`ASYNC_CALLS`、`DATA_FLOWS` 等关系。
-- **19 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Markdown 文档章节查询、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
+- **20 个 MCP 工具**：索引、项目管理、图谱搜索、任务上下文编译、调用链、代码片段、架构、影响分析、覆盖度校验、Markdown 文档及正反向引用查询、Cypher 查询、ADR 和运行时 trace 等能力。远程服务默认只开放 `analysis` 工具档位。
+- **文档与代码关联**：Markdown 的明确文件路径与完整限定名可生成带行号证据的 `REFERENCES`；上下文、影响分析和变更评审可按需带上相关文档，不把引用当作调用关系或文档过期结论。
 - **Tree-sitter + Hybrid LSP**：内置多语言、配置、模板和基础设施文件解析；对 Python、TypeScript/JavaScript/JSX/TSX、PHP、C#、Go、C/C++、Java、Kotlin、Rust、Perl 等语言提供类型和调用解析增强。具体结果以当前二进制的 `get_architecture` 和 `index_status` 为准。
 - **覆盖度可审计**：索引结果会区分 `parse_partial`、`skipped` 和按规则排除的 `not_indexed` 文件。没有记录缺口不等于证明仓库完整覆盖，重要结论应使用 `check_index_coverage` 并在必要时回退源码检查。
 - **可视化与桌面控制**：UI 只绑定 loopback，默认端口 `9749`，提供项目、图谱、影响、热点、文件风险、进程、日志和客户端接入计划视图。
@@ -65,6 +66,10 @@ scripts/build.sh --with-ui
 二进制输出为 `build/c/codebase-memory-mcp`（Windows 为 `.exe`）。构建版本可用 `scripts/build.sh --version vX.Y.Z` 写入版本号。
 
 ## 使用方式
+
+本文对应当前源码能力。2026-09-20 的文档引用更新尚未在本轮发布或核验 Release：
+使用包含这些改动的构建，重启 MCP 客户端连接，并对旧项目执行一次索引补建关联。
+之后继续使用增量更新，无需每次查询都重建。完整操作见[文档引用指引](docs/DOCUMENT_REFERENCES.md)。
 
 ### 索引与查询
 
@@ -135,7 +140,7 @@ codebase-memory-mcp install -y
 重启客户端后检查 MCP 列表中是否出现 `codebase-memory-mcp`。若工具不可见，先重启或重新连接客户端，不要再次下载或重复安装二进制。
 
 ## MCP 工具
-<!-- mcp-tool-contract: total=18 -->
+<!-- mcp-tool-contract: total=20 -->
 
 | 类别 | 工具 | 用途 |
 |---|---|---|
@@ -146,10 +151,25 @@ codebase-memory-mcp install -y
 | 源码 | `get_code_snippet` | 根据 `search_graph` 返回的限定名读取函数、类或符号源码。 |
 | 分析 | `get_architecture`、`explain_impact`、`detect_changes`、`review_change` | 架构概览、单点影响、Git diff 和确定性变更评审。 |
 | 上下文 | `build_context` | 按任务、目标和 Token 预算编译可回溯的证据包；目标模糊时返回候选。 |
+| 文档 | `get_document`、`get_related_documents` | 读取文档章节与代码引用；从准确符号或文件反查相关文档及证据。 |
 | 校验 | `check_index_coverage`、`get_graph_schema` | 检查文件/目录覆盖度和图谱 schema。 |
 | 深度/记录 | `query_graph`、`manage_adr`、`ingest_traces` | 只读 Cypher 查询、架构决策记录和运行时调用 trace。 |
 
 推荐的任务顺序：需要完整上下文时优先调用 `build_context`；需要手动核验时使用 `search_graph` 找候选，`trace_path` 看关系，`get_code_snippet` 验证定义；只有需要聚合、多跳、架构或影响分析时再使用 `query_graph`、`get_architecture` 或 `explain_impact`。`search_graph` 和 `query_graph` 返回分页/行数限制时，必须检查 `has_more`、`offset` 或 `LIMIT`。
+
+### 文档与代码双向查询
+
+```bash
+codebase-memory-mcp cli get_document '{"project":"my-project","path":"docs/guide.md"}'
+codebase-memory-mcp cli get_related_documents '{"project":"my-project","target":"file:src/core.py","limit":20}'
+codebase-memory-mcp cli build_context '{"project":"my-project","task":"修改 core 并核对文档","target":"file:src/core.py","include_docs":true,"token_budget":4000}'
+codebase-memory-mcp cli explain_impact '{"project":"my-project","query":"src/core.py","include_docs":true,"document_limit":20}'
+```
+
+反向查询的 `target` 也可使用 `search_graph` 返回的完整 QN，不猜测短名。
+`build_context`、`explain_impact` 默认不附带文档，`review_change` 默认附带。
+结果保留章节位置、引用行号、匹配来源与截断状态；空结果或 `status:ok` 都不是完整覆盖证明。
+支持语法、响应字段、升级和排错见[文档引用指引](docs/DOCUMENT_REFERENCES.md)。
 
 ### `review_change` 变更评审
 
@@ -159,7 +179,7 @@ codebase-memory-mcp install -y
 codebase-memory-mcp cli review_change --project my-project --since HEAD --depth 2 --token-budget 4000
 ```
 
-W4 还提供了一个无第三方依赖的 CI 评论适配器。它读取仓库中的 `CODEOWNERS`，把 Owner、规则状态和限制写成稳定 Markdown，并用当前 commit 标记更新已有评论，避免重试时刷屏。默认只发表评论，不阻断合并：
+仓库还提供了一个无第三方依赖的 CI 评论适配器（对应原 20 周排期 W5-6）。它读取仓库中的 `CODEOWNERS`，把 Owner、规则状态和限制写成稳定 Markdown，并用当前 commit 标记更新已有评论，避免重试时刷屏。默认只发表评论，不阻断合并：
 
 ```bash
 python scripts/review-change-comment.py \
@@ -176,11 +196,23 @@ python scripts/review-change-comment.py \
 仓库内置 W3 黄金任务，覆盖符号/文件定位、歧义候选、Token 预算、证据等级、文档/测试证据和 `diff_ref`。评测脚本会创建临时本地仓库并使用本地 Git 提交，不访问网络：
 
 ```bash
-bash scripts/eval-build-context.sh ./build/codebase-memory-mcp
+bash scripts/eval-build-context.sh ./build/c/codebase-memory-mcp
 ```
 
 没有可执行构建产物时脚本返回 `77` 并报告 `SKIP`；黄金数据位于
 `tests/fixtures/build_context_golden.json`。脚本检查目标召回、重复请求排序稳定性、预算上限和截断/partial 信号。
+
+文档引用另外提供 63 条真实原文行摘录的隔离 stdio 回归：
+
+```bash
+python scripts/eval-document-links.py --check-sources
+python scripts/eval-document-links.py ./build/c/codebase-memory-mcp
+python -m unittest discover -s tests -p test_eval_document_links.py
+```
+
+Windows 使用 `.exe`，可追加 `--temp-root C:/msys64/tmp` 指定可写的非系统 ASCII 临时目录。
+样例使用最小目标文件桩，标注仍待维护者复核，不代表全仓准确率/召回率。
+本轮结果与尚未完成的阶段验收见[验收台账](docs/MILESTONE_ACCEPTANCE.md)。
 
 ## 远程 MCP（Codex）
 
@@ -281,12 +313,15 @@ codebase-memory-mcp config reset auto_index
 | `index_repository` 失败 | 使用服务器上的绝对 `repo_path`，再检查文件权限和索引状态。 |
 | `trace_path` 没有结果 | 先用 `search_graph(name_pattern=".*Name.*")` 找到准确限定名。 |
 | 结果可能漏项 | 调用 `index_status`/`check_index_coverage`，读取报告的范围并回退源码搜索。 |
+| 文档工具不可见或没有引用 | 使用包含本轮改动的二进制并重启连接；检查文档/代码是否被忽略，执行一次索引补建，读取 `reference_analysis` 或反向查询的 `status`/`reason`。 |
 | UI 无法打开 | 使用 UI 版本，确认端口未被占用，并访问 `http://127.0.0.1:9749`。 |
 
 ## 相关文档
 
 - [安装与源码构建](INSTALL.md)
 - [配置参考](docs/CONFIGURATION.md)
+- [文档引用使用指引](docs/DOCUMENT_REFERENCES.md)
+- [阶段交付与验证记录](docs/MILESTONE_ACCEPTANCE.md)
 - [远程 MCP 部署](docs/REMOTE_MCP.md)
 - [Desktop 控制器](desktop/README.md)
 - [忽略规则](docs/cbmignore.md)

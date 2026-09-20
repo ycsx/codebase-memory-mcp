@@ -26,11 +26,62 @@ The binary is output to `build/c/codebase-memory-mcp`.
 scripts/test.sh
 ```
 
-This builds with ASan + UBSan and runs all tests (~2040 cases). Key test files:
+This performs a clean build with ASan + UBSan and runs the C tests plus the script regressions configured in `scripts/test.sh`. Key test files:
 - `tests/test_pipeline.c` — pipeline integration tests
 - `tests/test_httplink.c` — HTTP route extraction and linking
 - `tests/test_mcp.c` — MCP protocol and tool handler tests
+- `tests/test_document_links.c` — Markdown reference extraction and incremental maintenance
+- `tests/test_document_refs.c` — reverse document lookup and evidence limits
+- `tests/test_context_documents.c` — document evidence and shared budgets in context results
 - `tests/test_store_*.c` — SQLite graph store tests
+
+The `tests/test_httplink.c` entry above is a historical path, no longer present,
+and retained as an invalid-path negative fixture. For current pipeline integration
+coverage, use `tests/test_pipeline.c`.
+
+### Local Document Reference Checks
+
+For a focused local iteration, build the test runner and production binary, then run:
+
+```bash
+make -f Makefile.cbm build/c/test-runner cbm
+build/c/test-runner document_links document_refs context_documents graph_buffer mcp
+python3 scripts/eval-document-links.py --check-sources
+python3 scripts/eval-document-links.py build/c/codebase-memory-mcp
+bash scripts/eval-build-context.sh build/c/codebase-memory-mcp
+python3 -m unittest discover -s tests -p 'test_eval_document_links.py'
+```
+
+On Windows, use the MSYS2 CLANG64 toolchain (`CC=clang CXX=clang++`) and the
+`.exe` binary name. If the chosen native toolchain cannot run sanitizers, use
+`SANITIZE=` explicitly and report that limitation; this does not replace sanitizer
+coverage. Python may be named `python` instead of `python3`. For the document
+golden runner, `--temp-root C:/Temp/cbm-document-links` selects a writable,
+non-system fixture directory; do not use `C:/Windows/Temp`.
+Before running the C suites, set `TEMP`, `TMP`, `TMPDIR`, and `CBM_CACHE_DIR`
+to isolated writable test directories (ASCII paths on Windows), not the live cache.
+Impact/review integration checks are in `tests/test_mcp.c`.
+
+The document corpus contains 63 real-line excerpts with file stubs. Its annotations
+are pending maintainer review: passing it is not full-repository precision/recall
+validation or completion of the broader document knowledge graph roadmap.
+When changing source documentation used by `tests/fixtures/document_links_golden.json`,
+update its source locations and run `--check-sources`; do not silently remove
+negative cases. The context golden regression separately checks existing context
+behavior. Focused suites do not replace the full test/CI gates.
+
+Offline acceptance-script regressions can be run independently:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_review_change_comment.py'
+python3 -m unittest discover -s tests -p 'test_eval_remote_mcp.py'
+```
+
+These Python unit tests are not a real PR publication or remote transport soak.
+HTTP concurrency acceptance remains deferred while local stdio functionality is
+prioritized; it is not a prerequisite for these document feature checks.
+See [Document References](docs/DOCUMENT_REFERENCES.md) for supported syntax,
+query examples, evidence limits, and upgrade instructions.
 
 ## Run Linter
 
@@ -71,7 +122,7 @@ src/
   foundation/       Arena allocator, hash table, string utils, platform compat
   store/            SQLite graph storage (WAL mode, FTS5)
   cypher/           Cypher query → SQL translation
-  mcp/              MCP server (JSON-RPC 2.0 over stdio, 18 tools)
+  mcp/              MCP server (JSON-RPC 2.0 over stdio, 20 tools)
   pipeline/         Multi-pass indexing pipeline
     pass_*.c        Individual pipeline passes (definitions, calls, usages, etc.)
     httplink.c      HTTP route extraction (Go/Express/Laravel/Ktor/Python)

@@ -101,6 +101,20 @@ Invoke-WebRequest https://raw.githubusercontent.com/ycsx/codebase-memory-mcp/mai
 .\setup-windows.ps1 -FromSource
 ```
 
+## 启用文档引用功能
+
+当前工作区源码已实现 Markdown 到文件/完整限定名符号的显式引用、
+`get_related_documents` 反向查询，以及上下文和变更分析中的相关文档证据。
+这不代表 GitHub Release、npm 或 PyPI 已发布包含这些改动的版本；本轮未核验发布资产。
+
+1. 构建包含这些改动的源码，或确认所安装版本确实包含该功能。
+2. 确认客户端 MCP 配置使用新二进制，然后重启 MCP/AI 客户端。替换磁盘文件不会升级已运行的进程。
+3. 对已有项目重新调用 `index_repository`，补建文档引用；无需删除项目或索引缓存。
+4. 使用 `get_document` 检查 `reference_analysis`，再用 `get_related_documents` 查询反向引用。
+
+本地 stdio 和 CLI 即可使用，不需要部署 HTTP 服务。工具参数、支持语法、
+截断及覆盖度边界见[文档引用使用指引](docs/DOCUMENT_REFERENCES.md)。
+
 ## 本地 UI
 
 UI 版本把图谱控制台嵌入二进制：

@@ -573,11 +573,17 @@ static void print_help(void) {
     printf("  Manual/UI MCP boundaries: Qodo, Warp, JetBrains AI/ACP, Replit,\n");
     printf("  Plandex, SWE-agent, BLACKBOX, GitHub cloud agents, Jules,\n");
     printf("  CodeRabbit.\n");
-    printf("\nTools (19): index_repository, search_graph, query_graph, trace_path,\n");
+    printf("\nTools (20): index_repository, search_graph, query_graph, trace_path,\n");
     printf("  get_code_snippet, get_graph_schema, get_architecture, search_code,\n");
     printf("  list_projects, delete_project, index_status, detect_changes,\n");
     printf("  explain_impact, build_context, review_change, check_index_coverage, manage_adr, "
-           "ingest_traces\n");
+           "ingest_traces,\n");
+    printf("  get_document, get_related_documents\n");
+    printf("  Document references: get_document by path/name; get_related_documents by exact\n");
+    printf("  qualified symbol or file:relative/path (includes symbols in that file).\n");
+    printf("  include_docs defaults: build_context/explain_impact=false, review_change=true.\n");
+    printf("  Check evidence, analysis status, and truncation; empty results are not coverage "
+           "proof.\n");
 }
 
 static void print_remote_key_help(void) {

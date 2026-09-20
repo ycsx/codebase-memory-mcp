@@ -452,6 +452,7 @@ TEST(mcp_tools_have_behavior_annotations) {
         {"get_architecture", true, false, true, false},
         {"search_code", true, false, true, false},
         {"get_document", true, false, true, false},
+        {"get_related_documents", true, false, true, false},
         {"list_projects", true, false, true, false},
         {"delete_project", false, true, true, false},
         {"index_status", true, false, true, false},
@@ -1174,7 +1175,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
         "search_graph",     "query_graph",          "trace_path",       "explain_impact",
         "build_context",    "review_change",        "get_code_snippet", "get_graph_schema",
         "get_architecture", "search_code",          "get_document",     "list_projects",
-        "index_status",     "check_index_coverage", "detect_changes",
+        "index_status",     "check_index_coverage", "detect_changes",   "get_related_documents",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1213,7 +1214,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":223,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_EQ(mcp_response_tool_count(resp), 9U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 10U);
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search_graph"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace_path"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "explain_impact"));
@@ -1223,6 +1224,7 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index_status"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "check_index_coverage"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_document"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_related_documents"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_code"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_graph_schema"));
@@ -1774,8 +1776,394 @@ TEST(tool_get_document_returns_ordered_sections) {
     ASSERT_TRUE(overview < usage);
     ASSERT_NOT_NULL(strstr(inner, "\"anchor\":\"overview\""));
     ASSERT_NOT_NULL(strstr(inner, "\"heading_level\":2"));
+    ASSERT_NOT_NULL(strstr(inner, "\"references\":[]"));
+    ASSERT_NOT_NULL(strstr(inner, "\"references_truncated\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"reference_analysis\":{\"status\":\"unknown\","
+                                  "\"reason\":\"reindex_required\"}"));
     free(inner);
     free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_document_returns_reference_evidence_and_limit) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *project = "document-references";
+    cbm_mcp_server_set_project(srv, project);
+    ASSERT_EQ(cbm_store_upsert_project(st, project, "/tmp/document-references"), CBM_STORE_OK);
+    cbm_node_t doc = {.project = project,
+                      .label = "Document",
+                      .name = "guide.md",
+                      .qualified_name = "document-references.guide.md.__document__",
+                      .file_path = "guide.md",
+                      .properties_json = "{\"document_links\":{\"status\":\"ok\","
+                                         "\"scope\":\"single_line_links_and_exact_inline_code\","
+                                         "\"index_version\":1}}"};
+    int64_t doc_id = cbm_store_upsert_node(st, &doc);
+    ASSERT_GT(doc_id, 0);
+    cbm_node_t section = {.project = project,
+                          .label = "Section",
+                          .name = "Usage",
+                          .qualified_name = "document-references.guide.md.Usage",
+                          .file_path = "guide.md",
+                          .start_line = 2,
+                          .end_line = 200};
+    int64_t section_id = cbm_store_upsert_node(st, &section);
+    ASSERT_GT(section_id, 0);
+    cbm_edge_t edge = {.project = project,
+                       .source_id = doc_id,
+                       .target_id = section_id,
+                       .type = "CONTAINS_SECTION",
+                       .properties_json = "{}"};
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+    cbm_node_t target = {.project = project,
+                         .label = "Function",
+                         .name = "zeta",
+                         .qualified_name = "document-references.code.zeta",
+                         .file_path = "src/code.c",
+                         .start_line = 10,
+                         .end_line = 15};
+    int64_t zeta_id = cbm_store_upsert_node(st, &target);
+    ASSERT_GT(zeta_id, 0);
+    edge.type = "REFERENCES";
+    edge.source_id = section_id;
+    edge.target_id = zeta_id;
+    edge.properties_json =
+        "{\"source\":\"symbol_match\",\"confidence\":1.0,"
+        "\"document_span\":{\"start_line\":5,\"end_line\":5},"
+        "\"matched_text\":\"document-references.code.zeta\","
+        "\"target_qualified_name\":\"document-references.code.zeta\",\"index_version\":1}";
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+    target.name = "alpha";
+    target.qualified_name = "document-references.code.alpha";
+    int64_t alpha_id = cbm_store_upsert_node(st, &target);
+    ASSERT_GT(alpha_id, 0);
+    edge.target_id = alpha_id;
+    edge.properties_json =
+        "{\"source\":\"symbol_match\",\"document_span\":{\"start_line\":5,\"end_line\":5}}";
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+    edge.source_id = doc_id;
+    edge.target_id = zeta_id;
+    edge.properties_json =
+        "{\"source\":\"path_match\",\"document_span\":{\"start_line\":1,\"end_line\":1}}";
+    ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+
+    const char *args = "{\"project\":\"document-references\",\"path\":\"guide.md\"}";
+    char *response = cbm_mcp_handle_tool(srv, "get_document", args);
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *parsed = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(parsed);
+    yyjson_val *root = yyjson_doc_get_root(parsed);
+    yyjson_val *analysis = yyjson_obj_get(root, "reference_analysis");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(analysis, "status")), "ok");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(analysis, "scope")),
+                  "single_line_links_and_exact_inline_code");
+    ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(analysis, "index_version")), 1);
+    yyjson_val *references = yyjson_obj_get(root, "references");
+    ASSERT_EQ(yyjson_arr_size(references), 3);
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(root, "references_truncated")));
+    yyjson_val *first = yyjson_arr_get(references, 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(first, "source_qualified_name")),
+                  doc.qualified_name);
+    yyjson_val *second = yyjson_arr_get(references, 1);
+    ASSERT_STR_EQ(
+        yyjson_get_str(yyjson_obj_get(yyjson_obj_get(second, "target"), "qualified_name")),
+        "document-references.code.alpha");
+    yyjson_val *third = yyjson_arr_get(references, 2);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(third, "source_qualified_name")),
+                  section.qualified_name);
+    yyjson_val *metadata = yyjson_obj_get(third, "target");
+    ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(metadata, "id")), zeta_id);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(metadata, "label")), "Function");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(metadata, "name")), "zeta");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(metadata, "file_path")), "src/code.c");
+    ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(metadata, "start_line")), 10);
+    ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(metadata, "end_line")), 15);
+    yyjson_val *properties = yyjson_obj_get(third, "properties");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(properties, "source")), "symbol_match");
+    ASSERT_TRUE(yyjson_get_real(yyjson_obj_get(properties, "confidence")) == 1.0);
+    ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(properties, "index_version")), 1);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(properties, "matched_text")),
+                  "document-references.code.zeta");
+    ASSERT_EQ(
+        yyjson_get_sint(yyjson_obj_get(yyjson_obj_get(properties, "document_span"), "start_line")),
+        5);
+    yyjson_doc_free(parsed);
+    free(inner);
+    free(response);
+
+    /* Insert late-to-early to ensure the cap is applied after evidence ordering. */
+    for (int i = 97; i >= 0; i--) {
+        char name[64];
+        char qn[128];
+        char evidence[128];
+        snprintf(name, sizeof(name), "extra_%03d", i);
+        snprintf(qn, sizeof(qn), "document-references.code.%s", name);
+        snprintf(evidence, sizeof(evidence),
+                 "{\"document_span\":{\"start_line\":%d,\"end_line\":%d}}", i + 10, i + 10);
+        target.name = name;
+        target.qualified_name = qn;
+        edge.target_id = cbm_store_upsert_node(st, &target);
+        ASSERT_GT(edge.target_id, 0);
+        edge.source_id = section_id;
+        edge.properties_json = evidence;
+        ASSERT_GT(cbm_store_insert_edge(st, &edge), 0);
+    }
+    doc.properties_json =
+        "{\"document_links\":{\"status\":\"limited\",\"reason\":\"read_failed\","
+        "\"scope\":\"single_line_links_and_exact_inline_code\",\"index_version\":1}}";
+    ASSERT_EQ(cbm_store_upsert_node(st, &doc), doc_id);
+    response = cbm_mcp_handle_tool(srv, "get_document", args);
+    ASSERT_NOT_NULL(response);
+    inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    parsed = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(parsed);
+    root = yyjson_doc_get_root(parsed);
+    analysis = yyjson_obj_get(root, "reference_analysis");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(analysis, "status")), "limited");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(analysis, "reason")), "read_failed");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(analysis, "scope")),
+                  "single_line_links_and_exact_inline_code");
+    ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(analysis, "index_version")), 1);
+    references = yyjson_obj_get(root, "references");
+    ASSERT_EQ(yyjson_arr_size(references), 100);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "references_truncated")));
+    metadata = yyjson_obj_get(yyjson_arr_get(references, 99), "target");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(metadata, "qualified_name")),
+                  "document-references.code.extra_096");
+    yyjson_doc_free(parsed);
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+static bool related_documents_fixture(cbm_mcp_server_t *srv, const char *repo) {
+    const char *project = "related-documents";
+    cbm_mcp_server_set_project(srv, project);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    if (cbm_store_upsert_project(store, project, repo) != CBM_STORE_OK) {
+        return false;
+    }
+    cbm_node_t nodes[] = {
+        {.project = project,
+         .label = "File",
+         .name = "mod.py",
+         .qualified_name = "related-documents.mod.py",
+         .file_path = "mod.py"},
+        {.project = project,
+         .label = "Function",
+         .name = "compute",
+         .qualified_name = "related-documents.mod.compute",
+         .file_path = "mod.py",
+         .start_line = 1,
+         .end_line = 2},
+        {.project = project,
+         .label = "Function",
+         .name = "caller",
+         .qualified_name = "related-documents.other.caller",
+         .file_path = "other.py",
+         .start_line = 1,
+         .end_line = 2},
+        {.project = project,
+         .label = "Document",
+         .name = "guide.md",
+         .qualified_name = "related-documents.guide.md.__document__",
+         .file_path = "guide.md",
+         .start_line = 1,
+         .end_line = 20,
+         .properties_json = "{\"document_links\":{\"status\":\"ok\",\"index_version\":1}}"},
+        {.project = project,
+         .label = "Section",
+         .name = "Usage",
+         .qualified_name = "related-documents.guide.md.Usage",
+         .file_path = "guide.md",
+         .start_line = 5,
+         .end_line = 20},
+    };
+    int64_t ids[5];
+    for (size_t i = 0; i < 5; i++) {
+        ids[i] = cbm_store_upsert_node(store, &nodes[i]);
+        if (ids[i] <= 0) {
+            return false;
+        }
+    }
+    cbm_edge_t edges[] = {
+        {.project = project,
+         .source_id = ids[3],
+         .target_id = ids[4],
+         .type = "CONTAINS_SECTION",
+         .properties_json = "{}"},
+        {.project = project,
+         .source_id = ids[4],
+         .target_id = ids[1],
+         .type = "REFERENCES",
+         .properties_json = "{\"producer\":\"document_links\",\"source\":\"symbol_match\","
+                            "\"confidence\":1.0,\"document_span\":{\"start_line\":8,"
+                            "\"end_line\":8},\"matched_text\":\"related-documents.mod.compute\","
+                            "\"index_version\":1}"},
+        {.project = project,
+         .source_id = ids[3],
+         .target_id = ids[0],
+         .type = "REFERENCES",
+         .properties_json = "{\"producer\":\"document_links\",\"source\":\"explicit_link\","
+                            "\"confidence\":1.0,\"document_span\":{\"start_line\":2,"
+                            "\"end_line\":2},\"matched_text\":\"mod.py\",\"index_version\":1}"},
+        {.project = project,
+         .source_id = ids[3],
+         .target_id = ids[1],
+         .type = "REFERENCES",
+         .properties_json = "{\"producer\":\"manual\",\"document_span\":{\"start_line\":1}}"},
+        {.project = project,
+         .source_id = ids[2],
+         .target_id = ids[1],
+         .type = "CALLS",
+         .properties_json = "{}"},
+        {.project = project,
+         .source_id = ids[2],
+         .target_id = ids[0],
+         .type = "REFERENCES",
+         .properties_json = "{\"producer\":\"document_links\"}"},
+    };
+    for (size_t i = 0; i < sizeof(edges) / sizeof(edges[0]); i++) {
+        if (cbm_store_insert_edge(store, &edges[i]) <= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+TEST(tool_get_related_documents_exact_file_and_limit) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(related_documents_fixture(srv, "/tmp/related-documents"));
+    const char *cases[] = {
+        "{\"project\":\"related-documents\",\"target\":\"related-documents.mod.compute\"}",
+        "{\"project\":\"related-documents\",\"target\":\"file:mod.py\"}",
+        "{\"project\":\"related-documents\",\"target\":\"file:mod.py\",\"limit\":1}",
+    };
+    for (size_t i = 0; i < 3; i++) {
+        char *response = cbm_mcp_handle_tool(srv, "get_related_documents", cases[i]);
+        ASSERT_NOT_NULL(response);
+        char *text = extract_text_content(response);
+        ASSERT_NOT_NULL(text);
+        yyjson_doc *parsed = yyjson_read(text, strlen(text), 0);
+        ASSERT_NOT_NULL(parsed);
+        yyjson_val *root = yyjson_doc_get_root(parsed);
+        yyjson_val *references = yyjson_obj_get(root, "references");
+        ASSERT_EQ(yyjson_arr_size(references), i == 1 ? 2 : 1);
+        ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(root, "total")), i == 0 ? 1 : 2);
+        ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(root, "returned")), i == 1 ? 2 : 1);
+        ASSERT_EQ(yyjson_get_bool(yyjson_obj_get(root, "truncated")), i == 2);
+        yyjson_val *first = yyjson_arr_get(references, 0);
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(first, "document_qualified_name")),
+                      "related-documents.guide.md.__document__");
+        yyjson_val *source = yyjson_obj_get(first, "source");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(source, "label")),
+                      i == 0 ? "Section" : "Document");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(source, "file_path")), "guide.md");
+        ASSERT_GT(yyjson_get_sint(yyjson_obj_get(source, "id")), 0);
+        ASSERT_NOT_NULL(yyjson_obj_get(source, "name"));
+        ASSERT_NOT_NULL(yyjson_obj_get(source, "qualified_name"));
+        ASSERT_NOT_NULL(yyjson_obj_get(source, "start_line"));
+        ASSERT_NOT_NULL(yyjson_obj_get(source, "end_line"));
+        yyjson_val *target = yyjson_obj_get(first, "target");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(target, "qualified_name")),
+                      i == 0 ? "related-documents.mod.compute" : "related-documents.mod.py");
+        yyjson_val *properties = yyjson_obj_get(first, "properties");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(properties, "producer")), "document_links");
+        ASSERT_EQ(yyjson_get_sint(
+                      yyjson_obj_get(yyjson_obj_get(properties, "document_span"), "start_line")),
+                  i == 0 ? 8 : 2);
+        ASSERT_NULL(strstr(text, "\"producer\":\"manual\""));
+        char *repeat = cbm_mcp_handle_tool(srv, "get_related_documents", cases[i]);
+        ASSERT_NOT_NULL(repeat);
+        ASSERT_STR_EQ(response, repeat);
+        free(repeat);
+        yyjson_doc_free(parsed);
+        free(text);
+        free(response);
+    }
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_get_related_documents_does_not_guess_short_names) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(related_documents_fixture(srv, "/tmp/related-documents"));
+    const char *cases[] = {
+        "{\"project\":\"related-documents\",\"target\":\"compute\"}",
+        "{\"project\":\"related-documents\",\"target\":\"file:missing.py\"}",
+        "{\"project\":\"related-documents\",\"target\":\"related-documents.missing\"}",
+    };
+    for (size_t i = 0; i < 3; i++) {
+        char *response = cbm_mcp_handle_tool(srv, "get_related_documents", cases[i]);
+        ASSERT_NOT_NULL(response);
+        char *text = extract_text_content(response);
+        ASSERT_NOT_NULL(text);
+        ASSERT_NULL(strstr(text, "\"matched_text\""));
+        ASSERT_NULL(strstr(text, "\"qualified_name\":\"related-documents.mod.compute\""));
+        free(text);
+        free(response);
+    }
+    const char *invalid[] = {
+        "{\"project\":\"related-documents\"}",
+        "{\"project\":\"related-documents\",\"target\":\"file:mod.py\",\"limit\":0}",
+        "{\"project\":\"related-documents\",\"target\":\"file:mod.py\",\"limit\":101}",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        char *response = cbm_mcp_handle_tool(srv, "get_related_documents", invalid[i]);
+        ASSERT_NOT_NULL(response);
+        ASSERT_NOT_NULL(strstr(response, "\"isError\":true"));
+        free(response);
+    }
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(tool_explain_impact_related_documents_do_not_change_code_risk) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(related_documents_fixture(srv, "/tmp/related-documents"));
+    char *without_response = cbm_mcp_handle_tool(
+        srv, "explain_impact",
+        "{\"project\":\"related-documents\",\"query\":\"related-documents.mod.compute\"}");
+    char *with_response = cbm_mcp_handle_tool(
+        srv, "explain_impact",
+        "{\"project\":\"related-documents\",\"query\":\"related-documents.mod.compute\","
+        "\"include_docs\":true,\"document_limit\":1}");
+    ASSERT_NOT_NULL(without_response);
+    ASSERT_NOT_NULL(with_response);
+    char *without_text = extract_text_content(without_response);
+    char *with_text = extract_text_content(with_response);
+    ASSERT_NOT_NULL(without_text);
+    ASSERT_NOT_NULL(with_text);
+    ASSERT_NULL(strstr(without_text, "\"related_documentation\""));
+    ASSERT_NOT_NULL(strstr(without_text, "\"direct_count\":1"));
+    ASSERT_NOT_NULL(strstr(with_text, "\"direct_count\":1"));
+    yyjson_doc *without = yyjson_read(without_text, strlen(without_text), 0);
+    yyjson_doc *with = yyjson_read(with_text, strlen(with_text), 0);
+    ASSERT_NOT_NULL(without);
+    ASSERT_NOT_NULL(with);
+    yyjson_val *without_root = yyjson_doc_get_root(without);
+    yyjson_val *with_root = yyjson_doc_get_root(with);
+    ASSERT_TRUE(yyjson_equals(yyjson_obj_get(without_root, "summary"),
+                              yyjson_obj_get(with_root, "summary")));
+    yyjson_val *related = yyjson_obj_get(with_root, "related_documentation");
+    ASSERT_NOT_NULL(related);
+    ASSERT_EQ(yyjson_arr_size(yyjson_obj_get(related, "references")), 1);
+    yyjson_doc_free(without);
+    yyjson_doc_free(with);
+    free(without_text);
+    free(with_text);
+    free(without_response);
+    free(with_response);
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -4774,6 +5162,56 @@ TEST(detect_changes_scopes_symbols_to_changed_lines) {
 
     free(text);
     free(response);
+    cbm_mcp_server_free(srv);
+    th_rmtree(repo);
+    PASS();
+}
+
+TEST(tool_review_change_related_documents_toggle_and_budget) {
+    char repo[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-review-docs-XXXXXX", cbm_tmpdir());
+    ASSERT_TRUE(cbm_mkdtemp(repo));
+    char path[640];
+    snprintf(path, sizeof(path), "%s/mod.py", repo);
+    ASSERT_EQ(th_write_file(path, "def compute():\n    return 1\n"), 0);
+    ASSERT_TRUE(detect_changes_git_step(repo, "init -q"));
+    ASSERT_TRUE(detect_changes_git_step(repo, "add -A"));
+    ASSERT_TRUE(detect_changes_git_step(repo, "commit -q -m initial"));
+    ASSERT_EQ(th_write_file(path, "def compute():\n    return 2\n"), 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(related_documents_fixture(srv, repo));
+    const char *cases[] = {
+        "{\"project\":\"related-documents\",\"base_branch\":\"main\",\"token_budget\":8000}",
+        ("{\"project\":\"related-documents\",\"base_branch\":\"main\",\"token_budget\":8000,"
+         "\"include_docs\":false}"),
+        "{\"project\":\"related-documents\",\"base_branch\":\"main\",\"token_budget\":400}",
+    };
+    for (size_t i = 0; i < 3; i++) {
+        char *response = cbm_mcp_handle_tool(srv, "review_change", cases[i]);
+        ASSERT_NOT_NULL(response);
+        char *text = extract_text_content(response);
+        ASSERT_NOT_NULL(text);
+        yyjson_doc *parsed = yyjson_read(text, strlen(text), 0);
+        ASSERT_NOT_NULL(parsed);
+        yyjson_val *root = yyjson_doc_get_root(parsed);
+        yyjson_val *related = yyjson_obj_get(root, "related_documentation");
+        if (i == 1) {
+            ASSERT_NULL(related);
+        } else {
+            ASSERT_NOT_NULL(related);
+            ASSERT_EQ(yyjson_get_sint(yyjson_obj_get(related, "total")), 2);
+            if (i == 0) {
+                ASSERT_EQ(yyjson_arr_size(yyjson_obj_get(related, "references")), 2);
+            } else {
+                ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(related, "budget_truncated")));
+                ASSERT_TRUE(yyjson_arr_size(yyjson_obj_get(related, "references")) < 2);
+            }
+        }
+        yyjson_doc_free(parsed);
+        free(text);
+        free(response);
+    }
     cbm_mcp_server_free(srv);
     th_rmtree(repo);
     PASS();
@@ -7823,6 +8261,11 @@ SUITE(mcp) {
     RUN_TEST(tool_output_byte_budgets);
     RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);
     RUN_TEST(tool_get_document_returns_ordered_sections);
+    RUN_TEST(tool_get_document_returns_reference_evidence_and_limit);
+    RUN_TEST(tool_get_related_documents_exact_file_and_limit);
+    RUN_TEST(tool_get_related_documents_does_not_guess_short_names);
+    RUN_TEST(tool_explain_impact_related_documents_do_not_change_code_risk);
+    RUN_TEST(tool_review_change_related_documents_toggle_and_budget);
     RUN_TEST(mcp_resource_discovery_methods_return_empty_lists);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_dispatch_normalizes_null_arguments);

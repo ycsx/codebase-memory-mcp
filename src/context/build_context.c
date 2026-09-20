@@ -1,4 +1,5 @@
 #include "context/build_context.h"
+#include "context/document_refs.h"
 
 #include "foundation/compat.h"
 #include "foundation/constants.h"
@@ -15,6 +16,7 @@ enum {
     CONTEXT_DEFAULT_LIMIT = 24,
     CONTEXT_NEIGHBOR_LIMIT = 8,
     CONTEXT_ESTIMATE_PER_NODE = 120,
+    CONTEXT_DOCUMENT_LIMIT = 8,
 };
 
 enum {
@@ -567,9 +569,98 @@ static bool add_related_test_evidence(cbm_store_t *store, yyjson_mut_doc *doc,
     return true;
 }
 
+static int documentation_tokens(size_t bytes) {
+    /* Conservative UTF-8 estimate, including the JSON evidence envelope. */
+    return bytes > CONTEXT_MAX_BUDGET * 3U ? CONTEXT_MAX_BUDGET + 1 : (int)((bytes + 2U) / 3U) + 16;
+}
+
+static bool add_document_reference_json(cbm_store_t *store, yyjson_mut_doc *doc,
+                                        yyjson_mut_val *root, const cbm_context_request_t *request,
+                                        context_emit_state_t *state, int budget, bool *truncated) {
+    *truncated = false;
+    if (!request->include_docs) {
+        yyjson_mut_val *empty = yyjson_mut_obj(doc);
+        return empty && yyjson_mut_obj_add_arr(doc, empty, "references") &&
+               yyjson_mut_obj_add_int(doc, empty, "returned", 0) &&
+               yyjson_mut_obj_add_int(doc, empty, "total", 0) &&
+               yyjson_mut_obj_add_bool(doc, empty, "truncated", false) &&
+               yyjson_mut_obj_add_str(doc, empty, "status", "not_requested") &&
+               yyjson_mut_obj_add_val(doc, root, "documentation_references", empty);
+    }
+    cbm_node_t targets[CONTEXT_DEFAULT_LIMIT];
+    int target_count = 0;
+    int eligible_count = 0;
+    for (int candidate = 0; candidate < state->candidate_count; candidate++) {
+        if (!request->include_tests && is_test_node(&state->candidates[candidate])) {
+            continue;
+        }
+        eligible_count++;
+        if (target_count < CONTEXT_DEFAULT_LIMIT) {
+            targets[target_count++] = state->candidates[candidate];
+        }
+    }
+    char *json = cbm_document_refs_json(store, request->project, targets, target_count,
+                                        CONTEXT_DOCUMENT_LIMIT);
+    if (!json) {
+        return false;
+    }
+    yyjson_doc *parsed = yyjson_read(json, strlen(json), 0);
+    free(json);
+    if (!parsed) {
+        return false;
+    }
+    yyjson_val *payload = yyjson_doc_get_root(parsed);
+    yyjson_val *references = yyjson_obj_get(payload, "references");
+    yyjson_mut_val *result = yyjson_val_mut_copy(doc, payload);
+    yyjson_mut_val *selected = yyjson_mut_arr(doc);
+    bool ok = result && selected;
+    size_t i = 0;
+    size_t count = 0;
+    yyjson_val *reference = NULL;
+    int returned = 0;
+    bool budget_trimmed = false;
+    yyjson_arr_foreach(references, i, count, reference) {
+        size_t bytes = 0;
+        char *encoded = yyjson_val_write(reference, 0, &bytes);
+        if (!encoded) {
+            ok = false;
+            break;
+        }
+        free(encoded);
+        int tokens = documentation_tokens(bytes);
+        if (tokens > budget - state->estimated_tokens) {
+            budget_trimmed = true;
+            break;
+        }
+        yyjson_mut_val *copy = yyjson_val_mut_copy(doc, reference);
+        if (!copy || !yyjson_mut_arr_add_val(selected, copy)) {
+            ok = false;
+            break;
+        }
+        state->estimated_tokens += tokens;
+        returned++;
+    }
+    *truncated = budget_trimmed || yyjson_get_bool(yyjson_obj_get(payload, "truncated")) ||
+                 target_count < eligible_count;
+    if (ok) {
+        yyjson_mut_obj_remove_key(result, "references");
+        yyjson_mut_obj_remove_key(result, "returned");
+        yyjson_mut_obj_remove_key(result, "truncated");
+        ok = yyjson_mut_obj_add_val(doc, result, "references", selected) &&
+             yyjson_mut_obj_add_int(doc, result, "returned", returned) &&
+             yyjson_mut_obj_add_bool(doc, result, "truncated", *truncated) &&
+             yyjson_mut_obj_add_bool(doc, result, "budget_truncated", budget_trimmed) &&
+             yyjson_mut_obj_add_bool(doc, result, "targets_truncated",
+                                     target_count < eligible_count) &&
+             yyjson_mut_obj_add_val(doc, root, "documentation_references", result);
+    }
+    yyjson_doc_free(parsed);
+    return ok;
+}
+
 static bool add_documentation_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                   const cbm_context_request_t *request, int evidence_limit,
-                                   bool *truncated) {
+                                   const cbm_context_request_t *request,
+                                   context_emit_state_t *state, int budget, bool *truncated) {
     yyjson_mut_val *documentation = yyjson_mut_arr(doc);
     if (!documentation) {
         return false;
@@ -580,12 +671,18 @@ static bool add_documentation_json(cbm_store_t *store, yyjson_mut_doc *doc, yyjs
         int doc_count = 0;
         if (cbm_store_find_architecture_docs(store, request->project, &doc_paths, &doc_count) ==
             CBM_STORE_OK) {
-            int doc_limit = evidence_limit;
+            int doc_limit = state->evidence_limit;
             *truncated = doc_count > doc_limit;
             bool ok = true;
             for (int i = 0; i < doc_count; i++) {
                 if (i < doc_limit && doc_paths[i]) {
-                    ok = ok && yyjson_mut_arr_add_strcpy(doc, documentation, doc_paths[i]);
+                    int tokens = documentation_tokens(strlen(doc_paths[i]));
+                    if (tokens <= budget - state->estimated_tokens) {
+                        ok = ok && yyjson_mut_arr_add_strcpy(doc, documentation, doc_paths[i]);
+                        state->estimated_tokens += tokens;
+                    } else {
+                        *truncated = true;
+                    }
                 }
                 free(doc_paths[i]);
             }
@@ -646,7 +743,7 @@ static bool add_limitations_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
     if (documentation_truncated) {
         ok = ok && yyjson_mut_arr_add_str(
                        doc, limitations,
-                       "Documentation evidence was trimmed to the requested token budget.");
+                       "Documentation evidence was trimmed by the token budget or result limits.");
     }
     return ok && yyjson_mut_obj_add_val(doc, root, "limitations", limitations);
 }
@@ -735,10 +832,14 @@ char *cbm_context_build_json(cbm_store_t *store, const cbm_context_request_t *re
     }
 
     bool documentation_truncated = false;
-    if (!add_documentation_json(store, doc, root, request, evidence_limit,
+    bool references_truncated = false;
+    if (!add_document_reference_json(store, doc, root, request, &state, budget,
+                                     &references_truncated) ||
+        !add_documentation_json(store, doc, root, request, &state, budget,
                                 &documentation_truncated)) {
         goto json_oom;
     }
+    documentation_truncated = documentation_truncated || references_truncated;
 
     bool budget_truncated = state.candidate_count > candidate_limit ||
                             state.evidence_count < state.candidate_count || documentation_truncated;

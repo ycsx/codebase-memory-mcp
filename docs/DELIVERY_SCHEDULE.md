@@ -1,9 +1,16 @@
 # 每日 100 美元 Token 预算下的研发交付计划
 
-> 状态：执行排期草案（W3/W4 核心能力已提前落地）
+> 状态（2026-09-20）：M0/M1 保留既有记录；M2 待真实 PR 验收；M4 本地双向引用与组合工具接入已实现，整阶段未验收
 > 预算约束：每天模型使用费用上限 100 美元
 > 对应路线图：[Codebase Memory MCP 产品研发路线图](PRODUCT_ENGINEERING_ROADMAP.md)
 > 文档专项：[文档知识图谱与代码知识融合规划](DOCUMENT_KNOWLEDGE_GRAPH_PLAN.md)
+> 验收台账：[里程碑验收状态与证据](MILESTONE_ACCEPTANCE.md)
+
+本文的 W1-W20 均指下面的原始 20 周排期，不代表已经经过的日历周。
+历史提交及文档中的“W3-W6 MVP”是提前交付批次标签，不是本排期的整周验收结论。
+功能实现、离线验证、真实项目试点和发布部署分别记录，不相互替代。
+
+2026-09-20 当前执行范围为本地 MCP 文档功能；按用户决定暂缓远程 HTTP 验收，不将其作为本地开发前置阻塞。原 W7-W9 门槛仍保留，暂缓不等于验收通过。
 
 ## 1. 排期结论
 
@@ -124,7 +131,7 @@
 - `complete_no_known_gap/partial/unknown` 覆盖状态。
 - 分页、上限、截断和置信度字段。
 - 新鲜、过期、dirty、无 Git、部分索引和截断黄金样本。
-- 当前 19 个 MCP 工具、README 和 CLI help 差异清单。
+- MCP 工具注册清单、README 和 CLI help 差异清单（按对应版本及 profile 核对，不固定历史工具数）。
 
 验收门槛：
 
@@ -210,7 +217,7 @@
 
 里程碑 M1：上下文编译器进入 preview。
 
-验收状态：已完成（2026-08-24）。`build_context` 已接入 analysis profile 和 CLI，支持确定性候选排序、三档证据预算、文档/测试证据、上下文预览 UI、30 条离线黄金评测和 Agent 使用提示；Windows 本机缺少 C 工具链，C 编译、Werror、clang-format 和黄金二进制评测需在 Linux/CI 完成。
+交付状态：功能完成（2026-08-24），Linux/CI 验收证据待归档。`build_context` 已接入 analysis profile 和 CLI，支持确定性候选排序、三档证据预算、文档/测试证据、上下文预览 UI、30 条离线黄金评测和 Agent 使用提示；当时 Windows 本机缺少 C 工具链，C 编译、Werror、clang-format 和黄金二进制评测留待 Linux/CI 完成。本轮复核结果单独记录在验收台账，不追溯改写当时的测试环境。
 
 ## 6. 第 5-6 周：`review_change`
 
@@ -259,7 +266,7 @@
 
 里程碑 M2：PR 风险门禁进入评论试点。
 
-当前交付状态（2026-08-24）：W4 已完成本地评审闭环。`review_change` 已接入 MCP/CLI 和 analysis profile，复用 `detect_changes` 的 ref/merge-base 语义，输出变更文件与符号、入站影响、公共 API/跨服务信号、测试/文档候选、规则状态和统一 `analysis_meta`；图谱 UI 已新增“评审”模式。`scripts/review-change-comment.py` 提供 GitHub/GitLab 评论适配、CODEOWNERS 解析、按 commit 去重更新、规则确认/忽略 JSONL 遥测和可选 `--fail-on-block` 门禁，默认只评论不阻断。真实仓库的 10 个 PR 影子评审仍需在接入 CI 后采样，属于运营验收而非本地功能缺口。
+当前交付状态（2026-08-24）：本阶段已提前完成本地评审闭环。`review_change` 已接入 MCP/CLI 和 analysis profile，复用 `detect_changes` 的 ref/merge-base 语义，输出变更文件与符号、入站影响、公共 API/跨服务信号、测试/文档候选、规则状态和统一 `analysis_meta`；图谱 UI 已新增“评审”模式。`scripts/review-change-comment.py` 提供 GitHub/GitLab 评论适配、CODEOWNERS 解析、按 commit 去重更新、规则确认/忽略 JSONL 遥测和可选 `--fail-on-block` 门禁，默认只评论不阻断。真实仓库的 10 个 PR 影子评审仍需在接入 CI 后采样，属于运营验收；本地适配器与回归结果另见验收台账，不能据此视为 M2 全部通过。
 
 ## 7. 第 7-9 周：统一远程 MCP Server
 
@@ -357,6 +364,10 @@
 
 ### 第 11 周：文档与代码确定性关联
 
+当前进展（2026-09-20）：明确文件路径和完整 qualified name 的 `REFERENCES`、行号证据、增量清理/旧索引补建及 `get_related_documents` 反向查询已实现。路由/配置键、短名消歧候选、`EXPLAINS`/`IMPLEMENTED_BY` 仍未实现。
+
+已有 63 条真实单行摘录回归（8 个 Markdown 文件，33 正例、30 反例，File stub 目标），标注状态为维护者待复核；不覆盖完整原文块上下文，不是全仓库精确率/召回率，不能替代下列人工质量门槛。
+
 主要目标：建立可解释的双向关系。
 
 交付物：
@@ -377,6 +388,8 @@
 预算：计划 400 美元，本周硬上限 500 美元。
 
 ### 第 12 周：相关知识、文档影响和覆盖 UI
+
+当前进展（2026-09-20）：`build_context`、`explain_impact` 和 `review_change` 已按需返回确定性相关文档及数量、预算或截断信息。本轮未实现相关知识、文档影响、覆盖 UI 或漂移判断；引用只说明文档提及代码，不能据此视为 W12 全部完成。
 
 主要目标：把文档能力进入现有开发工作流。
 
@@ -399,6 +412,8 @@
 预算：计划 350 美元，本周硬上限 500 美元。
 
 里程碑 M4：代码与文档双层知识图谱可用。
+
+当前验证记录（2026-09-20）：C 测试 255 项通过、6 项平台跳过；上下文黄金回归 31/31；文档引用摘录回归 63/63；评测脚本 Python 测试 11 项通过。以上为已实现本地子集的验证，不替代 W11 人工精确率门槛、W12 UI 验收或 M4 整阶段退出条件。复现入口与适用边界见[文档专项 9.5](DOCUMENT_KNOWLEDGE_GRAPH_PLAN.md#95-当前可用的本地引用功能)及[验收台账](MILESTONE_ACCEPTANCE.md)。
 
 ## 9. 第 13-14 周：项目健康度
 

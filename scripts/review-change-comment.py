@@ -11,9 +11,11 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import fnmatch
+import html
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -63,6 +65,9 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
         text=True,
         encoding="utf-8",
     )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"review_change exited with {completed.returncode}"
+        raise RuntimeError(detail)
     if not completed.stdout.strip():
         detail = completed.stderr.strip() or f"review_change exited with {completed.returncode}"
         raise RuntimeError(detail)
@@ -72,6 +77,8 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError(f"review_change returned invalid JSON: {exc}") from exc
     if not isinstance(result, dict):
         raise RuntimeError("review_change returned a non-object JSON value")
+    if result.get("isError"):
+        raise RuntimeError("review_change returned an MCP error")
     # --json intentionally exposes the MCP envelope. Unwrap the text payload
     # so the adapter also works with older binaries that do not emit
     # structuredContent for composite tools.
@@ -90,6 +97,8 @@ def run_review(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError(f"review_change text payload is invalid JSON: {exc}") from exc
             if isinstance(nested, dict):
                 result = nested
+    if result.get("status") not in ("pass", "warn", "block", "unknown"):
+        raise RuntimeError("review_change returned no valid review status")
     return result
 
 
@@ -162,11 +171,107 @@ def record_rule_actions(result: dict[str, Any], args: argparse.Namespace, root: 
             stream.write(json.dumps({**record, "rule": rule_id, "action": action}, ensure_ascii=True) + "\n")
 
 
+def markdown_text(value: Any, limit: int = 600) -> str:
+    text = " ".join(str(value).split())
+    if len(text) > limit:
+        text = text[:limit] + " [truncated]"
+    text = html.escape(text, quote=True)
+    return re.sub(r"([\\`*_{}\[\]()#+.!|~:\-])", r"\\\1", text)
+
+
+def evidence_code(value: Any) -> str:
+    text = " ".join(str(value).split())
+    if len(text) > 300:
+        text = text[:300] + " [truncated]"
+    fence = "`" * (max((len(match) for match in re.findall(r"`+", text)), default=0) + 1)
+    return f"{fence} {text} {fence}"
+
+
+def rule_evidence(result: dict[str, Any], rule: dict[str, Any]) -> list[str]:
+    references = rule.get("evidence")
+    if not isinstance(references, list) or not references:
+        return ["Evidence unavailable: no source or graph reference provided."]
+    symbols = result.get("changed_symbols")
+    symbols = symbols if isinstance(symbols, list) else []
+    impacts = result.get("impacts")
+    impacts = impacts if isinstance(impacts, list) else []
+    files = result.get("changed_files")
+    files = files if isinstance(files, list) else []
+    entries: list[str] = []
+
+    def source(node: dict[str, Any]) -> str:
+        path = node.get("file_path")
+        if not isinstance(path, str) or not path:
+            return "source location unavailable"
+        start, end = node.get("start_line"), node.get("end_line")
+        location = path
+        if type(start) is int and start > 0:
+            location += f":{start}"
+            if type(end) is int and end >= start:
+                location += f"-{end}"
+        else:
+            location += " (line unavailable)"
+        return evidence_code(location)
+
+    for reference in references[:6]:
+        if not isinstance(reference, str):
+            entries.append("Evidence unavailable: malformed reference.")
+        elif reference in ("changed_symbols", "impacts", "summary.direct_impacts"):
+            nodes = symbols if reference == "changed_symbols" else impacts
+            if reference == "summary.direct_impacts":
+                summary = result.get("summary")
+                summary = summary if isinstance(summary, dict) else {}
+                entries.append("Impact counts: direct " + evidence_code(summary.get("direct_impacts", "unknown"))
+                               + ", indirect " + evidence_code(summary.get("indirect_impacts", "unknown")))
+            for node in nodes[:6]:
+                if not isinstance(node, dict):
+                    entries.append("Evidence unavailable: malformed graph node.")
+                    continue
+                name = evidence_code(node.get("qualified_name") or node.get("name") or "unknown")
+                if reference == "changed_symbols":
+                    entries.append(f"Changed symbol: {name}; source {source(node)}")
+                else:
+                    changed_by = evidence_code(node.get("changed_by", "unknown"))
+                    hop = evidence_code(node.get("hop", "unknown"))
+                    entries.append(f"Inbound reachability: {changed_by} &lt;- {name}; "
+                                   f"hop {hop}; source {source(node)}; intermediate path not provided")
+            if not nodes:
+                entries.append("Evidence unavailable: " + evidence_code(reference) + " has no source nodes.")
+            if len(nodes) > 6:
+                entries.append("Evidence truncated: additional graph nodes omitted.")
+        elif reference in ("analysis_meta.freshness", "analysis_meta.coverage"):
+            metadata = result.get("analysis_meta")
+            value = metadata.get(reference.split(".")[1]) if isinstance(metadata, dict) else None
+            if value is None:
+                entries.append("Evidence unavailable: " + evidence_code(reference))
+            else:
+                entries.append("Metadata " + evidence_code(reference) + ": "
+                               + evidence_code(json.dumps(value, ensure_ascii=True, sort_keys=True))
+                               + "; no source location supplied")
+        elif reference == "changed_files":
+            entries.extend("Changed file: " + evidence_code(path) for path in files[:6] if isinstance(path, str))
+            if not files:
+                entries.append("Evidence unavailable: changed_files is empty.")
+            if len(files) > 6:
+                entries.append("Evidence truncated: additional changed files omitted.")
+        elif reference in files:
+            entries.append("Changed file: " + evidence_code(reference))
+        else:
+            entries.append("Unresolved evidence reference: " + evidence_code(reference)
+                           + "; no source or graph location supplied")
+        if len(entries) > 5:
+            break
+    if len(entries) > 5 or len(references) > 6:
+        entries = entries[:5] + ["Evidence truncated: additional entries omitted."]
+    return entries
+
+
 def markdown(result: dict[str, Any], project: str, since: str, root: Path) -> str:
     revision = commit_id(root)
-    marker = f"<!-- cbm-review:{project}:{revision} -->"
-    status = str(result.get("status", "unknown"))
-    risk = str(result.get("risk_label_zh", result.get("risk", "unknown")))
+    marker_project = re.sub(r"[\x00-\x1f<>]", lambda match: quote(match.group(0), safe=""), project)
+    marker = f"<!-- cbm-review:{marker_project}:{quote(revision, safe='')} -->"
+    status = markdown_text(result.get("status", "unknown"))
+    risk = markdown_text(result.get("risk_label_zh", result.get("risk", "unknown")))
     summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     changed_files = result.get("changed_files") if isinstance(result.get("changed_files"), list) else []
     codeowners_file, owner_rules = read_codeowners(root)
@@ -176,50 +281,82 @@ def markdown(result: dict[str, Any], project: str, since: str, root: Path) -> st
         "",
         f"- Status: **{status}**",
         f"- Risk: **{risk}**",
-        f"- Project: `{project}`",
-        f"- Compared ref: `{since}`",
-        f"- Commit: `{revision}`",
+        f"- Project: {evidence_code(project)}",
+        f"- Compared ref: {evidence_code(since)}",
+        f"- Commit: {evidence_code(revision)}",
         "",
-        str(result.get("summary_zh", "No summary available.")),
+        markdown_text(result.get("summary_zh", "No summary available.")),
         "",
         (
             "Impact: "
-            f"{summary.get('direct_impacts', 0)} direct, "
-            f"{summary.get('indirect_impacts', 0)} indirect, "
-            f"{summary.get('entry_points', 0)} entry points"
+            f"{markdown_text(summary.get('direct_impacts', 0))} direct, "
+            f"{markdown_text(summary.get('indirect_impacts', 0))} indirect, "
+            f"{markdown_text(summary.get('entry_points', 0))} entry points"
         ),
     ]
     if codeowners_file and changed_files:
         lines.extend(["", "### Owners"])
-        for changed in changed_files:
+        for changed in changed_files[:20]:
             owners = codeowners_for(str(changed), owner_rules)
             owner_text = " ".join(owners) if owners else "(no matching CODEOWNERS rule)"
-            lines.append(f"- `{changed}`: {owner_text}")
-        lines.append(f"\n_Source: `{codeowners_file.relative_to(root).as_posix()}`_")
+            lines.append(f"- {evidence_code(changed)}: {markdown_text(owner_text)}")
+        if len(changed_files) > 20:
+            lines.append("Owners truncated: additional changed files omitted.")
+        lines.append(f"\n_Source: {evidence_code(codeowners_file.relative_to(root).as_posix())}_")
     rules = result.get("rules") if isinstance(result.get("rules"), list) else []
     if rules:
         lines.extend(["", "### Rules"])
-        for rule in rules:
+        for rule in rules[:20]:
             if not isinstance(rule, dict):
                 continue
             rule_id = rule.get("id", "unknown")
             rule_status = rule.get("status", "unknown")
             message = rule.get("message", "")
-            lines.append(f"- `{rule_id}` **{rule_status}**: {message}")
+            lines.append(f"- {evidence_code(rule_id)} **{markdown_text(rule_status)}**: {markdown_text(message)}")
+            if rule.get("evidence") or rule_status != "pass":
+                lines.extend(f"  - {entry}" for entry in rule_evidence(result, rule))
+        if len(rules) > 20:
+            lines.append("Rules truncated: additional rules omitted.")
     limitations = result.get("limitations") if isinstance(result.get("limitations"), list) else []
     if limitations:
         lines.extend(["", "<details><summary>Limitations</summary>", ""])
-        lines.extend(f"- {item}" for item in limitations)
+        lines.extend(f"- {markdown_text(item)}" for item in limitations[:10])
+        if len(limitations) > 10:
+            lines.append("Limitations truncated: additional entries omitted.")
         lines.extend(["", "</details>"])
     lines.append("")
-    return "\n".join(lines)
+    body = "\n".join(lines)
+    if len(body) > 50000:
+        body = body[:49000].rsplit("\n", 1)[0]
+        if body.count("<details>") > body.count("</details>"):
+            body += "\n</details>"
+        body += "\n\nComment truncated: additional content omitted.\n"
+    return body
+
+
+def find_comment(endpoint: str, body: str, token: str) -> dict[str, Any] | None:
+    marker = body.splitlines()[0]
+    page = 1
+    while True:
+        comments = api_json("GET", f"{endpoint}?per_page=100&page={page}", token)
+        if not isinstance(comments, list):
+            raise RuntimeError("comment API returned a non-list response")
+        existing = next(
+            (item for item in comments if isinstance(item, dict)
+             and marker in (item.get("body") or "")),
+            None,
+        )
+        if existing:
+            return existing
+        if len(comments) < 100:
+            return None
+        page += 1
 
 
 def github_comment(body: str, token: str, repository: str, number: str, api_url: str) -> None:
     base = api_url.rstrip("/")
     endpoint = f"{base}/repos/{quote(repository, safe='/')}/issues/{quote(number)}/comments"
-    comments = api_json("GET", endpoint, token)
-    existing = next((item for item in comments if isinstance(item, dict) and body.splitlines()[0] in item.get("body", "")), None)
+    existing = find_comment(endpoint, body, token)
     if existing:
         api_json("PATCH", f"{base}/repos/{quote(repository, safe='/')}/issues/comments/{existing['id']}", token, {"body": body})
     else:
@@ -231,9 +368,8 @@ def gitlab_comment(body: str, token: str, project: str, number: str, api_url: st
     if not base.endswith("/api/v4"):
         base += "/api/v4"
     encoded_project = quote(project, safe="")
-    endpoint = f"{base}/api/v4/projects/{encoded_project}/merge_requests/{quote(number)}/notes"
-    notes = api_json("GET", endpoint, token)
-    existing = next((item for item in notes if isinstance(item, dict) and body.splitlines()[0] in item.get("body", "")), None)
+    endpoint = f"{base}/projects/{encoded_project}/merge_requests/{quote(number)}/notes"
+    existing = find_comment(endpoint, body, token)
     if existing:
         api_json("PUT", f"{endpoint}/{existing['id']}", token, {"body": body})
     else:

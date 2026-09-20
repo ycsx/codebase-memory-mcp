@@ -602,6 +602,9 @@ int cbm_pipeline_pass_decorator_tags(cbm_gbuf_t *gbuf, const char *project);
 /* Pre-dump pass: config ↔ code linking. */
 int cbm_pipeline_pass_configlink(cbm_pipeline_ctx_t *ctx);
 
+/* Rebuild explicit Markdown REFERENCES with document line evidence. */
+int cbm_pipeline_pass_document_links(cbm_pipeline_ctx_t *ctx);
+
 /* Pre-dump pass: SIMILAR_TO edges via MinHash fingerprinting. */
 int cbm_pipeline_pass_similarity(cbm_pipeline_ctx_t *ctx);
 

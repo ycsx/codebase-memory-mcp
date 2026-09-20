@@ -1,12 +1,14 @@
 # 文档知识图谱与代码知识融合规划
 
-> 状态：Markdown 文档图谱 MVP 已交付；代码关联、漂移和覆盖 UI 按后续阶段推进
+> 状态（2026-09-20）：Markdown 图谱、双向引用及上下文/影响/评审接入已实现；人工质量验收、漂移和覆盖 UI 待推进
 > 适用项目：Codebase Memory MCP  
 > 核心方向：把分散的研发文档转化为可检索、可追踪、可验证、可与代码互相解释的知识层
 
 ## 1. 执行摘要
 
-Codebase Memory MCP 已经能够建立源码、符号、调用、路由、配置、基础设施和跨服务关系图谱。当前 W6 MVP 已将仓库 Markdown 建模为可查询的 `Document` 和 `Section` 节点，但文档到代码的确定性关联、漂移检测和覆盖 UI 仍按后续阶段推进。
+Codebase Memory MCP 已经能够建立源码、符号、调用、路由、配置、基础设施和跨服务关系图谱。提前交付的 Markdown MVP（对应原 20 周排期第 10 周的部分能力）已将仓库 Markdown 建模为可查询的 `Document` 和 `Section` 节点。2026-09-18 新增首批确定性 `REFERENCES` 与 `get_document` 证据返回，支持明确文件路径和完整 qualified name；完整关系质量、漂移检测和覆盖 UI 仍按后续阶段推进。完整阶段状态见[验收台账](MILESTONE_ACCEPTANCE.md)。
+
+2026-09-20 已补齐 `get_related_documents` 反向查询及 `build_context`、`explain_impact`、`review_change` 相关文档接入。当前实现、参数和限制见 9.5 与第 11 节；其余目标架构、数据模型和阶段交付物是规划，不意味着已经提供相应接口、字段或 UI。63 条真实单行摘录回归仍待维护者复核，不代表整个 W11/W12 或完整文档知识图谱已经验收。
 
 本规划建议将项目从“代码知识图谱”扩展为“代码与文档双层知识图谱”：
 
@@ -33,14 +35,14 @@ Codebase Memory MCP 已经能够建立源码、符号、调用、路由、配置
 - Git 变更影响、热点、架构、语义相关性、运行时 Trace 和跨仓库连接。
 - MCP、CLI、HTTP、Desktop 控制台和图谱可视化。
 
-W6 前文档只能被文件发现、全文搜索或按普通语法文件处理；当前 MVP 已补齐文档结构节点，但仍缺少以下能力：
+Markdown MVP 交付前，文档只能被文件发现、全文搜索或按普通语法文件处理；当前 MVP 已补齐文档结构节点，但仍缺少以下能力：
 
 - `Document` 与 `Section` 之外的决策、问题和发版记录专用节点。
-- 标题、章节、决策、问题和结论没有独立身份。
-- 无法直接回答“这篇文档对应哪些代码”。
-- 无法直接回答“修改这些代码后哪些文档可能过期”。
+- 章节已有结构身份；决策、问题和结论尚未形成独立语义实体。
+- 已能返回明确引用的文件/完整符号；未提供明确引用的语义关联仍不推断。
+- 已能返回提及变更代码的文档，但尚不能判断“哪些文档可能过期”。
 - 无法衡量高风险代码是否有足够文档覆盖。
-- 文档与代码之间的关联缺少证据、置信度和生命周期管理。
+- 首批引用已有来源、置信度、行号与增量重建；更广的关系类型与质量校准仍待完成。
 
 ### 2.2 需要解决的核心问题
 
@@ -231,7 +233,7 @@ MVP 解析以下 Markdown 结构：
 
 ### 9.1 一级：确定性关联
 
-以下证据可以直接建立 `REFERENCES`：
+以下为目标证据类型；当前只实现 9.5 中明确文件链接、行内路径和完整 qualified name 子集，路由/配置/Git 关联仍为规划：
 
 - Markdown 链接指向仓库文件。
 - 文档中的规范化文件路径能够唯一匹配图谱文件节点。
@@ -242,6 +244,8 @@ MVP 解析以下 Markdown 结构：
 确定性关系的置信度建议为 `0.95-1.00`。
 
 ### 9.2 二级：结构候选关联
+
+此级关联尚未实现；当前遇到不唯一目标时跳过，不返回结构候选列表。
 
 候选证据包括：
 
@@ -254,6 +258,8 @@ MVP 解析以下 Markdown 结构：
 结构候选只有在消歧后才能升级为事实关系。存在多个同名符号时，应保留候选列表，不得随意选择。
 
 ### 9.3 三级：语义候选关联
+
+此级文档关联尚未实现，不应根据代码语义搜索能力推断已经存在文档语义关系。
 
 使用现有语义向量和图扩散能力召回概念名称不同但含义接近的代码。默认规则：
 
@@ -277,7 +283,105 @@ MVP 解析以下 Markdown 结构：
 }
 ```
 
+### 9.5 当前可用的本地引用功能
+
+索引管线会在全量索引和增量更新后生成 `REFERENCES`：
+
+- `[实现](../src/core.py)`：相对当前文档解析，目标必须是已索引文件。
+- 行内代码 `` `src/core.py` ``：尝试文档相对路径与仓库相对路径，若指向两个不同目标则不连线。
+- 行内代码 `` `example.src.core.compute` ``：只匹配完整 qualified name，不猜测短函数名。
+
+引用归属包含该行的最近章节，否则归属文档；同一来源节点到同一目标保留首条证据。
+边属性包含 `producer=document_links`、匹配方式、置信度、文档行范围、匹配文本和目标 QN。
+代码改名/删除、文档删除引用后，增量索引会清理旧的自动引用，不删除其他来源的边。
+旧索引在下一次索引时补建关联，不要求用户修改文件来触发。
+
+通过现有 MCP/CLI 查询：
+
+```json
+{"project":"example","path":"docs/guide.md"}
+```
+
+将上述参数传给 `get_document`，除原有章节外还返回：
+
+- `references[]`：来源 QN、目标文件/符号元数据和 `properties` 中的证据。
+- `references_truncated`：最多返回按文档行号、目标 QN 稳定排序的前 100 条。
+- `reference_analysis`：处理状态、支持范围和限制原因；旧索引返回 `unknown / reindex_required`。
+
+当前是保守的 Markdown 子集，不是完整 CommonMark 解析：
+忽略图片、外部链接、注释、fenced/缩进代码和引用块；
+复杂或多行链接、转义路径、链接标题、reference-style links、短名消歧、
+URL 编码路径及路由/配置键匹配尚未支持。
+跨行代码跨度会标记 `limited / unsupported_multiline_code`；
+读取失败也会标记 `limited`，恢复后普通重新索引可重试。
+这里的 `ok` 只表示在声明的子集内处理完成，不代表所有文档引用均已覆盖。
+这些关系只表示原文引用，不自动升级为 `EXPLAINS` 或 `IMPLEMENTED_BY`。
+
+#### 2026-09-20：反向查询与开发工作流
+
+`get_related_documents` 支持从代码反查引用它的文档。参数示例：
+
+```json
+{"project":"example","target":"example.src.core.compute","limit":20}
+```
+
+也可将 `target` 设为 `file:src/core.py`；文件目标同时查询该文件节点及其中符号的引用。
+不接受短名猜测。`limit` 默认 20，上限 100；响应包含 `references[]` 中的
+`source`、`target`、`properties`，以及总数、返回数、截断和分析状态。
+来源保留文档/章节位置，证据保留匹配文本和引用行号。
+状态是 best-effort 信号；空结果不等于不存在文档，也不证明文档覆盖完整。
+
+开发工作流复用相同的确定性证据：
+
+- `build_context` 显式设置 `include_docs:true` 时附带 `documentation_references` 对象。
+  最多返回 8 条引用、检查 24 个代码目标，并与原有证据共享估算 token 预算；
+  达到数量或预算限制时保留截断信息，不保证完整召回。
+- `explain_impact` 默认 `include_docs:false`。启用后附带 `related_documentation`；
+  `document_limit` 默认 20，上限 100。
+- `review_change` 默认 `include_docs:true`，按 `changed_paths` 查询相关文档，
+  返回同形状的 `related_documentation`，并计入估算预算。
+  这些引用只说明文档提及被改代码，不自动判定文档已漂移或过期。
+
+MCP 参数示例（CLI 使用同名工具及既有 JSON 参数入口）：
+
+```json
+{"project":"example","task":"修改 compute 的行为","target":"example.src.core.compute","include_docs":true}
+```
+
+上述参数传给 `build_context`；影响查询参数传给 `explain_impact`：
+
+```json
+{"project":"example","query":"src/core.py","target":"file:src/core.py","include_docs":true,"document_limit":20}
+```
+
+#### 真实文档摘录回归
+
+`tests/fixtures/document_links_golden.json` 固定了 8 个仓库 Markdown 文件中的
+63 个候选引用：33 个正例、30 个反例，逐条记录来源文件、原始行号、匹配文本和预期目标。
+`scripts/eval-document-links.py` 核对来源后，通过本地 stdio 索引隔离 fixture，
+再验证 `get_document` 的目标与行号证据，不使用 HTTP 或真实用户缓存。
+
+fixture 保留每条原文行和相对目录，目标采用真实仓库路径下的最小 File stub。
+因此它不验证原文周围的块结构，也不是全仓库精确率/召回率测量。
+标注状态为 `maintainer_review_pending`，仍需维护者复核，不能将 63 条通过
+当作“人工确认黄金集”或 W11 精确率门槛已经完成。
+
+```bash
+python scripts/eval-document-links.py --check-sources
+python scripts/eval-document-links.py build/c/codebase-memory-mcp
+python -m unittest discover -s tests -p test_eval_document_links.py
+```
+
+Windows 使用 `.exe` 二进制，可追加 `--temp-root C:/msys64/tmp` 指定非系统 ASCII
+临时目录。来源漂移时应复核并更新样例，不自动重标注。
+
+本轮验证记录（2026-09-20）：C 测试 255 通过、6 项平台跳过，上下文黄金回归 31/31，
+摘录回归 63/63，评测脚本 Python 测试 11 项通过。记录仅覆盖对应测试范围，
+不代表全仓库关系质量、漂移判定或文档 UI 已验收。
+
 ## 10. 文档漂移分析
+
+本节为未实现的漂移设计。当前相关文档结果没有下述漂移状态，不应将引用命中或空结果转换为过期/无覆盖结论。
 
 ### 10.1 漂移信号
 
@@ -306,26 +410,32 @@ MVP 解析以下 Markdown 结构：
 - 代码高频变更不等于文档过期，必须结合关系类型和变更内容。
 - 语义候选关系默认不参与高严重度漂移告警。
 
-## 11. MCP 与查询能力规划
+## 11. MCP 与查询能力
 
-### 11.1 现有工具扩展
+### 11.1 已实现的查询入口
 
-优先扩展现有工具，避免工具数量无节制增长：
+当前公开工具及文档扩展如下；参数示例、限制和证据范围见 9.5：
 
-| 工具 | 扩展内容 |
+| 工具 | 当前能力 |
 |---|---|
-| `search_graph` | 支持 `Document`、`Section` 和文档类型过滤 |
-| `query_graph` | 支持跨文档与代码关系查询 |
-| `get_code_snippet` | 保持不变，作为代码证据读取工具 |
-| `detect_changes` | 返回 `affected_documents` 和漂移原因 |
-| `get_architecture` | 增加文档覆盖、孤立文档和漂移摘要 |
-| `search_code` | 保持代码搜索语义，不混入文档结果 |
+| `search_graph` | 查找已索引的 `Document`、`Section` 节点 |
+| `query_graph` | 查询已有文档结构和 `REFERENCES` 边 |
+| `get_document` | 按 `project` 与 `path` 或 `name` 返回文档元数据、章节及最多 100 条引用证据 |
+| `get_related_documents` | 按完整 QN 或 `file:仓库相对路径` 反查文档；文件目标包含文件内符号，`limit` 默认 20、上限 100 |
+| `build_context` | 显式 `include_docs:true` 时返回有数量和估算 token 预算限制的 `documentation_references` |
+| `explain_impact` | `include_docs` 默认 false；启用后返回 `related_documentation`，`document_limit` 默认 20、上限 100 |
+| `review_change` | `include_docs` 默认 true；按变更路径返回 `related_documentation` 并计入估算预算 |
+| `get_code_snippet` / `search_code` | 保持代码证据读取/搜索语义 |
 
-### 11.2 新增工具
+`get_document` 和 `get_related_documents` 均为已实现的独立 MCP 工具，不是等待决策的新增提案。`get_document` 当前没有默认命中章节/可选全文读取模式，不应传入未声明的全文参数；精确调用 schema 以 `tools/list` 为准。引用、处理状态和截断字段是 best-effort 证据，不能证明完整覆盖。
 
-MVP 建议只新增两个工具：
+### 11.2 后续接口规划（未实现）
 
-#### `unified_search`
+- `detect_changes.affected_documents` 及漂移原因：尚未提供；当前使用 `review_change` 或 `explain_impact` 的 `related_documentation`。
+- `get_architecture` 文档覆盖、孤立文档和漂移摘要：尚未提供。
+- `unified_search`：尚未实现或注册，不是当前可调用工具。
+
+`unified_search` 的候选设计：
 
 同时检索文档和代码，并返回分组结果、关联证据和建议的下一步查询。
 
@@ -338,20 +448,21 @@ MVP 建议只新增两个工具：
 - `limit`
 - `include_related`
 
-#### `get_document`
-
-按文档 qualified name 或文件路径读取文档元数据、章节和相关代码。默认返回命中章节，显式请求时才返回全文。
-
 ### 11.3 Agent 使用规则
 
-建议在自动生成的 Agent 指令中增加：
+2026-09-20 已同步安装器生成的 Agent 指令模板与 CLI 帮助；已有客户端文件需先查看
+`install --dry-run` 计划再更新，不会随源码修改自动覆盖。使用规则如下：
 
 - 单文件字面量查找继续优先使用 `rg`/`grep`。
 - 查询设计意图、历史背景、跨文件关系或影响范围时优先调用 MCP。
+- 从代码找说明时调用 `get_related_documents`；从文档找代码时调用 `get_document`。旧索引先重新索引补建关系，并使用新构建的 MCP 进程。
+- `build_context` 和 `explain_impact` 需要文档时显式传 `include_docs:true`；`review_change` 默认启用，均需检查分析状态、预算和截断。
 - MCP 返回的文档关系必须携带证据和置信度。
-- 文档漂移提示必须回读原文和代码后再形成结论。
+- 相关文档不等于漂移提示；需回读原文和代码后再形成更新结论，空结果不得解释为无文档。
 
 ## 12. UI 信息架构规划
+
+本节文档专项 UI 均为后续规划。本轮仅交付 MCP/CLI 和组合工具数据，不代表现有图谱、影响或热点页已展示这些文档能力。
 
 ### 12.1 总体原则
 
@@ -451,6 +562,8 @@ MVP 建议只新增两个工具：
 
 ### 13.2 增量更新
 
+以下是目标优化策略；当前引用 pass 在全量/增量索引后重建其自身生成的自动引用，保留其他来源边，并支持旧索引补建。仅按受影响符号定向重评估仍是后续优化，不应据此承诺当前性能。
+
 - 以文件哈希判断是否需要重新解析。
 - 只重建变化文档的章节、全文索引、向量和关联边。
 - 删除文档时清理所属章节和自动关系。
@@ -526,6 +639,8 @@ MVP 建议只新增两个工具：
 
 ### 阶段 2：确定性代码关联
 
+当前状态（2026-09-20）：文件/完整 QN 引用、证据和双向查询已实现；路由/配置匹配、候选列表、统一搜索和相关知识 UI 未实现；人工质量门槛仍待验收。
+
 目标：形成可解释的代码与文档双向导航。
 
 交付物：
@@ -543,6 +658,8 @@ MVP 建议只新增两个工具：
 - 任意关系都可以回到文档行范围和代码节点核验。
 
 ### 阶段 3：影响与热点 UI
+
+当前状态（2026-09-20）：`build_context`、`explain_impact`、`review_change` 文档证据已接入；下列 `detect_changes` 字段、UI、覆盖和漂移能力仍是后续交付物。
 
 目标：把文档能力转化为明确的开发和治理价值。
 
@@ -679,25 +796,26 @@ MVP 建议只新增两个工具：
 
 ## 19. 待决策事项
 
-实施前需要确认：
+已确定并实现：
 
-1. 文档节点是否复用通用图节点表，还是增加文档专用内容表并通过 ID 关联。
-2. MVP 是否默认索引所有 Markdown，还是只索引明确文档目录。
-3. `get_document` 是否纳入公开 MCP 工具数量，或作为 `search_graph` 的读取模式。
-4. 用户确认的关系存放在数据库、仓库配置还是独立 sidecar 文件。
-5. 文档类型采用规则分类、front matter 显式声明，还是两者结合。
-6. 共享 `graph.db.zst` 是否默认包含文档全文和 embedding。
-7. 远程 MCP 中不同文档可见范围如何映射到项目和用户身份。
+- `Document`、`Section` 及引用边复用现有节点/边模型。
+- `get_document`、`get_related_documents` 作为独立公开 MCP 工具，CLI 使用同名入口。
+- 当前仅把明确路径和完整 QN 生成的 `REFERENCES` 作为确定性文档证据；不能唯一确认时跳过。
 
-建议默认选择：
+后续仍需决策：
 
-- 图节点复用现有模型，全文进入文档专用表。
-- 默认索引根 README 和明确文档目录，其他 Markdown 可配置启用。
-- 新增独立 `get_document`，避免用代码片段工具承载文档语义。
-- 用户确认关系持久化到仓库内可审计 sidecar 文件，数据库作为运行时副本。
-- 文档类型优先读取 front matter，没有声明时再规则分类。
+1. 独立文档全文/章节向量存储和 `unified_search` 的接口及预算。
+2. 文档专用发现、类型映射和单独启停配置如何扩展现有索引规则。
+3. 用户确认关系存放在数据库、仓库配置还是独立 sidecar 文件。
+4. 文档类型显式声明与规则分类如何结合。
+5. 共享图谱中的文档全文和 embedding 包含策略。
+6. 远程文档级可见范围如何映射到项目和用户身份。
+
+仓库内可审计 sidecar、专用全文表和 front matter 优先分类仍是候选方案，不是当前已支持的配置承诺。
 
 ## 20. MVP 完成定义
+
+以下是完整文档产品 MVP 的退出条件，并非当前全部完成项；本地引用与工作流接入不替代 UI、质量和性能验收。
 
 MVP 在满足以下条件时视为完成：
 
@@ -713,11 +831,11 @@ MVP 在满足以下条件时视为完成：
 
 ## 21. 建议立即开展的下一步
 
-1. 选取三个真实项目，整理 README、ADR、RFC、FAQ 和发版说明样本。
-2. 人工标注 50-100 条文档到代码关系，作为阶段 0 黄金集。
-3. 固化 `Document`、`Section`、关系证据和漂移状态 Schema。
-4. 实现 Markdown 结构提取与增量生命周期，不先做语义关联。
-5. 在代码节点详情中制作“相关知识”最小 UI 原型。
-6. 用真实变更验证“受影响文档”是否能减少人工排查成本。
+1. 维护者复核现有 63 条摘录标注，明确正负例和支持子集边界。
+2. 补充整篇原文块上下文和三个真实项目样本，独立测量精确率/召回率，不以摘录通过率替代。
+3. 用真实变更验证双向查询与三项组合工具的文档证据、预算、截断和增量维护。
+4. 在代码节点详情中制作“相关知识”最小 UI，再接影响页和覆盖矩阵。
+5. 为漂移判断冻结独立状态/证据契约，确认质量门槛后再实现；当前引用结果不承担漂移结论。
+6. 依据真实样例决定是否扩展路由/配置匹配，保持无法唯一确认时不建立事实关系。
 
 完成以上步骤后，再决定是否进入语义关联和外部企业连接器阶段。

@@ -3,7 +3,7 @@
 > 状态：v1 已冻结（W1 验收通过）
 > 实现状态：W2 已落地
 > Schema：[analysis-meta.schema.json](schemas/analysis-meta.schema.json)
-> 适用范围：项目相关的 MCP 原子分析，以及后续 `build_context`、`review_change` 和健康度结果
+> 适用范围：项目相关的 MCP 原子分析、已实现的 `build_context`、`review_change`，以及后续健康度结果
 
 ## 1. 目标
 
@@ -140,7 +140,13 @@ coverage 代际不匹配不等同于源码过期：如果 graph generation 与�
 `blocking` limitation。`confidence.level=verified` 不能单独解除这些限制；它必须是
 当前、未截断证据的质量描述，而不是对未查询范围的证明。
 
-原子工具返回证据和警告；未来组合工具 `build_context`、`review_change` 在证据不足时必须使用 `provisional` 或 `insufficient`，不能把 `unknown` 解释为 `pass`。
+原子工具返回证据和警告；组合工具 `build_context`、`review_change` 在证据不足时必须通过元数据的 claim 表达 `provisional` 或 `insufficient`，不能把 `unknown` 解释为 `pass`。
+
+文档引用结果另有处理范围状态：`get_document.reference_analysis`、
+`get_related_documents` 顶层状态，以及组合工具中的 `documentation_references` /
+`related_documentation`。它们描述支持语法子集及截断情况，不替代 `analysis_meta`
+的源码新鲜度和覆盖证据；`status:ok` 不代表完整文档覆盖或内容正确。
+具体返回字段和限制见[文档引用使用指引](DOCUMENT_REFERENCES.md)。
 
 ## 8. W1 golden scenarios
 

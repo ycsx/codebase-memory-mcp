@@ -844,10 +844,9 @@ TEST(cli_skill_files_content) {
         "search_graph",     "search_code",          "trace_path",       "detect_changes",
         "query_graph",      "get_graph_schema",     "get_code_snippet", "get_architecture",
         "explain_impact",   "check_index_coverage", "build_context",    "review_change",
-        "manage_adr",
-        "ingest_traces",
+        "manage_adr",       "ingest_traces",        "get_document",     "get_related_documents",
     };
-    ASSERT_EQ(sizeof(expected_tools) / sizeof(expected_tools[0]), 18U);
+    ASSERT_EQ(sizeof(expected_tools) / sizeof(expected_tools[0]), 20U);
     for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
         ASSERT(strstr(sk[0].content, expected_tools[i]) != NULL);
     }
@@ -868,15 +867,19 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "18 MCP Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "20 MCP Tools") != NULL);
     ASSERT(strstr(sk[0].content, "explain_impact") != NULL);
+    ASSERT(strstr(sk[0].content, "include_docs=true") != NULL);
+    ASSERT(strstr(sk[0].content, "references_truncated") != NULL);
+    ASSERT(strstr(sk[0].content, "reference_analysis") != NULL);
+    ASSERT(strstr(sk[0].content, "do not prove complete documentation coverage") != NULL);
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
 
     char *readme = read_test_file_alloc("README.md");
     ASSERT_NOT_NULL(readme);
-    ASSERT(strstr(readme, "mcp-tool-contract: total=18") != NULL);
+    ASSERT(strstr(readme, "mcp-tool-contract: total=20") != NULL);
     for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
         ASSERT(strstr(readme, expected_tools[i]) != NULL);
     }
@@ -884,7 +887,7 @@ TEST(cli_skill_files_content) {
 
     char *main_source = read_test_file_alloc("src/main.c");
     ASSERT_NOT_NULL(main_source);
-    ASSERT(strstr(main_source, "Tools (18)") != NULL);
+    ASSERT(strstr(main_source, "Tools (20)") != NULL);
     for (size_t i = 0; i < sizeof(expected_tools) / sizeof(expected_tools[0]); i++) {
         ASSERT(strstr(main_source, expected_tools[i]) != NULL);
     }
@@ -899,6 +902,10 @@ TEST(cli_codex_instructions) {
     ASSERT_NOT_NULL(instr);
     ASSERT(strstr(instr, "Codebase Knowledge Graph") != NULL);
     ASSERT(strstr(instr, "trace_path") != NULL);
+    ASSERT(strstr(instr, "get_document") != NULL);
+    ASSERT(strstr(instr, "get_related_documents") != NULL);
+    ASSERT(strstr(instr, "include_docs") != NULL);
+    ASSERT(strstr(instr, "not proof of complete documentation coverage") != NULL);
     PASS();
 }
 
@@ -3248,7 +3255,9 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
     yyjson_val *kiro_profile_name =
         kiro_args && yyjson_is_arr(kiro_args) ? yyjson_arr_get(kiro_args, 1U) : NULL;
     files_ok = files_ok && profile && kiro_root && yyjson_is_obj(kiro_root) && kiro_tools &&
-               yyjson_arr_size(kiro_tools) == 14U && kiro_read && yyjson_is_str(kiro_read) &&
+               yyjson_arr_size(kiro_tools) == 18U && kiro_read && yyjson_is_str(kiro_read) &&
+               strstr(profile, "\"@codebase-memory-mcp/get_document\"") &&
+               strstr(profile, "\"@codebase-memory-mcp/get_related_documents\"") &&
                strcmp(yyjson_get_str(kiro_read), "read") == 0 && include_mcp &&
                yyjson_is_bool(include_mcp) && !yyjson_get_bool(include_mcp) && kiro_server_tool &&
                yyjson_is_str(kiro_server_tool) &&
@@ -6670,11 +6679,13 @@ TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server) {
     char *qoder = read_test_file_alloc(qoder_agent);
     char *junie = read_test_file_alloc(junie_agent);
     char *kiro = read_test_file_alloc(kiro_agent);
-    bool qoder_confined = qoder && strstr(qoder, "mcpServers:") &&
-                          strstr(qoder, "- codebase-memory-mcp") &&
-                          strstr(qoder, "mcp__codebase-memory-mcp__search_graph") &&
-                          strstr(qoder, "check_index_coverage") && !strstr(qoder, "Bash") &&
-                          !strstr(qoder, "Write") && !strstr(qoder, "Edit");
+    bool qoder_confined =
+        qoder && strstr(qoder, "mcpServers:") && strstr(qoder, "- codebase-memory-mcp") &&
+        strstr(qoder, "mcp__codebase-memory-mcp__search_graph") &&
+        strstr(qoder, "check_index_coverage") &&
+        strstr(qoder, "mcp__codebase-memory-mcp__get_document") &&
+        strstr(qoder, "mcp__codebase-memory-mcp__get_related_documents") &&
+        !strstr(qoder, "Bash") && !strstr(qoder, "Write") && !strstr(qoder, "Edit");
     bool junie_confined = junie && strstr(junie, "mcpServers: [\"codebase-memory-analysis\"]") &&
                           strstr(junie, "hard-enforces the analysis tool profile") &&
                           strstr(junie, "tools: [\"Read\", \"Grep\", \"Glob\"]") &&
@@ -6683,10 +6694,11 @@ TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server) {
     bool kiro_confined =
         kiro && strstr(kiro, "\"mcpServers\"") && strstr(kiro, "\"includeMcpJson\": false") &&
         strstr(kiro, "@codebase-memory-mcp/search_graph") && strstr(kiro, "--tool-profile") &&
-        strstr(kiro, "analysis") && strstr(kiro, "check_index_coverage") &&
-        !strstr(kiro, "\"@codebase-memory-mcp\"") && !strstr(kiro, "delete_project") &&
-        !strstr(kiro, "manage_adr") && !strstr(kiro, "index_repository") &&
-        !strstr(kiro, "ingest_traces");
+        strstr(kiro, "@codebase-memory-mcp/get_document") &&
+        strstr(kiro, "@codebase-memory-mcp/get_related_documents") && strstr(kiro, "analysis") &&
+        strstr(kiro, "check_index_coverage") && !strstr(kiro, "\"@codebase-memory-mcp\"") &&
+        !strstr(kiro, "delete_project") && !strstr(kiro, "manage_adr") &&
+        !strstr(kiro, "index_repository") && !strstr(kiro, "ingest_traces");
     bool confined = qoder_confined && junie_confined && kiro_confined;
     free(qoder);
     free(junie);
@@ -8325,6 +8337,9 @@ TEST(cli_aider_instructions_are_cli_form_issue1032) {
     ASSERT(strstr(content, "codebase-memory-mcp cli search_graph") != NULL);
     ASSERT(strstr(content, "codebase-memory-mcp cli trace_path") != NULL);
     ASSERT(strstr(content, "codebase-memory-mcp cli index_repository") != NULL);
+    ASSERT(strstr(content, "codebase-memory-mcp cli get_document") != NULL);
+    ASSERT(strstr(content, "codebase-memory-mcp cli get_related_documents") != NULL);
+    ASSERT(strstr(content, "include_docs") != NULL);
     /* ...and no bare MCP-call syntax remains to mislead the model. */
     ASSERT_NULL(strstr(content, "search_graph(name_pattern"));
     /* States the constraint explicitly. */
@@ -8475,6 +8490,10 @@ TEST(cli_agent_instructions_content) {
     ASSERT(strstr(instr, "search_graph") != NULL);
     ASSERT(strstr(instr, "trace_path") != NULL);
     ASSERT(strstr(instr, "get_code_snippet") != NULL);
+    ASSERT(strstr(instr, "get_document") != NULL);
+    ASSERT(strstr(instr, "get_related_documents") != NULL);
+    ASSERT(strstr(instr, "include_docs=false") != NULL);
+    ASSERT(strstr(instr, "references_truncated") != NULL);
     ASSERT(strstr(instr, "Scout (Tier 1)") != NULL);
     ASSERT(strstr(instr, "Verify (Tier 2, default)") != NULL);
     ASSERT(strstr(instr, "Auditor (Tier 3)") != NULL);

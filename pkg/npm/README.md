@@ -51,7 +51,13 @@ codebase-memory-mcp cli get_architecture '{"project":"my-project"}'
 
 ## MCP 工具
 
-当前二进制提供 17 个工具，分为索引/项目管理、图谱搜索、任务上下文编译、调用链、源码读取、架构和影响分析、覆盖度检查、Cypher、ADR 与运行时 trace。完整参数和覆盖度边界见仓库 [README.md](https://github.com/ycsx/codebase-memory-mcp/blob/main/README.md)。
+当前工作区源码定义 20 个工具（`all` 档位），其中 `analysis` 为 16 个、`scout` 为 10 个；启用权限控制后实际可见工具可能更少。工具包括索引/项目管理、图谱搜索、任务上下文编译、调用链、源码读取、架构和影响分析、覆盖度检查、Cypher、ADR、运行时 trace，以及 Markdown 文档与代码的双向引用查询。
+
+`get_document` 返回文档到代码的引用和行号证据；`get_related_documents` 从文件或完整限定名符号反查文档。`build_context`、`explain_impact` 和 `review_change` 可按需返回有数量与预算限制的相关文档证据。空结果不代表不存在相关文档，显式引用也不代表语义理解或完整覆盖。
+
+这些描述对应工作区源码，不保证当前 npm 下载的 Release 已包含本轮功能。本轮未核验发布资产；使用包含改动的构建、重启 MCP/AI 客户端，并对已有项目重新索引后再验证。无需部署 HTTP 服务。
+
+完整参数见仓库 [README.md](https://github.com/ycsx/codebase-memory-mcp/blob/main/README.md)，升级和查询示例见[文档引用使用指引](https://github.com/ycsx/codebase-memory-mcp/blob/main/docs/DOCUMENT_REFERENCES.md)。
 
 ## 许可证
 

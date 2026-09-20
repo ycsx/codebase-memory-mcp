@@ -187,6 +187,9 @@ extern void suite_discover(void);
 extern void suite_graph_buffer(void);
 extern void suite_registry(void);
 extern void suite_pipeline(void);
+extern void suite_document_links(void);
+extern void suite_document_refs(void);
+extern void suite_context_documents(void);
 extern void suite_index_resilience(void);
 extern void suite_fqn(void);
 extern void suite_route_canon(void);
@@ -350,6 +353,9 @@ int main(int argc, char **argv) {
     /* Pipeline (M8) */
     RUN_SELECTED_SUITE(registry);
     RUN_SELECTED_SUITE(pipeline);
+    RUN_SELECTED_SUITE(document_links);
+    RUN_SELECTED_SUITE(document_refs);
+    RUN_SELECTED_SUITE(context_documents);
     RUN_SELECTED_SUITE(index_resilience);
     RUN_SELECTED_SUITE(fqn);
     RUN_SELECTED_SUITE(route_canon);

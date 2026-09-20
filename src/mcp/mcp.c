@@ -59,6 +59,7 @@ enum {
 #include "mcp/compact_out.h"
 #include "mcp/usage_stats.h"
 #include "context/build_context.h"
+#include "context/document_refs.h"
 #include "foundation/str_util.h"
 #include "foundation/workspace.h"
 #include "foundation/dump_verify.h"
@@ -489,6 +490,8 @@ static const tool_def_t TOOLS[] = {
      "\"target\":{\"type\":\"string\",\"description\":\"Optional exact candidate key "
      "returned by a previous call. File keys start with file:; symbol keys are qualified names.\"},"
      "\"depth\":{\"type\":\"integer\",\"default\":2,\"minimum\":1},"
+     "\"include_docs\":{\"type\":\"boolean\",\"default\":false},"
+     "\"document_limit\":{\"type\":\"integer\",\"default\":20,\"minimum\":1,\"maximum\":100},"
      "\"limit\":{\"type\":\"integer\",\"default\":300,\"minimum\":1,\"maximum\":2000}"
      "},\"required\":[\"project\",\"query\"]}"},
 
@@ -591,11 +594,23 @@ static const tool_def_t TOOLS[] = {
      "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
 
     {"get_document", "Get document",
-     "Get an indexed Markdown document and its heading sections. Select by repository-relative "
-     "path or document name.",
+     "Get an indexed Markdown document, its heading sections, and up to 100 explicit code "
+     "references with evidence. references_truncated indicates omitted references; "
+     "reference_analysis reports indexing status and scope. Select by "
+     "repository-relative path or document name.",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"path\":{\"type\":"
      "\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"project\"],\"anyOf\":[{"
      "\"required\":[\"path\"]},{\"required\":[\"name\"]}]}"},
+
+    {"get_related_documents", "Get related documents",
+     "Find indexed Markdown documents and sections explicitly referencing an exact code symbol "
+     "or file. target must be a full qualified name or file:repository/relative/path; file targets "
+     "include symbols in that file. Returns deterministic references with source locations and "
+     "matching evidence, total/returned/truncated and best-effort document analysis status. "
+     "No short-name guessing; an empty result is not proof of complete documentation coverage.",
+     "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+     "\"target\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\",\"default\":20,"
+     "\"minimum\":1,\"maximum\":100}},\"required\":[\"project\",\"target\"]}"},
 
     {"list_projects", "List projects", "List all indexed projects",
      "{\"type\":\"object\",\"properties\":{}}"},
@@ -684,6 +699,7 @@ static const tool_annotation_def_t TOOL_ANNOTATIONS[] = {
     {"get_architecture", true, false, true, false},
     {"search_code", true, false, true, false},
     {"get_document", true, false, true, false},
+    {"get_related_documents", true, false, true, false},
     {"list_projects", true, false, true, false},
     {"delete_project", false, true, true, false},
     {"index_status", true, false, true, false},
@@ -740,12 +756,13 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         "search_graph",         "query_graph",    "trace_path",       "explain_impact",
         "build_context",        "review_change",  "get_code_snippet", "get_graph_schema",
         "get_architecture",     "search_code",    "list_projects",    "index_status",
-        "check_index_coverage", "detect_changes", "get_document",
+        "check_index_coverage", "detect_changes", "get_document",     "get_related_documents",
     };
     static const char *const scout_tools[] = {
-        "search_graph",     "trace_path",           "explain_impact",
-        "get_code_snippet", "get_architecture",     "list_projects",
-        "index_status",     "check_index_coverage", "get_document",
+        "search_graph",          "trace_path",           "explain_impact",
+        "get_code_snippet",      "get_architecture",     "list_projects",
+        "index_status",          "check_index_coverage", "get_document",
+        "get_related_documents",
     };
     if (!name) {
         return false;
@@ -775,8 +792,9 @@ static bool mcp_authz_tool_allowed(const cbm_mcp_authz_t *authz, const char *nam
         return true;
     }
     if (strcmp(name, "get_code_snippet") == 0 || strcmp(name, "search_code") == 0 ||
-        strcmp(name, "get_document") == 0 || strcmp(name, "build_context") == 0 ||
-        strcmp(name, "review_change") == 0 || strcmp(name, "detect_changes") == 0) {
+        strcmp(name, "get_document") == 0 || strcmp(name, "get_related_documents") == 0 ||
+        strcmp(name, "build_context") == 0 || strcmp(name, "review_change") == 0 ||
+        strcmp(name, "detect_changes") == 0) {
         return authz->source_read;
     }
     if (strcmp(name, "index_repository") == 0 || strcmp(name, "ingest_traces") == 0 ||
@@ -6269,10 +6287,60 @@ static const char *impact_risk_code(cbm_risk_level_t risk) {
     }
 }
 
+/* Documentation evidence is a separate channel, never an inbound dependency. */
+static bool add_related_documentation(cbm_store_t *store, const char *project,
+                                      const cbm_node_t *targets, int target_count, int limit,
+                                      int token_budget, yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                      bool *was_truncated) {
+    char *json = cbm_document_refs_json(store, project, targets, target_count, limit);
+    yyjson_doc *parsed = json ? yyjson_read(json, strlen(json), 0) : NULL;
+    free(json);
+    if (!parsed) {
+        return false;
+    }
+    yyjson_val *payload = yyjson_doc_get_root(parsed);
+    yyjson_mut_val *copy = yyjson_val_mut_copy(doc, payload);
+    yyjson_mut_val *references = copy ? yyjson_mut_obj_get(copy, "references") : NULL;
+    bool budget_truncated = false;
+    int estimated_tokens = 0;
+    size_t index, max;
+    yyjson_val *item;
+    yyjson_arr_foreach(yyjson_obj_get(payload, "references"), index, max, item) {
+        size_t length = 0;
+        char *encoded = yyjson_val_write(item, 0, &length);
+        if (!encoded) {
+            yyjson_doc_free(parsed);
+            return false;
+        }
+        free(encoded);
+        int cost = length > 128000U ? 32001 : (int)((length + 3U) / 4U);
+        if (token_budget >= 0 && cost > token_budget - estimated_tokens) {
+            budget_truncated = true;
+            yyjson_mut_arr_remove_range(references, index, max - index);
+            break;
+        }
+        estimated_tokens += cost;
+    }
+    bool truncated = budget_truncated || yyjson_get_bool(yyjson_obj_get(payload, "truncated"));
+    bool ok = copy && references &&
+              yyjson_mut_obj_put(copy, yyjson_mut_str(doc, "returned"),
+                                 yyjson_mut_uint(doc, yyjson_mut_arr_size(references))) &&
+              yyjson_mut_obj_put(copy, yyjson_mut_str(doc, "truncated"),
+                                 yyjson_mut_bool(doc, truncated)) &&
+              yyjson_mut_obj_add_bool(doc, copy, "budget_truncated", budget_truncated) &&
+              yyjson_mut_obj_add_int(doc, copy, "estimated_tokens", estimated_tokens) &&
+              yyjson_mut_obj_add_val(doc, root, "related_documentation", copy);
+    if (was_truncated) {
+        *was_truncated = truncated;
+    }
+    yyjson_doc_free(parsed);
+    return ok;
+}
+
 static char *impact_analysis_result(cbm_store_t *store, const char *query, const char *target_key,
                                     const char *target_type, const cbm_node_t *roots,
-                                    int root_count, int depth, int limit,
-                                    const cbm_mcp_authz_t *authz) {
+                                    int root_count, int depth, int limit, bool include_docs,
+                                    int document_limit, const cbm_mcp_authz_t *authz) {
     cbm_traverse_result_t traversal = {0};
     bool truncated = false;
     impact_bfs_union(store, roots, root_count, depth, limit, &traversal, &truncated);
@@ -6518,7 +6586,10 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
     }
     yyjson_mut_obj_add_val(doc, root, "limitations", limitations);
 
-    char *json = yy_doc_to_str(doc);
+    bool docs_ok =
+        !include_docs || add_related_documentation(store, roots[0].project, roots, root_count,
+                                                   document_limit, -1, doc, root, NULL);
+    char *json = docs_ok ? yy_doc_to_str(doc) : NULL;
     yyjson_mut_doc_free(doc);
     cbm_store_traverse_free(&traversal);
     federated_evidence_array_free(cross_impacts, cross_impact_count);
@@ -6528,8 +6599,8 @@ static char *impact_analysis_result(cbm_store_t *store, const char *query, const
 }
 
 static char *impact_analyze_target(cbm_store_t *store, const char *project, const char *query,
-                                   const char *target, int depth, int limit,
-                                   const cbm_mcp_authz_t *authz) {
+                                   const char *target, int depth, int limit, bool include_docs,
+                                   int document_limit, const cbm_mcp_authz_t *authz) {
     if (strncmp(target, "file:", strlen("file:")) == 0) {
         char *file_path = impact_normalize_path(target + strlen("file:"));
         if (!file_path) {
@@ -6552,8 +6623,9 @@ static char *impact_analyze_target(cbm_store_t *store, const char *project, cons
             return cbm_mcp_text_result("out of memory", true);
         }
         snprintf(normalized_target, key_len, "file:%s", file_path);
-        char *result = impact_analysis_result(store, query, normalized_target, "file", roots,
-                                              root_count, depth, limit, authz);
+        char *result =
+            impact_analysis_result(store, query, normalized_target, "file", roots, root_count,
+                                   depth, limit, include_docs, document_limit, authz);
         free(normalized_target);
         cbm_store_free_nodes(roots, root_count);
         free(file_path);
@@ -6565,8 +6637,8 @@ static char *impact_analyze_target(cbm_store_t *store, const char *project, cons
         impact_candidate_t *none = NULL;
         return impact_candidates_result(query, none, 0);
     }
-    char *result =
-        impact_analysis_result(store, query, target, "symbol", &node, 1, depth, limit, authz);
+    char *result = impact_analysis_result(store, query, target, "symbol", &node, 1, depth, limit,
+                                          include_docs, document_limit, authz);
     free_node_contents(&node);
     return result;
 }
@@ -6586,6 +6658,14 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     char *target = cbm_mcp_get_string_arg(args, "target");
     int depth = cbm_mcp_get_int_arg(args, "depth", 2);
     int limit = cbm_mcp_get_int_arg(args, "limit", IMPACT_DEFAULT_LIMIT);
+    bool include_docs = cbm_mcp_get_bool_arg(args, "include_docs") &&
+                        (!srv->authz.enabled || srv->authz.source_read);
+    int document_limit = cbm_mcp_get_int_arg(args, "document_limit", 20);
+    if (document_limit < 1) {
+        document_limit = 1;
+    } else if (document_limit > 100) {
+        document_limit = 100;
+    }
     if (!query || !query[0]) {
         free(project);
         free(query);
@@ -6609,8 +6689,8 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     }
 
     if (target && target[0]) {
-        char *result =
-            impact_analyze_target(store, project, query, target, depth, limit, &srv->authz);
+        char *result = impact_analyze_target(store, project, query, target, depth, limit,
+                                             include_docs, document_limit, &srv->authz);
         free(project);
         free(query);
         free(target);
@@ -6619,8 +6699,9 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
 
     cbm_node_t exact_qn = {0};
     if (cbm_store_find_node_by_qn(store, project, query, &exact_qn) == CBM_STORE_OK) {
-        char *result = impact_analysis_result(store, query, exact_qn.qualified_name, "symbol",
-                                              &exact_qn, 1, depth, limit, &srv->authz);
+        char *result =
+            impact_analysis_result(store, query, exact_qn.qualified_name, "symbol", &exact_qn, 1,
+                                   depth, limit, include_docs, document_limit, &srv->authz);
         free_node_contents(&exact_qn);
         free(project);
         free(query);
@@ -6650,8 +6731,9 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
             return cbm_mcp_text_result("out of memory", true);
         }
         snprintf(file_key, key_len, "file:%s", normalized_query);
-        char *result = impact_analysis_result(store, query, file_key, "file", file_nodes,
-                                              file_node_count, depth, limit, &srv->authz);
+        char *result =
+            impact_analysis_result(store, query, file_key, "file", file_nodes, file_node_count,
+                                   depth, limit, include_docs, document_limit, &srv->authz);
         free(file_key);
         cbm_store_free_nodes(file_nodes, file_node_count);
         free(normalized_query);
@@ -6666,8 +6748,9 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     int name_node_count = 0;
     cbm_store_find_nodes_by_name(store, project, query, &name_nodes, &name_node_count);
     if (name_node_count == 1 && !impact_label_is_documentation(name_nodes[0].label)) {
-        char *result = impact_analysis_result(store, query, name_nodes[0].qualified_name, "symbol",
-                                              name_nodes, 1, depth, limit, &srv->authz);
+        char *result =
+            impact_analysis_result(store, query, name_nodes[0].qualified_name, "symbol", name_nodes,
+                                   1, depth, limit, include_docs, document_limit, &srv->authz);
         cbm_store_free_nodes(name_nodes, name_node_count);
         free(normalized_query);
         free(project);
@@ -6722,7 +6805,7 @@ static char *handle_explain_impact(cbm_mcp_server_t *srv, const char *args) {
     char *result = NULL;
     if (candidate_count == 1) {
         result = impact_analyze_target(store, project, query, candidates[0].key, depth, limit,
-                                       &srv->authz);
+                                       include_docs, document_limit, &srv->authz);
     } else {
         result = impact_candidates_result(query, candidates, candidate_count);
     }
@@ -10864,7 +10947,55 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
         review_add_rule(doc, rules_out, "change.coverage", "pass", "没有记录到已知覆盖缺口。");
     }
     yyjson_mut_obj_add_str(doc, root, "status", status);
-    const char *reasons[1] = {"impact_budget"};
+    if (include_docs && !detect_error && store) {
+        cbm_node_t *document_targets = NULL;
+        int document_target_count = 0;
+        for (int i = 0; i < changed_path_count && json_ok; i++) {
+            cbm_node_t *nodes = NULL;
+            int count = 0;
+            if (cbm_store_find_nodes_by_file(store, project, changed_paths[i], &nodes, &count) !=
+                CBM_STORE_OK) {
+                cbm_store_free_nodes(nodes, count);
+                json_ok = false;
+                break;
+            }
+            if (count > 0) {
+                cbm_node_t *grown =
+                    realloc(document_targets,
+                            ((size_t)document_target_count + (size_t)count) * sizeof(*grown));
+                if (!grown) {
+                    cbm_store_free_nodes(nodes, count);
+                    json_ok = false;
+                    break;
+                }
+                document_targets = grown;
+                memcpy(document_targets + document_target_count, nodes,
+                       (size_t)count * sizeof(*nodes));
+                document_target_count += count;
+            }
+            free(nodes);
+        }
+        size_t used_bytes = 0;
+        char *current_json = yyjson_mut_write(doc, 0, &used_bytes);
+        bool docs_truncated = false;
+        /* Reserve room for analysis metadata and the reference status envelope.
+         * This remains an estimate, not a tokenizer-specific response size guarantee. */
+        int remaining = used_bytes / 4U + 1024U >= (size_t)token_budget
+                            ? 0
+                            : token_budget - (int)((used_bytes + 3U) / 4U) - 1024;
+        json_ok = json_ok && current_json &&
+                  add_related_documentation(store, project, document_targets, document_target_count,
+                                            20, remaining, doc, root, &docs_truncated);
+        free(current_json);
+        cbm_store_free_nodes(document_targets, document_target_count);
+        impact_truncated = impact_truncated || docs_truncated;
+        if (docs_truncated) {
+            yyjson_mut_arr_add_str(doc, limitation_arr,
+                                   "Related documentation evidence was trimmed by result limits "
+                                   "or the estimated remaining token budget.");
+        }
+    }
+    const char *reasons[1] = {"result_budget"};
     cbm_analysis_meta_input_t analysis_input = {
         .tool = "review_change",
         .profile = strcmp(evidence_level, "scout") == 0 ? "scout" : "analysis",
@@ -10918,7 +11049,7 @@ static char *handle_review_change(cbm_mcp_server_t *srv, const char *args) {
     free(project);
     free(evidence_level);
 
-    char *json = yy_doc_to_str(doc);
+    char *json = json_ok ? yy_doc_to_str(doc) : NULL;
     yyjson_mut_doc_free(doc);
     if (!json) {
         return cbm_mcp_text_result("failed to serialize review", true);
@@ -10960,7 +11091,195 @@ static int compare_document_sections(const void *left, const void *right) {
     return strcmp(a->qualified_name, b->qualified_name);
 }
 
+#define DOCUMENT_REFERENCE_LIMIT 100
+
+typedef struct {
+    cbm_node_t target;
+    const char *source_qn;
+    char *properties;
+    int64_t line;
+    int64_t edge_id;
+} document_reference_t;
+
+static int compare_document_references(const void *left, const void *right) {
+    const document_reference_t *a = left;
+    const document_reference_t *b = right;
+    if (a->line != b->line) {
+        return a->line < b->line ? -1 : 1;
+    }
+    int order = strcmp(a->target.qualified_name ? a->target.qualified_name : "",
+                       b->target.qualified_name ? b->target.qualified_name : "");
+    if (!order) {
+        order = strcmp(a->source_qn, b->source_qn);
+    }
+    return order ? order : (a->edge_id > b->edge_id) - (a->edge_id < b->edge_id);
+}
+
+static void free_document_reference(document_reference_t *reference) {
+    cbm_node_free_fields(&reference->target);
+    free(reference->properties);
+}
+
+static const char *add_document_references(cbm_store_t *store, const cbm_node_t *document,
+                                           const cbm_node_t *sections, int section_count,
+                                           yyjson_mut_doc *ydoc, yyjson_mut_val *root) {
+    document_reference_t references[DOCUMENT_REFERENCE_LIMIT] = {0};
+    int count = 0;
+    bool truncated = false;
+    const char *error = NULL;
+    for (int source_index = -1; source_index < section_count && !error; source_index++) {
+        const cbm_node_t *source = source_index < 0 ? document : &sections[source_index];
+        cbm_edge_t *edges = NULL;
+        int edge_count = 0;
+        if (cbm_store_find_edges_by_source_type(store, source->id, "REFERENCES", &edges,
+                                                &edge_count) != CBM_STORE_OK) {
+            cbm_store_free_edges(edges, edge_count);
+            error = "could not read document references";
+            break;
+        }
+        for (int i = 0; i < edge_count && !error; i++) {
+            document_reference_t reference = {
+                .source_qn = source->qualified_name ? source->qualified_name : "",
+                .edge_id = edges[i].id};
+            if (cbm_store_find_node_by_id(store, edges[i].target_id, &reference.target) !=
+                CBM_STORE_OK) {
+                error = "could not read document reference target";
+                break;
+            }
+            reference.properties =
+                strdup(edges[i].properties_json ? edges[i].properties_json : "{}");
+            yyjson_doc *properties =
+                reference.properties
+                    ? yyjson_read(reference.properties, strlen(reference.properties), 0)
+                    : NULL;
+            if (!properties) {
+                error =
+                    reference.properties ? "invalid document reference evidence" : "out of memory";
+                free_document_reference(&reference);
+                break;
+            }
+            reference.line = yyjson_get_sint(yyjson_obj_get(
+                yyjson_obj_get(yyjson_doc_get_root(properties), "document_span"), "start_line"));
+            yyjson_doc_free(properties);
+            /* Keep only the earliest references, independent of SQLite edge ordering. */
+            if (count == DOCUMENT_REFERENCE_LIMIT) {
+                truncated = true;
+                if (compare_document_references(&reference, &references[count - 1]) >= 0) {
+                    free_document_reference(&reference);
+                    continue;
+                }
+                free_document_reference(&references[--count]);
+            }
+            references[count++] = reference;
+            qsort(references, (size_t)count, sizeof(*references), compare_document_references);
+        }
+        cbm_store_free_edges(edges, edge_count);
+    }
+    yyjson_mut_val *array = !error ? yyjson_mut_arr(ydoc) : NULL;
+    if (!error && !array) {
+        error = "out of memory";
+    }
+    for (int i = 0; i < count && !error; i++) {
+        const document_reference_t *reference = &references[i];
+        const cbm_node_t *node = &reference->target;
+        yyjson_mut_val *item = yyjson_mut_obj(ydoc);
+        yyjson_mut_val *target = yyjson_mut_obj(ydoc);
+        yyjson_doc *properties =
+            yyjson_read(reference->properties, strlen(reference->properties), 0);
+        yyjson_mut_val *evidence =
+            properties ? yyjson_val_mut_copy(ydoc, yyjson_doc_get_root(properties)) : NULL;
+        bool ok = item && target && evidence;
+        ok = ok &&
+             yyjson_mut_obj_add_strcpy(ydoc, item, "source_qualified_name", reference->source_qn);
+        ok = ok && yyjson_mut_obj_add_int(ydoc, target, "id", node->id);
+        ok = ok && yyjson_mut_obj_add_strcpy(ydoc, target, "label", node->label ? node->label : "");
+        ok = ok && yyjson_mut_obj_add_strcpy(ydoc, target, "name", node->name ? node->name : "");
+        ok = ok && yyjson_mut_obj_add_strcpy(ydoc, target, "qualified_name",
+                                             node->qualified_name ? node->qualified_name : "");
+        ok = ok && yyjson_mut_obj_add_strcpy(ydoc, target, "file_path",
+                                             node->file_path ? node->file_path : "");
+        ok = ok && yyjson_mut_obj_add_int(ydoc, target, "start_line", node->start_line);
+        ok = ok && yyjson_mut_obj_add_int(ydoc, target, "end_line", node->end_line);
+        ok = ok && yyjson_mut_obj_add_val(ydoc, item, "target", target);
+        ok = ok && yyjson_mut_obj_add_val(ydoc, item, "properties", evidence);
+        ok = ok && yyjson_mut_arr_add_val(array, item);
+        if (properties) {
+            yyjson_doc_free(properties);
+        }
+        if (!ok) {
+            error = "out of memory";
+        }
+    }
+    if (!error && (!yyjson_mut_obj_add_val(ydoc, root, "references", array) ||
+                   !yyjson_mut_obj_add_bool(ydoc, root, "references_truncated", truncated))) {
+        error = "out of memory";
+    }
+    for (int i = 0; i < count; i++) {
+        free_document_reference(&references[i]);
+    }
+    return error;
+}
+
 /* Return a Markdown document node and its ordered heading sections. */
+static char *handle_get_related_documents(cbm_mcp_server_t *srv, const char *args) {
+    char *project = get_project_arg(args);
+    cbm_store_t *store = resolve_store(srv, project);
+    REQUIRE_STORE(store, project);
+    char *not_indexed = verify_project_indexed(store, project);
+    if (not_indexed) {
+        free(project);
+        return not_indexed;
+    }
+    char *target = cbm_mcp_get_string_arg(args, "target");
+    int limit = cbm_mcp_get_int_arg(args, "limit", 20);
+    if (!target || !target[0] || limit < 1 || limit > 100) {
+        free(project);
+        free(target);
+        return cbm_mcp_text_result("target is required; limit must be between 1 and 100", true);
+    }
+    cbm_node_t *targets = NULL;
+    int count = 0;
+    int rc = CBM_STORE_OK;
+    if (strncmp(target, "file:", 5) == 0) {
+        char *path = impact_normalize_path(target + 5);
+        if (!path || !path[0]) {
+            free(path);
+            free(project);
+            free(target);
+            return cbm_mcp_text_result("file target must have a repository-relative path", true);
+        }
+        rc = cbm_store_find_nodes_by_file(store, project, path, &targets, &count);
+        free(path);
+    } else {
+        targets = calloc(1, sizeof(*targets));
+        if (!targets) {
+            free(project);
+            free(target);
+            return cbm_mcp_text_result("out of memory", true);
+        }
+        rc = cbm_store_find_node_by_qn(store, project, target, targets);
+        if (rc == CBM_STORE_OK) {
+            count = 1;
+        }
+    }
+    char *json = count > 0 && rc == CBM_STORE_OK
+                     ? cbm_document_refs_json(store, project, targets, count, limit)
+                     : NULL;
+    char *result =
+        json ? cbm_mcp_text_result(json, false)
+             : cbm_mcp_text_result(rc != CBM_STORE_OK && rc != CBM_STORE_NOT_FOUND
+                                       ? "could not resolve document reference target"
+                                   : count == 0 ? "target not found; use an exact qualified "
+                                                  "name or file:repository/relative/path"
+                                                : "could not read document references",
+                                   true);
+    free(json);
+    cbm_store_free_nodes(targets, count);
+    free(target);
+    free(project);
+    return result;
+}
+
 static char *handle_get_document(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
@@ -11023,6 +11342,7 @@ static char *handle_get_document(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_val *root = ydoc ? yyjson_mut_obj(ydoc) : NULL;
     yyjson_mut_val *sections = NULL;
     char *json = NULL;
+    const char *reference_error = NULL;
     bool json_oom = ydoc == NULL || root == NULL;
     if (!json_oom) {
         yyjson_mut_doc_set_root(ydoc, root);
@@ -11030,6 +11350,23 @@ static char *handle_get_document(cbm_mcp_server_t *srv, const char *args) {
         root_ok = root_ok &&
                   yyjson_mut_obj_add_str(ydoc, root, "path", doc->file_path ? doc->file_path : "");
         root_ok = root_ok && yyjson_mut_obj_add_str(ydoc, root, "name", doc->name ? doc->name : "");
+        yyjson_doc *properties = doc->properties_json ? yyjson_read(doc->properties_json,
+                                                                    strlen(doc->properties_json), 0)
+                                                      : NULL;
+        yyjson_val *analysis =
+            properties ? yyjson_obj_get(yyjson_doc_get_root(properties), "document_links") : NULL;
+        yyjson_mut_val *analysis_copy =
+            yyjson_is_obj(analysis) ? yyjson_val_mut_copy(ydoc, analysis) : yyjson_mut_obj(ydoc);
+        root_ok = root_ok && analysis_copy != NULL;
+        if (root_ok && !yyjson_is_obj(analysis)) {
+            root_ok = yyjson_mut_obj_add_str(ydoc, analysis_copy, "status", "unknown") &&
+                      yyjson_mut_obj_add_str(ydoc, analysis_copy, "reason", "reindex_required");
+        }
+        root_ok =
+            root_ok && yyjson_mut_obj_add_val(ydoc, root, "reference_analysis", analysis_copy);
+        if (properties) {
+            yyjson_doc_free(properties);
+        }
         sections = yyjson_mut_arr(ydoc);
         json_oom = !root_ok || sections == NULL;
     }
@@ -11074,8 +11411,12 @@ static char *handle_get_document(cbm_mcp_server_t *srv, const char *args) {
     if (!json_oom) {
         json_oom = !yyjson_mut_obj_add_val(ydoc, root, "sections", sections);
         if (!json_oom) {
-            json = yy_doc_to_str(ydoc);
-            json_oom = json == NULL;
+            reference_error =
+                add_document_references(store, doc, sections_found, section_count, ydoc, root);
+            if (!reference_error) {
+                json = yy_doc_to_str(ydoc);
+                json_oom = json == NULL;
+            }
         }
     }
     if (ydoc) {
@@ -11090,7 +11431,9 @@ static char *handle_get_document(cbm_mcp_server_t *srv, const char *args) {
     free(project);
     free(path);
     free(name);
-    char *result = cbm_mcp_text_result(json_oom ? "out of memory" : json, json_oom);
+    char *result =
+        cbm_mcp_text_result(reference_error ? reference_error : (json_oom ? "out of memory" : json),
+                            json_oom || reference_error != NULL);
     free(json);
     return result;
 }
@@ -11167,6 +11510,9 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "get_document") == 0) {
         return handle_get_document(srv, args_json);
+    }
+    if (strcmp(tool_name, "get_related_documents") == 0) {
+        return handle_get_related_documents(srv, args_json);
     }
     if (strcmp(tool_name, "detect_changes") == 0) {
         return handle_detect_changes(srv, args_json);

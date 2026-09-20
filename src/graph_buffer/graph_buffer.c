@@ -1168,6 +1168,27 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type) {
     return 0;
 }
 
+int cbm_gbuf_delete_edges_if(cbm_gbuf_t *gb, cbm_gbuf_edge_predicate_fn predicate, void *userdata) {
+    if (!gb || !predicate) {
+        return CBM_NOT_FOUND;
+    }
+    int write_idx = 0;
+    int deleted = 0;
+    for (int i = 0; i < gb->edges.count; i++) {
+        cbm_gbuf_edge_t *edge = gb->edges.items[i];
+        if (predicate(edge, userdata)) {
+            unindex_edge(gb, edge);
+            free_edge_strings(edge);
+            free(edge);
+            deleted++;
+        } else {
+            gb->edges.items[write_idx++] = edge;
+        }
+    }
+    gb->edges.count = write_idx;
+    return deleted;
+}
+
 /* ── Merge ───────────────────────────────────────────────────────── */
 
 /* Free remap hash table entries (key = heap string, value = heap int64_t*) */
