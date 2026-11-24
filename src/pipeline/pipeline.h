@@ -208,6 +208,9 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
 /* Resolve a callee name using prioritized strategies.
  * import_map: NULL-terminated array of {local_name, resolved_qn} pairs, or NULL.
  * Returns result with qualified_name="" if unresolved. */
+/* A binding with no local ES target suppresses name-only resolution. */
+#define CBM_UNRESOLVED_ES_IMPORT "\x01unresolved-es-import"
+
 cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *callee_name,
                                       const char *module_qn, const char **import_map_keys,
                                       const char **import_map_vals, int import_map_count);

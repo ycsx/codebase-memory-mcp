@@ -13,7 +13,6 @@
 #include "foundation/constants.h"
 
 enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, PL_WAL_BUF = 1040 };
-#define PL_NSEC_PER_SEC 1000000000LL
 #include "pipeline/pipeline.h"
 #include "pipeline/artifact.h"
 #include "pipeline/pipeline_internal.h"
@@ -41,7 +40,6 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, P
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
-#include <sys/stat.h>
 #include <time.h>
 
 static inline void *intptr_to_ptr(intptr_t v) {
@@ -1119,8 +1117,8 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     if (!db_path) {
         return CBM_NOT_FOUND;
     }
-    struct stat db_st;
-    if (stat(db_path, &db_st) != 0) {
+    cbm_file_stat_t db_st;
+    if (cbm_stat_utf8(db_path, &db_st) != 0) {
         free(db_path);
         return CBM_NOT_FOUND;
     }
@@ -1171,18 +1169,6 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     cbm_unlink(shm);
     free(db_path);
     return CBM_NOT_FOUND;
-}
-
-/* Get platform-specific mtime in nanoseconds. */
-static int64_t stat_mtime_ns(const struct stat *fst) {
-#ifdef __APPLE__
-    return ((int64_t)fst->st_mtimespec.tv_sec * PL_NSEC_PER_SEC) +
-           (int64_t)fst->st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    return (int64_t)fst->st_mtime * 1000000000LL;
-#else
-    return ((int64_t)fst->st_mtim.tv_sec * PL_NSEC_PER_SEC) + (int64_t)fst->st_mtim.tv_nsec;
-#endif
 }
 
 static const char *pipeline_mode_name(cbm_index_mode_t mode) {
@@ -1266,13 +1252,13 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         if (fhashes) {
             int fh_n = 0;
             for (int i = 0; i < file_count; i++) {
-                struct stat fst;
-                if (stat(files[i].path, &fst) == 0) {
+                cbm_file_stat_t fst;
+                if (cbm_stat_utf8(files[i].path, &fst) == 0) {
                     fhashes[fh_n].project = p->project_name;
                     fhashes[fh_n].rel_path = files[i].rel_path;
                     fhashes[fh_n].sha256 = "";
-                    fhashes[fh_n].mtime_ns = stat_mtime_ns(&fst);
-                    fhashes[fh_n].size = fst.st_size;
+                    fhashes[fh_n].mtime_ns = fst.mtime_ns;
+                    fhashes[fh_n].size = fst.size;
                     fh_n++;
                 } else {
                     hash_records_complete = false;
@@ -1287,11 +1273,10 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         } else {
             /* OOM fallback: the original per-file path (identical result, slower). */
             for (int i = 0; i < file_count; i++) {
-                struct stat fst;
-                if (stat(files[i].path, &fst) == 0) {
+                cbm_file_stat_t fst;
+                if (cbm_stat_utf8(files[i].path, &fst) == 0) {
                     if (cbm_store_upsert_file_hash(hash_store, p->project_name, files[i].rel_path,
-                                                   "", stat_mtime_ns(&fst),
-                                                   fst.st_size) != CBM_STORE_OK) {
+                                                   "", fst.mtime_ns, fst.size) != CBM_STORE_OK) {
                         hash_records_complete = false;
                     }
                 } else {

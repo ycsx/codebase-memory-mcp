@@ -581,8 +581,9 @@ static const tool_def_t TOOLS[] = {
      "count) — compare to limit to detect truncation. There is no offset parameter; to see "
      "more, raise limit or narrow the query with file_pattern / path_filter.",
      "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"project\":{\"type\":"
-     "\"string\"},\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob for grep "
-     "--include (e.g. *.go)\"},\"path_filter\":{\"type\":\"string\",\"description\":\"Regex "
+     "\"string\"},\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob on file name; with "
+     "'/', on repo-relative "
+     "path (** = any dirs)\"},\"path_filter\":{\"type\":\"string\",\"description\":\"Regex "
      "filter on result file paths (e.g. ^src/ or \\\\.(go|ts)$)\"},\"mode\":{\"type\":\"string\","
      "\"enum\":[\"compact\",\"full\",\"files\"],\"default\":\"compact\",\"description\":\"compact: "
      "signatures+metadata (default). full: with source. files: just file list.\"},"
@@ -8636,6 +8637,47 @@ static int search_result_cmp(const void *a, const void *b) {
     return rb->score - ra->score; /* descending */
 }
 
+#define SEARCH_CODE_PATH_HINT                                                            \
+    "no results; a file_pattern with '/' must match the whole repo-relative path (e.g. " \
+    "src/**/*.c); to scope by folder you can also use path_filter (regex on the "        \
+    "repo-relative path, e.g. ^src/cli/)"
+
+/* A file_pattern containing '/' is matched against the whole repo-relative path, like
+ * search_graph's file_pattern: '*' and '**' match any run of characters including '/', a
+ * '**' followed by '/' also matches zero directories, '?' matches one character, and a
+ * pattern without wildcards is a substring match. Portable (no fnmatch on Windows); every '*' is
+ * equivalent, so one backtrack point suffices. */
+static bool search_code_path_glob_match(const char *pat, const char *path) {
+    if (!strpbrk(pat, "*?")) {
+        return strstr(path, pat) != NULL;
+    }
+    const char *star_pat = NULL;
+    const char *star_path = NULL;
+    for (;;) {
+        if (*pat == '*') {
+            const char *run = pat;
+            while (*pat == '*') {
+                pat++;
+            }
+            if (pat - run > SKIP_ONE && *pat == '/') {
+                pat++;
+            }
+            star_pat = pat;
+            star_path = path;
+        } else if (*path && (*pat == '?' || *pat == *path)) {
+            pat++;
+            path++;
+        } else if (!*pat && !*path) {
+            return true;
+        } else if (star_pat && *star_path) {
+            pat = star_pat;
+            path = ++star_path;
+        } else {
+            return false;
+        }
+    }
+}
+
 /* Build the grep/search command string based on scoped vs recursive mode.
  * On Windows, uses PowerShell Select-String with tab-delimited output.
  * On POSIX, uses grep with colon-delimited output. */
@@ -8877,7 +8919,8 @@ static yyjson_mut_val *build_dir_distribution(yyjson_mut_doc *doc, search_result
  * distribution table, and the summary scalars. */
 static char *assemble_search_output_toon(search_result_t *sr, int sr_count, grep_match_t *raw,
                                          int raw_count, int gm_count, int limit,
-                                         bool warn_literal_pipe, uint64_t elapsed_ms) {
+                                         bool warn_literal_pipe, uint64_t elapsed_ms,
+                                         bool hint_path_filter) {
     enum { MAX_RAW = 20, SEARCH_SLOW_MS = 5000 };
     cbm_sb_t sb;
     cbm_sb_init(&sb);
@@ -8959,6 +9002,9 @@ static char *assemble_search_output_toon(search_result_t *sr, int sr_count, grep
                             "search was slow; narrow file_pattern/path_filter or use a more "
                             "specific pattern");
     }
+    if (hint_path_filter) {
+        cbm_toon_scalar_str(&sb, "hint", SEARCH_CODE_PATH_HINT);
+    }
     return cbm_sb_finish(&sb);
 }
 
@@ -8966,7 +9012,8 @@ static char *assemble_search_output_toon(search_result_t *sr, int sr_count, grep
 static char *assemble_search_output(search_result_t *sr, int sr_count, grep_match_t *raw,
                                     int raw_count, int gm_count, int limit, int mode,
                                     int context_lines, const char *root_path,
-                                    bool warn_literal_pipe, uint64_t elapsed_ms) {
+                                    bool warn_literal_pipe, uint64_t elapsed_ms,
+                                    bool hint_path_filter) {
     enum { MODE_COMPACT = 0, MODE_FULL = 1, MODE_FILES = 2, SEARCH_SLOW_MS = 5000 };
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -9051,6 +9098,9 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
     if (yyjson_mut_arr_size(warnings) > 0) {
         yyjson_mut_obj_add_val(doc, root_obj, "warnings", warnings);
     }
+    if (hint_path_filter) {
+        yyjson_mut_obj_add_str(doc, root_obj, "hint", SEARCH_CODE_PATH_HINT);
+    }
 
     char *json = yy_doc_to_str(doc);
     if (json) {
@@ -9079,7 +9129,7 @@ static const char *strip_root_prefix(const char *path, const char *root, size_t 
 
 static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_t root_len,
                                           bool has_path_filter, cbm_regex_t *path_regex,
-                                          int grep_limit, int *out_count) {
+                                          int grep_limit, int *out_count, const char *path_glob) {
     int gm_cap = CBM_SZ_64;
     int gm_count = 0;
     grep_match_t *gm = malloc(gm_cap * sizeof(grep_match_t));
@@ -9121,6 +9171,9 @@ static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_
 #endif
         const char *path = line;
         const char *file = strip_root_prefix(path, root_path, root_len);
+        if (path_glob && !search_code_path_glob_match(path_glob, file)) {
+            continue;
+        }
 
         if (has_path_filter && cbm_regexec(path_regex, file, 0, NULL, 0) != CBM_REG_OK) {
             continue;
@@ -9278,7 +9331,8 @@ static void classify_all_grep_hits(grep_match_t *gm, int gm_count, cbm_store_t *
  * excluded every indexed file). */
 static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, const char *root_path,
                                   const char *filelist, bool has_path_filter,
-                                  cbm_regex_t *path_regex, int *out_written) {
+                                  cbm_regex_t *path_regex, int *out_written,
+                                  const char *path_glob) {
     *out_written = 0;
     cbm_store_t *pre_store = resolve_store(srv, project);
     if (!pre_store) {
@@ -9303,10 +9357,13 @@ static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, co
             if (strpbrk(indexed_files[fi], "\r\n") != NULL) {
                 continue;
             }
-            if (has_path_filter && path_regex) {
 #ifdef _WIN32
-                cbm_normalize_path_sep(indexed_files[fi]);
+            cbm_normalize_path_sep(indexed_files[fi]);
 #endif
+            if (path_glob && !search_code_path_glob_match(path_glob, indexed_files[fi])) {
+                continue;
+            }
+            if (has_path_filter && path_regex) {
                 if (cbm_regexec(path_regex, indexed_files[fi], 0, NULL, 0) != CBM_REG_OK) {
                     continue;
                 }
@@ -9562,8 +9619,10 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     bool scoped = false;
     int scoped_written = 0;
 
-    scoped = write_scoped_filelist(srv, project, root_path, filelist, has_path_filter,
-                                   has_path_filter ? &path_regex : NULL, &scoped_written);
+    const char *path_glob = file_pattern && strchr(file_pattern, '/') ? file_pattern : NULL;
+    scoped =
+        write_scoped_filelist(srv, project, root_path, filelist, has_path_filter,
+                              has_path_filter ? &path_regex : NULL, &scoped_written, path_glob);
 
     /* Collect grep matches into array */
     int gm_count = 0;
@@ -9578,8 +9637,8 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         cbm_unlink(filelist);
     } else {
         char cmd[CBM_SZ_4K];
-        build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile, filelist,
-                       root_path);
+        build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, path_glob ? NULL : file_pattern,
+                       tmpfile, filelist, root_path);
         FILE *fp = cbm_popen(cmd, "r");
         if (!fp) {
             cbm_unlink(tmpfile);
@@ -9594,7 +9653,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         }
 
         gm = collect_grep_matches(fp, root_path, strlen(root_path), has_path_filter, &path_regex,
-                                  grep_limit, &gm_count);
+                                  grep_limit, &gm_count, path_glob);
         cbm_pclose(fp);
         cbm_unlink(tmpfile);
         if (scoped) {
@@ -9679,15 +9738,15 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 
     char *result = NULL;
     if (mode == 0 && !sc_legacy_json) {
-        char *toon_text =
-            assemble_search_output_toon(sr, sr_count, raw, raw_count, gm_count, limit,
-                                        pat_has_pipe && !use_regex, cbm_now_ms() - search_t0);
+        char *toon_text = assemble_search_output_toon(
+            sr, sr_count, raw, raw_count, gm_count, limit, pat_has_pipe && !use_regex,
+            cbm_now_ms() - search_t0, path_glob && gm_count == 0);
         result = cbm_mcp_text_result(toon_text ? toon_text : "out of memory", toon_text == NULL);
         free(toon_text);
     } else {
         result = assemble_search_output(sr, sr_count, raw, raw_count, gm_count, limit, mode,
                                         context_lines, root_path, pat_has_pipe && !use_regex,
-                                        cbm_now_ms() - search_t0);
+                                        cbm_now_ms() - search_t0, path_glob && gm_count == 0);
     }
     free(gm);
     free(sr);

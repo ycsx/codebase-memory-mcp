@@ -186,33 +186,34 @@ typedef struct {
     const char *file_path;      // relative path
     uint32_t start_line;
     uint32_t end_line;
-    const char *signature;     // parameter text (NULL if none)
-    const char *return_type;   // return type text (NULL if none)
-    const char *receiver;      // Go method receiver (NULL if none)
-    const char *docstring;     // leading doc comment (NULL if none)
-    const char *parent_class;  // enclosing class QN for methods (NULL if none)
-    const char **decorators;   // NULL-terminated array (NULL if none)
-    const char **base_classes; // NULL-terminated array (NULL if none)
-    const char **param_names;  // NULL-terminated array (NULL if none)
-    const char **param_types;  // NULL-terminated array (NULL if none)
-    const char **return_types; // NULL-terminated array (NULL if none)
-    const char *route_path;    // HTTP route path from decorator (e.g., "/api/users") or NULL
-    const char **route_paths;  // all mapped HTTP paths; route_path is the first entry
-    const char *route_method;  // HTTP method from decorator (e.g., "POST") or NULL
-    int complexity;            // cyclomatic complexity
-    int cognitive;             // cognitive complexity (nesting-weighted)
-    int loop_count;            // number of loop constructs in the body
-    int loop_depth;            // max nested-loop depth (bottleneck proxy)
-    bool is_recursive;         // body contains a direct self-call (seed for "recursive")
-    int param_count;           // number of parameters (large = complexity smell)
-    int max_access_depth;      // deepest chained member/subscript access (a.b.c.d)
-    int linear_scan_in_loop;   // count of linear-scan calls (find/contains/indexOf) inside loops
-    int alloc_in_loop;         // count of allocation/append calls inside loops
-    bool recursion_in_loop;    // a self-call occurs inside a loop body
-    bool unguarded_recursion;  // recursive with no self-call guarded by a conditional
-    int lines;                 // body line count
-    uint32_t *fingerprint;     // MinHash fingerprint (arena-allocated, K values) or NULL
-    int fingerprint_k;         // number of hash values (CBM_MINHASH_K or 0)
+    const char *signature;         // parameter text (NULL if none)
+    const char *return_type;       // return type text (NULL if none)
+    const char *receiver;          // Go method receiver (NULL if none)
+    const char *docstring;         // leading doc comment (NULL if none)
+    const char *parent_class;      // enclosing class QN for methods (NULL if none)
+    const char **decorators;       // NULL-terminated array (NULL if none)
+    const char **base_classes;     // NULL-terminated array (NULL if none)
+    const char **param_names;      // NULL-terminated array (NULL if none)
+    const char **param_types;      // NULL-terminated array (NULL if none)
+    const char **return_types;     // NULL-terminated array (NULL if none)
+    const char *route_path;        // HTTP route path from decorator (e.g., "/api/users") or NULL
+    const char **route_paths;      // all mapped HTTP paths; route_path is the first entry
+    const char *route_method;      // HTTP method from decorator (e.g., "POST") or NULL
+    const char *client_route_path; // Outbound request declared by a client interface method.
+    int complexity;                // cyclomatic complexity
+    int cognitive;                 // cognitive complexity (nesting-weighted)
+    int loop_count;                // number of loop constructs in the body
+    int loop_depth;                // max nested-loop depth (bottleneck proxy)
+    bool is_recursive;             // body contains a direct self-call (seed for "recursive")
+    int param_count;               // number of parameters (large = complexity smell)
+    int max_access_depth;          // deepest chained member/subscript access (a.b.c.d)
+    int linear_scan_in_loop;  // count of linear-scan calls (find/contains/indexOf) inside loops
+    int alloc_in_loop;        // count of allocation/append calls inside loops
+    bool recursion_in_loop;   // a self-call occurs inside a loop body
+    bool unguarded_recursion; // recursive with no self-call guarded by a conditional
+    int lines;                // body line count
+    uint32_t *fingerprint;    // MinHash fingerprint (arena-allocated, K values) or NULL
+    int fingerprint_k;        // number of hash values (CBM_MINHASH_K or 0)
     bool is_exported;
     bool is_abstract;
     bool is_test;
@@ -609,6 +610,8 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
 // Pipeline-internal variant of cbm_extract_file() carrying ObjectScript
 // per-project tables (macro table + method-return-type table). The public
 // cbm_extract_file() is a thin wrapper that passes NULL, NULL for both.
+const char *cbm_c_mask_crlf_splices(CBMArena *arena, const char *source, int source_len);
+
 CBMFileResult *cbm_extract_file_ex(
     const char *source, int source_len, CBMLanguage language, const char *project,
     const char *rel_path, int64_t timeout_micros,

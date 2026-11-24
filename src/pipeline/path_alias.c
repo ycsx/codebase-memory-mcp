@@ -664,7 +664,8 @@ void cbm_path_alias_collection_free(cbm_path_alias_collection_t *coll) {
     free(coll);
 }
 
-char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module_path) {
+char *cbm_path_alias_resolve_file(const cbm_path_alias_map_t *map, const char *module_path,
+                                  bool use_base_url) {
     if (!map || !module_path) {
         return NULL;
     }
@@ -698,18 +699,18 @@ char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module
             memcpy(result + tp_len, wild_start, wild_len);
             memcpy(result + tp_len + wild_len, e->target_suffix, ts_len);
             result[tp_len + wild_len + ts_len] = '\0';
-            return strip_resolved_ext(result);
+            return result;
         }
 
         if (strcmp(module_path, e->alias_prefix) == 0) {
-            return strip_resolved_ext(strdup(e->target_prefix));
+            return strdup(e->target_prefix);
         }
     }
 
     /* baseUrl fallback. Apply only to non-relative imports that look
      * sub-path-ish (contain '/' but don't start with '.' or '@'); skips
      * obvious package names like "react" or "lodash". */
-    if (map->base_url && module_path[0] != '.' && module_path[0] != '@' &&
+    if (use_base_url && map->base_url && module_path[0] != '.' && module_path[0] != '@' &&
         strchr(module_path, '/') != NULL) {
         size_t bu_len = strlen(map->base_url);
         size_t need = bu_len + 1 + mod_len + 1;
@@ -718,9 +719,13 @@ char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module
             return NULL;
         }
         snprintf(result, need, "%s/%s", map->base_url, module_path);
-        return strip_resolved_ext(result);
+        return result;
     }
     return NULL;
+}
+
+char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module_path) {
+    return strip_resolved_ext(cbm_path_alias_resolve_file(map, module_path, true));
 }
 
 /* ── Repo walk ─────────────────────────────────────────────────── */

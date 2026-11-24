@@ -510,7 +510,19 @@ const char *java_resolve_type_name(JavaLSPContext *ctx, const char *name) {
         }
     }
 
-    /* 3. java.lang auto-import. Try registered first, then the conventional QN. */
+    /* 3. A type in the caller's own package shadows on-demand imports,
+     * including java.lang (JLS 6.4.1). Single-type imports above still win. */
+    if (ctx->package_name && ctx->package_name[0]) {
+        char buf[JAVA_LSP_BUF];
+        int n = snprintf(buf, sizeof(buf), "%s.%s", ctx->package_name, name);
+        if (n > 0 && (size_t)n < sizeof(buf)) {
+            if (cbm_registry_lookup_type(ctx->registry, buf)) {
+                return cbm_arena_strdup(ctx->arena, buf);
+            }
+        }
+    }
+
+    /* 4. java.lang auto-import. Try registered first, then the conventional QN. */
     for (int i = 0; JAVA_LANG_TYPES[i]; i++) {
         if (strcmp(JAVA_LANG_TYPES[i], name) == 0) {
             char buf[JAVA_LSP_BUF];
@@ -521,23 +533,12 @@ const char *java_resolve_type_name(JavaLSPContext *ctx, const char *name) {
         }
     }
 
-    /* 4. On-demand imports. */
+    /* 5. On-demand imports. */
     for (int i = 0; i < ctx->import_count; i++) {
         if (ctx->import_kinds[i] != CBM_JAVA_IMPORT_ON_DEMAND)
             continue;
         char buf[JAVA_LSP_BUF];
         int n = snprintf(buf, sizeof(buf), "%s.%s", ctx->import_target_qns[i], name);
-        if (n > 0 && (size_t)n < sizeof(buf)) {
-            if (cbm_registry_lookup_type(ctx->registry, buf)) {
-                return cbm_arena_strdup(ctx->arena, buf);
-            }
-        }
-    }
-
-    /* 5. Java package prefix. */
-    if (ctx->package_name && ctx->package_name[0]) {
-        char buf[JAVA_LSP_BUF];
-        int n = snprintf(buf, sizeof(buf), "%s.%s", ctx->package_name, name);
         if (n > 0 && (size_t)n < sizeof(buf)) {
             if (cbm_registry_lookup_type(ctx->registry, buf)) {
                 return cbm_arena_strdup(ctx->arena, buf);

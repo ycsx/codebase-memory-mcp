@@ -30,7 +30,6 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -85,7 +84,6 @@ static bool incremental_is_markdown_ext(const char *ext) {
 
 #define CBM_MS_PER_SEC 1000.0
 #define CBM_NS_PER_MS 1000000.0
-#define CBM_NS_PER_SEC 1000000000LL
 
 /* ── Timing helper (same as pipeline.c) ──────────────────────────── */
 
@@ -104,18 +102,6 @@ static const char *itoa_buf(int v) {
     idx = (idx + SKIP_ONE) & INCR_RING_MASK;
     snprintf(buf[idx], sizeof(buf[idx]), "%d", v);
     return buf[idx];
-}
-
-/* ── Platform-portable mtime_ns ──────────────────────────────────── */
-
-static int64_t stat_mtime_ns(const struct stat *st) {
-#ifdef __APPLE__
-    return ((int64_t)st->st_mtimespec.tv_sec * CBM_NS_PER_SEC) + (int64_t)st->st_mtimespec.tv_nsec;
-#elif defined(_WIN32)
-    return (int64_t)st->st_mtime * CBM_NS_PER_SEC;
-#else
-    return ((int64_t)st->st_mtim.tv_sec * CBM_NS_PER_SEC) + (int64_t)st->st_mtim.tv_nsec;
-#endif
 }
 
 static const char *incr_mode_name(int mode) {
@@ -162,14 +148,14 @@ static bool *classify_files(cbm_file_info_t *files, int file_count, cbm_file_has
             continue;
         }
 
-        struct stat st;
-        if (stat(files[i].path, &st) != 0) {
+        cbm_file_stat_t st;
+        if (cbm_stat_utf8(files[i].path, &st) != 0) {
             changed[i] = true;
             n_changed++;
             continue;
         }
 
-        if (stat_mtime_ns(&st) != h->mtime_ns || st.st_size != h->size) {
+        if (st.mtime_ns != h->mtime_ns || st.size != h->size) {
             changed[i] = true;
             n_changed++;
         } else {
@@ -278,8 +264,9 @@ static int find_deleted_files(const char *repo_path, cbm_file_info_t *files, int
             cbm_log_warn("incremental.path_truncated", "rel_path", stored[i].rel_path);
             preserve = true;
         } else {
-            struct stat st;
-            if (stat(abs_path, &st) == 0) {
+            cbm_file_stat_t st;
+            errno = 0;
+            if (cbm_stat_utf8(abs_path, &st) == 0) {
                 /* File exists on disk — mode-skipped, not deleted. */
                 preserve = true;
             } else if (errno != ENOENT && errno != ENOTDIR) {
@@ -515,13 +502,13 @@ static bool persist_hashes(cbm_store_t *store, const char *project, cbm_file_inf
     /* Current discovery: re-stat to capture any mtime/size that changed
      * during the run, and write fresh hash rows for visited files. */
     for (int i = 0; i < file_count; i++) {
-        struct stat st;
-        if (stat(files[i].path, &st) != 0) {
+        cbm_file_stat_t st;
+        if (cbm_stat_utf8(files[i].path, &st) != 0) {
             current_failed++;
             continue;
         }
-        int rc = cbm_store_upsert_file_hash(store, project, files[i].rel_path, "",
-                                            stat_mtime_ns(&st), st.st_size);
+        int rc =
+            cbm_store_upsert_file_hash(store, project, files[i].rel_path, "", st.mtime_ns, st.size);
         if (rc != CBM_STORE_OK) {
             cbm_log_warn("incremental.persist_hash_failed", "scope", "current", "rel_path",
                          files[i].rel_path, "rc", itoa_buf(rc));
@@ -648,11 +635,16 @@ static void run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *change
         }
     } else {
         cbm_log_info("incremental.mode", "mode", "sequential", "changed", itoa_buf(ci));
+        cbm_pipeline_set_pkgmap(cbm_pkgmap_build_from_repo(ctx->repo_path, changed_files, ci,
+                                                           ctx->project_name, ctx->excluded_dirs,
+                                                           ctx->excluded_count));
         cbm_pipeline_pass_definitions(ctx, changed_files, ci);
         cbm_pipeline_pass_calls(ctx, changed_files, ci);
         cbm_pipeline_pass_usages(ctx, changed_files, ci);
         cbm_pipeline_pass_semantic(ctx, changed_files, ci);
     }
+    cbm_pkgmap_free(cbm_pipeline_get_pkgmap());
+    cbm_pipeline_set_pkgmap(NULL);
 }
 
 /* Run post-extraction passes (tests, decorator tags, configlink). */
@@ -666,6 +658,7 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
 
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     cbm_pipeline_pass_decorator_tags(ctx->gbuf, project);
+    cbm_pipeline_ensure_decorator_routes(ctx->gbuf);
     cbm_log_info("pass.timing", "pass", "incr_decorator_tags", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
 

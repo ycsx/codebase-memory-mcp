@@ -589,7 +589,7 @@ int cbm_registry_size(const cbm_registry_t *r) {
 /* Strategy 1: Import map lookup (exact → suffix fallback) */
 static cbm_resolution_t resolve_import_map(const cbm_registry_t *r, const char *prefix,
                                            const char *suffix, const char **keys, const char **vals,
-                                           int map_count) {
+                                           int map_count, bool *unresolved) {
     if (!keys || !vals || map_count <= 0) {
         return empty_result();
     }
@@ -607,7 +607,8 @@ static cbm_resolution_t resolve_import_map(const cbm_registry_t *r, const char *
             }
         }
     }
-    if (!resolved) {
+    *unresolved = resolved && strcmp(resolved, CBM_UNRESOLVED_ES_IMPORT) == 0;
+    if (!resolved || *unresolved) {
         return empty_result();
     }
 
@@ -870,8 +871,12 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
     }
 
     /* Strategy 1: import map */
-    cbm_resolution_t res =
-        resolve_import_map(r, prefix, suffix, import_map_keys, import_map_vals, import_map_count);
+    bool unresolved = false;
+    cbm_resolution_t res = resolve_import_map(r, prefix, suffix, import_map_keys, import_map_vals,
+                                              import_map_count, &unresolved);
+    if (unresolved) {
+        return res;
+    }
     if (!(res.qualified_name && res.qualified_name[0])) {
         /* Strategy 2: same module */
         res = resolve_same_module(r, callee_name, suffix, module_qn);

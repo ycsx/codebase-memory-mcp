@@ -45,8 +45,8 @@ CBMLanguage cbm_disambiguate_m(const char *path);
 CBMLanguage cbm_disambiguate_cls(const char *path);
 
 /* Disambiguate .inc files by reading first 4KB of content.
- * Returns CBM_LANG_OBJECTSCRIPT_ROUTINE if it looks like an ObjectScript
- * include (a "ROUTINE <Uppercase>" header), otherwise CBM_LANG_BITBAKE.
+ * Explicit C/C++ code selects CBM_LANG_CPP. ObjectScript markers select
+ * CBM_LANG_OBJECTSCRIPT_ROUTINE; recipes and unknown content use CBM_LANG_BITBAKE.
  * On read failure, defaults to CBM_LANG_BITBAKE. */
 CBMLanguage cbm_disambiguate_inc(const char *path);
 
@@ -97,6 +97,9 @@ typedef enum {
 /* Check if a directory name should always be skipped (e.g. .git, node_modules).
  * Only checks the basename, not the full path. */
 bool cbm_should_skip_dir(const char *dirname, cbm_index_mode_t mode);
+bool cbm_discover_config_only_dir(const char *name);
+bool cbm_discover_is_venv(const char *name, const char *abs_dir);
+bool cbm_discover_is_package_manifest(const char *basename);
 
 /* Check if a file has a suffix that should be skipped (e.g. .pyc, .png). */
 bool cbm_has_ignored_suffix(const char *filename, cbm_index_mode_t mode);

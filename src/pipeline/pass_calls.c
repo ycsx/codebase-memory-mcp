@@ -107,9 +107,9 @@ static char *extract_local_name_from_json(const char *props_json) {
     return cbm_strndup(start, end - start);
 }
 
-static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
-                            const CBMFileResult *result, const char ***out_keys,
-                            const char ***out_vals, int *out_count) {
+int cbm_pipeline_build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
+                                  const CBMFileResult *result, const char ***out_keys,
+                                  const char ***out_vals, int *out_count) {
     *out_keys = NULL;
     *out_vals = NULL;
     *out_count = 0;
@@ -119,6 +119,11 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
         const char **keys = calloc((size_t)result->imports.count, sizeof(const char *));
         const char **vals = calloc((size_t)result->imports.count, sizeof(const char *));
         int count = 0;
+        if (!keys || !vals) {
+            free(keys);
+            free(vals);
+            return CBM_NOT_FOUND;
+        }
         char *file_qn = NULL;
 
         for (int i = 0; i < result->imports.count; i++) {
@@ -131,17 +136,18 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
             if (!file_qn) {
                 file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
             }
-            if (imp->imported_name && imp->imported_name[0]) {
-                target = cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
-                symbol = cbm_pipeline_resolve_import_symbol_node(ctx, target, imp);
-            } else {
-                target = cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
-            }
-            if (!target) {
+            target = cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
+            if (!target && !cbm_pipeline_es_importer(rel_path)) {
                 continue;
             }
+            symbol = target ? cbm_pipeline_resolve_import_symbol_node(ctx, target, imp) : NULL;
             keys[count] = strdup(imp->local_name);
-            vals[count] = symbol ? symbol->qualified_name : target->qualified_name;
+            if (!keys[count]) {
+                continue;
+            }
+            vals[count] = symbol   ? symbol->qualified_name
+                          : target ? target->qualified_name
+                                   : CBM_UNRESOLVED_ES_IMPORT;
             count++;
         }
         free(file_qn);
@@ -836,7 +842,7 @@ int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
-        build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count);
+        cbm_pipeline_build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count);
 
         /* Compute module QN for same-module resolution (directory-based for
          * Java/Go so it matches their def-node QNs in the registry). */
@@ -994,7 +1000,8 @@ void cbm_pipeline_pass_fastapi_depends(cbm_pipeline_ctx_t *ctx, const cbm_file_i
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
-        build_import_map(ctx, files[i].rel_path, result, &imp_keys, &imp_vals, &imp_count);
+        cbm_pipeline_build_import_map(ctx, files[i].rel_path, result, &imp_keys, &imp_vals,
+                                      &imp_count);
 
         for (int d = 0; d < result->defs.count; d++) {
             CBMDefinition *def = &result->defs.items[d];

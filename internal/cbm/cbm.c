@@ -887,6 +887,37 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
     return r;
 }
 
+static bool c_splice_lang(CBMLanguage language) {
+    return language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA ||
+           language == CBM_LANG_OBJC || language == CBM_LANG_GLSL || language == CBM_LANG_HLSL ||
+           language == CBM_LANG_ISPC || language == CBM_LANG_SLANG;
+}
+
+/* Keep byte offsets and newlines stable in tree-sitter's view of CRLF splices. */
+const char *cbm_c_mask_crlf_splices(CBMArena *a, const char *source, int source_len) {
+    if (!a || !source) {
+        return source;
+    }
+    char *out = NULL;
+    for (int i = 0; i + PAIR_LEN < source_len; i++) {
+        if (source[i] != '\\' || source[i + SKIP_ONE] != '\r' || source[i + PAIR_LEN] != '\n') {
+            continue;
+        }
+        if (!out) {
+            out = (char *)cbm_arena_alloc(a, (size_t)source_len + SKIP_ONE);
+            if (!out) {
+                return source;
+            }
+            memcpy(out, source, (size_t)source_len);
+            out[source_len] = '\0';
+        }
+        out[i] = ' ';
+        out[i + SKIP_ONE] = '\\';
+        i += PAIR_LEN;
+    }
+    return out ? out : source;
+}
+
 CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLanguage language,
                                    const char *project, const char *rel_path,
                                    int64_t timeout_micros, const char **extra_defines,
@@ -960,6 +991,9 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     uint64_t t0 = now_ns();
 
     // Build string input + timeout options for parse_with_options
+    if (c_splice_lang(language)) {
+        source = cbm_c_mask_crlf_splices(a, source, source_len);
+    }
     CBMStringInput str_input = {source, (uint32_t)source_len};
     TSInput ts_input = {
         &str_input,

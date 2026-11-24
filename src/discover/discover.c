@@ -35,7 +35,7 @@ static const char *ALWAYS_SKIP_DIRS[] = {
     ".idea", ".vs", ".vscode", ".eclipse", ".claude", ".claude-worktrees", "Antigravity",
     /* Python */
     ".cache", ".eggs", ".env", ".mypy_cache", ".nox", ".pytest_cache", ".ruff_cache", ".tox",
-    ".venv", "__pycache__", "env", "htmlcov", "site-packages", "venv",
+    ".venv", "__pycache__", "htmlcov", "site-packages", "venv",
     /* JS/TS */
     ".npm", ".nyc_output", ".pnpm-store", ".yarn", "bower_components", "coverage", "node_modules",
     ".next", ".nuxt", ".svelte-kit", ".angular", ".turbo", ".parcel-cache", ".docusaurus", ".expo",
@@ -46,7 +46,7 @@ static const char *ALWAYS_SKIP_DIRS[] = {
     ".cargo", ".stack-work", ".dart_tool", "zig-cache", "zig-out", ".metals", ".bloop", ".bsp",
     ".ccls-cache", ".clangd", "elm-stuff", "_opam", ".cpcache", ".shadow-cljs",
     /* Deploy */
-    ".vercel", ".netlify", "deploy", "deployed",
+    ".vercel", ".netlify",
     /* Misc */
     ".qdrant_code_embeddings", ".tmp", "vendor", "vendored", NULL};
 
@@ -525,12 +525,12 @@ static bool is_safety_core_dir(const char *name) {
 }
 
 /* Check if a directory entry should be skipped (hardcoded dirs + gitignore). */
-static bool should_skip_directory(const char *entry_name, const char *rel_path,
+static bool should_skip_directory(const char *entry_name, const char *rel_path, bool is_venv,
                                   const cbm_discover_opts_t *opts, const cbm_gitignore_t *gitignore,
                                   const cbm_gitignore_t *global_gi,
                                   const cbm_gitignore_t *cbmignore, const cbm_gitignore_t *local_gi,
                                   const char *local_gi_prefix) {
-    if (cbm_should_skip_dir(entry_name, opts ? opts->mode : CBM_MODE_FULL)) {
+    if (is_venv || cbm_should_skip_dir(entry_name, opts ? opts->mode : CBM_MODE_FULL)) {
         /* #500: a .cbmignore negation (e.g. "!obj/") whose rule is the last
          * match for this dir un-skips a built-in skip-list dir — except the
          * non-negatable safety core. Fall through so .gitignore/global/local
@@ -698,12 +698,171 @@ static int safe_stat(const char *abs_path, struct stat *st) {
 #endif
 }
 
+static bool dir_lists_exact(const char *dir, const char *name, size_t name_len, bool directory) {
+    cbm_dir_t *d = cbm_opendir(dir);
+    if (!d) {
+        return false;
+    }
+    bool listed = false;
+    cbm_dirent_t *entry;
+    while (!listed && (entry = cbm_readdir(d)) != NULL) {
+        listed = strlen(entry->name) == name_len && memcmp(entry->name, name, name_len) == 0;
+    }
+    cbm_closedir(d);
+    char path[CBM_SZ_4K];
+    int written = snprintf(path, sizeof(path), "%s/%.*s", dir, (int)name_len, name);
+    if (!listed || written < 0 || (size_t)written >= sizeof(path)) {
+        return false;
+    }
+    struct stat st;
+    return safe_stat(path, &st) == 0 && (directory ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode));
+}
+
+static bool venv_marker_listed(const char *abs_dir, const char *marker) {
+    char dir[CBM_SZ_4K];
+    int written = snprintf(dir, sizeof(dir), "%s", abs_dir);
+    if (written < 0 || (size_t)written >= sizeof(dir)) {
+        return false;
+    }
+    for (const char *part = marker; *part;) {
+        const char *slash = strchr(part, '/');
+        size_t len = slash ? (size_t)(slash - part) : strlen(part);
+        if (!dir_lists_exact(dir, part, len, slash != NULL)) {
+            return false;
+        }
+        if (!slash) {
+            return true;
+        }
+        size_t used = strlen(dir);
+        written = snprintf(dir + used, sizeof(dir) - used, "/%.*s", (int)len, part);
+        if (written < 0 || (size_t)written >= sizeof(dir) - used) {
+            return false;
+        }
+        part = slash + SKIP_ONE;
+    }
+    return false;
+}
+
+bool cbm_discover_is_venv(const char *name, const char *abs_dir) {
+    static const char *const markers[] = {"pyvenv.cfg", "bin/activate", "Scripts/activate",
+                                          "conda-meta/history", NULL};
+    if (strcmp(name, "env") != 0) {
+        return false;
+    }
+    for (int i = 0; markers[i]; i++) {
+        if (venv_marker_listed(abs_dir, markers[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool cbm_discover_config_only_dir(const char *name) {
+    return strcmp(name, "deploy") == 0 || strcmp(name, "deployed") == 0;
+}
+
+static const char *JVM_SOURCE_LANG_DIRS[] = {"java", "kotlin", "scala", "groovy", NULL};
+
+static bool component_equals(const char *start, size_t len, const char *word) {
+    return strlen(word) == len && strncmp(start, word, len) == 0;
+}
+
+static bool in_jvm_package(const char *rel_path) {
+    if (!rel_path) {
+        return false;
+    }
+    enum { JVM_MAX_COMPONENTS = 256 };
+    const char *starts[JVM_MAX_COMPONENTS];
+    size_t lens[JVM_MAX_COMPONENTS];
+    size_t count = 0;
+    const char *p = rel_path;
+    while (*p && count < JVM_MAX_COMPONENTS) {
+        while (*p == '/' || *p == '\\') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        const char *start = p;
+        while (*p && *p != '/' && *p != '\\') {
+            p++;
+        }
+        starts[count] = start;
+        lens[count] = (size_t)(p - start);
+        count++;
+    }
+    /* The language root sits at i + 2; the directory must be below it. */
+    for (size_t i = 0; i + 3 < count; i++) {
+        if (!component_equals(starts[i], lens[i], "src")) {
+            continue;
+        }
+        for (int l = 0; JVM_SOURCE_LANG_DIRS[l]; l++) {
+            if (component_equals(starts[i + 2], lens[i + 2], JVM_SOURCE_LANG_DIRS[l])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool cbm_discover_is_package_manifest(const char *basename) {
+    if (!basename) {
+        return false;
+    }
+    if (strcmp(basename, "package.json") == 0 || strcmp(basename, "go.mod") == 0 ||
+        strcmp(basename, "Cargo.toml") == 0 || strcmp(basename, "pyproject.toml") == 0 ||
+        strcmp(basename, "composer.json") == 0 || strcmp(basename, "pubspec.yaml") == 0 ||
+        strcmp(basename, "pom.xml") == 0 || strcmp(basename, "build.gradle") == 0 ||
+        strcmp(basename, "build.gradle.kts") == 0 || strcmp(basename, "mix.exs") == 0) {
+        return true;
+    }
+    return ends_with(basename, ".gemspec");
+}
+
+static bool is_build_config(CBMLanguage lang) {
+    return lang == CBM_LANG_MAKEFILE || lang == CBM_LANG_CMAKE || lang == CBM_LANG_YAML ||
+           lang == CBM_LANG_TOML || lang == CBM_LANG_JSON || lang == CBM_LANG_INI ||
+           lang == CBM_LANG_DOCKERFILE;
+}
+
+static bool is_deployment_config(CBMLanguage lang) {
+    if (is_build_config(lang)) {
+        return true;
+    }
+    switch (lang) {
+    /* other configuration and infrastructure languages */
+    case CBM_LANG_PROPERTIES: /* .properties */
+    case CBM_LANG_XML:        /* web.xml, server and logging configuration */
+    case CBM_LANG_JSON5:
+    case CBM_LANG_JSONNET: /* .jsonnet, .libsonnet */
+    case CBM_LANG_JINJA2:  /* .j2: Ansible and Salt templates */
+    case CBM_LANG_K8S:
+    case CBM_LANG_KUSTOMIZE:
+    case CBM_LANG_GOTEMPLATE: /* Helm template helpers (_helpers.tpl), .gotmpl */
+    case CBM_LANG_HCL:        /* Terraform, OpenTofu, Packer, Nomad, Terragrunt */
+    case CBM_LANG_BICEP:
+    case CBM_LANG_NIX:
+    case CBM_LANG_PUPPET:
+    case CBM_LANG_PKL:
+    case CBM_LANG_DOTENV: /* .env, .env.*, *.env */
+    /* the shell family, by suffix or by shebang */
+    case CBM_LANG_BASH:
+    case CBM_LANG_ZSH:
+    case CBM_LANG_FISH:
+    case CBM_LANG_POWERSHELL:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /* Process a single regular file entry during directory walk. */
 static void walk_dir_process_file(const char *abs_path, const char *rel_path, const char *name,
                                   const cbm_discover_opts_t *opts, const cbm_gitignore_t *gitignore,
                                   const cbm_gitignore_t *global_gi,
                                   const cbm_gitignore_t *cbmignore, const cbm_gitignore_t *local_gi,
-                                  const char *local_gi_prefix, off_t size, file_list_t *out) {
+                                  const char *local_gi_prefix, off_t size, bool config_only,
+                                  file_list_t *out) {
     const char *skip_reason = file_skip_reason(name, rel_path, opts, gitignore, global_gi,
                                                cbmignore, local_gi, local_gi_prefix, size);
     if (skip_reason) {
@@ -715,6 +874,10 @@ static void walk_dir_process_file(const char *abs_path, const char *rel_path, co
         return;
     }
     CBMLanguage lang = detect_file_language(name, abs_path);
+    if (config_only && (cbm_discover_is_package_manifest(name) || !is_deployment_config(lang))) {
+        file_list_add_ignored(out, rel_path, "skip-list");
+        return;
+    }
     if (lang == CBM_LANG_COUNT) {
         return;
     }
@@ -722,6 +885,7 @@ static void walk_dir_process_file(const char *abs_path, const char *rel_path, co
 }
 
 typedef struct {
+    bool config_only;
     char dir[CBM_SZ_4K];
     char prefix[CBM_SZ_4K];
     cbm_gitignore_t *local_gi;       /* nested .gitignore for this subtree */
@@ -755,7 +919,7 @@ static cbm_gitignore_t *try_load_nested_gitignore(const walk_frame_t *frame) {
 
 /* Push a subdirectory onto the walk stack, inheriting local gitignore context. */
 static void walk_push_subdir(walk_stack_t *stack, const char *abs_path, const char *rel_path,
-                             const walk_frame_t *parent) {
+                             const walk_frame_t *parent, bool config_only) {
     if (stack->top >= stack->capacity) {
         int new_capacity = stack->capacity * 2;
         walk_frame_t *grown = realloc(stack->frames, (size_t)new_capacity * sizeof(*stack->frames));
@@ -768,6 +932,7 @@ static void walk_push_subdir(walk_stack_t *stack, const char *abs_path, const ch
     walk_frame_t *slot = &stack->frames[stack->top];
     snprintf(slot->dir, CBM_SZ_4K, "%s", abs_path);
     snprintf(slot->prefix, CBM_SZ_4K, "%s", rel_path);
+    slot->config_only = parent->config_only || config_only;
     slot->local_gi = parent->local_gi;
     snprintf(slot->local_gi_prefix, CBM_SZ_4K, "%s", parent->local_gi_prefix);
     stack->top++;
@@ -794,16 +959,21 @@ static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *fram
     }
 
     if (S_ISDIR(st.st_mode)) {
-        if (!should_skip_directory(entry->name, rel_path, opts, gitignore, global_gi, cbmignore,
-                                   frame->local_gi, frame->local_gi_prefix)) {
-            walk_push_subdir(stack, abs_path, rel_path, frame);
+        if (!should_skip_directory(entry->name, rel_path,
+                                   cbm_discover_is_venv(entry->name, abs_path), opts, gitignore,
+                                   global_gi, cbmignore, frame->local_gi, frame->local_gi_prefix)) {
+            bool config_only =
+                cbm_discover_config_only_dir(entry->name) && !in_jvm_package(rel_path) &&
+                !(cbmignore && cbm_gitignore_match_result(cbmignore, rel_path, true) < 0);
+            walk_push_subdir(stack, abs_path, rel_path, frame, config_only);
         } else {
             /* Record the excluded subtree root so callers can report it (#411). */
             file_list_add_excluded(out, rel_path);
         }
     } else if (S_ISREG(st.st_mode)) {
         walk_dir_process_file(abs_path, rel_path, entry->name, opts, gitignore, global_gi,
-                              cbmignore, frame->local_gi, frame->local_gi_prefix, st.st_size, out);
+                              cbmignore, frame->local_gi, frame->local_gi_prefix, st.st_size,
+                              frame->config_only, out);
     }
 }
 

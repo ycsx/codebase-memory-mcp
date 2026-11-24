@@ -5473,6 +5473,8 @@ void cbm_run_c_lsp_cross_with_registry(CBMArena *arena, const char *source, int 
     if (!source || source_len == 0 || !out || !reg)
         return;
 
+    source = cbm_c_mask_crlf_splices(arena, source, source_len);
+
     TSParser *parser = NULL;
     TSTree *tree = cached_tree;
     bool owns_tree = false;
@@ -5510,6 +5512,8 @@ void cbm_run_c_lsp_cross(CBMArena *arena, const char *source, int source_len, co
 
     if (!source || source_len == 0 || !out)
         return;
+
+    source = cbm_c_mask_crlf_splices(arena, source, source_len);
 
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);

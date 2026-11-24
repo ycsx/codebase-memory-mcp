@@ -25,6 +25,7 @@
 
 #include <yyjson/yyjson.h>
 
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -281,6 +282,56 @@ static const char *resolve_pkg_entry(yyjson_val *root) {
 }
 
 /* JS/TS: package.json — name + entry point resolution */
+static const char npm_dependency_prefix[] = "\x01npm-dependency:";
+
+static char *dependency_key(const char *name) {
+    size_t len = sizeof(npm_dependency_prefix) + strlen(name);
+    char *key = malloc(len);
+    if (key) {
+        snprintf(key, len, "%s%s", npm_dependency_prefix, name);
+    }
+    return key;
+}
+
+static void pkg_entries_push_npm_dependency(cbm_pkg_entries_t *entries, const char *name) {
+    char *key = dependency_key(name);
+    if (key) {
+        pkg_entries_push(entries, key, NULL);
+    }
+}
+
+static bool npm_version_is_local(const char *version) {
+    static const char *const local[] = {"workspace:", "file:", "link:", "portal:"};
+    for (size_t i = 0; i < sizeof(local) / sizeof(local[0]); i++) {
+        if (strncmp(version, local[i], strlen(local[i])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void push_npm_dependencies(yyjson_val *root, cbm_pkg_entries_t *entries) {
+    static const char *const sections[] = {"dependencies", "devDependencies", "peerDependencies",
+                                           "optionalDependencies"};
+    for (size_t s = 0; s < sizeof(sections) / sizeof(sections[0]); s++) {
+        yyjson_val *deps = yyjson_obj_get(root, sections[s]);
+        if (!yyjson_is_obj(deps)) {
+            continue;
+        }
+        size_t idx;
+        size_t max;
+        yyjson_val *key;
+        yyjson_val *val;
+        yyjson_obj_foreach(deps, idx, max, key, val) {
+            const char *name = yyjson_get_str(key);
+            const char *version = yyjson_get_str(val);
+            if (name && name[0] && version && !npm_version_is_local(version)) {
+                pkg_entries_push_npm_dependency(entries, name);
+            }
+        }
+    }
+}
+
 static void parse_package_json(const char *source, int source_len, const char *rel_path,
                                cbm_pkg_entries_t *entries) {
     yyjson_doc *doc = yyjson_read(source, (size_t)source_len, 0);
@@ -293,6 +344,7 @@ static void parse_package_json(const char *source, int source_len, const char *r
         return;
     }
 
+    push_npm_dependencies(root, entries);
     yyjson_val *name_val = yyjson_obj_get(root, "name");
     if (!yyjson_is_str(name_val)) {
         yyjson_doc_free(doc);
@@ -732,7 +784,9 @@ CBMHashTable *cbm_pkgmap_build(cbm_pkg_entries_t *worker_entries, int worker_cou
         cbm_pkg_entries_t *we = &worker_entries[w];
         for (int i = 0; i < we->count; i++) {
             /* Convert entry_rel to QN: project.dir.parts */
-            char *qn = cbm_pipeline_fqn_module(project_name, we->items[i].entry_rel);
+            char *qn = we->items[i].entry_rel
+                           ? cbm_pipeline_fqn_module(project_name, we->items[i].entry_rel)
+                           : strdup("");
             if (!qn) {
                 continue;
             }
@@ -761,19 +815,6 @@ CBMHashTable *cbm_pkgmap_build(cbm_pkg_entries_t *worker_entries, int worker_cou
 /* Returns true if basename is a package manifest we know how to parse.
  * Used by the filesystem walker; cbm_pkgmap_try_parse is the source of
  * truth for which basenames produce entries. */
-static bool is_pkgmap_manifest_basename(const char *basename) {
-    if (!basename) {
-        return false;
-    }
-    if (strcmp(basename, "package.json") == 0 || strcmp(basename, "go.mod") == 0 ||
-        strcmp(basename, "Cargo.toml") == 0 || strcmp(basename, "pyproject.toml") == 0 ||
-        strcmp(basename, "composer.json") == 0 || strcmp(basename, "pubspec.yaml") == 0 ||
-        strcmp(basename, "pom.xml") == 0 || strcmp(basename, "build.gradle") == 0 ||
-        strcmp(basename, "build.gradle.kts") == 0 || strcmp(basename, "mix.exs") == 0) {
-        return true;
-    }
-    return ends_with(basename, ".gemspec");
-}
 
 /* Stat a path, skipping symlinks. Returns 0 on success, -1 to skip.
  * On POSIX, lstat + S_ISLNK avoids following symlink cycles. On Windows
@@ -874,7 +915,8 @@ static int pkgmap_walk_dir(const char *abs_dir, const char *rel_dir, cbm_pkg_ent
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
-            if (cbm_should_skip_dir(name, CBM_MODE_FULL) ||
+            if (cbm_should_skip_dir(name, CBM_MODE_FULL) || cbm_discover_config_only_dir(name) ||
+                cbm_discover_is_venv(name, abs_path) ||
                 cbm_pipeline_relpath_is_excluded(rel_path, excluded_dirs, excluded_count)) {
                 continue;
             }
@@ -894,7 +936,7 @@ static int pkgmap_walk_dir(const char *abs_dir, const char *rel_dir, cbm_pkg_ent
         if (!S_ISREG(st.st_mode)) {
             continue;
         }
-        if (!is_pkgmap_manifest_basename(name)) {
+        if (!cbm_discover_is_package_manifest(name)) {
             continue;
         }
         int source_len = 0;
@@ -940,7 +982,7 @@ CBMHashTable *cbm_pkgmap_build_from_files(const cbm_file_info_t *files, int file
 
     for (int i = 0; i < file_count; i++) {
         const char *basename = path_basename(files[i].rel_path);
-        if (!is_pkgmap_manifest_basename(basename)) {
+        if (!cbm_discover_is_package_manifest(basename)) {
             continue;
         }
 
@@ -976,7 +1018,7 @@ CBMHashTable *cbm_pkgmap_build_from_repo(const char *repo_path, const cbm_file_i
     int from_files = 0;
     for (int i = 0; i < file_count; i++) {
         const char *basename = path_basename(files[i].rel_path);
-        if (!is_pkgmap_manifest_basename(basename)) {
+        if (!cbm_discover_is_package_manifest(basename)) {
             continue;
         }
         from_files++;
@@ -1316,12 +1358,12 @@ static bool import_targetable_label(const char *label) {
     return false;
 }
 
-static bool source_uses_es_module_paths(const char *source_rel) {
+bool cbm_pipeline_es_importer(const char *source_rel) {
     if (!source_rel) {
         return false;
     }
-    static const char *exts[] = {".js",  ".jsx", ".mjs", ".cjs", ".ts",
-                                 ".tsx", ".mts", ".cts", ".vue", NULL};
+    static const char *exts[] = {".js",  ".jsx", ".mjs",    ".cjs",   ".ts",   ".tsx", ".mts",
+                                 ".cts", ".vue", ".svelte", ".astro", ".html", NULL};
     size_t len = strlen(source_rel);
     for (const char **ext = exts; *ext; ext++) {
         size_t ext_len = strlen(*ext);
@@ -1410,6 +1452,132 @@ static const cbm_gbuf_node_t *resolve_sibling_file(const cbm_pipeline_ctx_t *ctx
     return found;
 }
 
+static bool node_builtin_module(const char *spec) {
+    static const char builtins[] =
+        "|assert|assert/strict|async_hooks|buffer|child_process|cluster|console|constants|crypto"
+        "|dgram|diagnostics_channel|dns|dns/promises|domain|events|fs|fs/promises|http|http2"
+        "|https|inspector|inspector/promises|module|net|os|path|path/posix|path/win32|perf_hooks"
+        "|process|punycode|querystring|readline|readline/promises|repl|stream|stream/consumers"
+        "|stream/promises|stream/web|string_decoder|sys|timers|timers/promises|tls|trace_events"
+        "|tty|url|util|util/types|v8|vm|wasi|worker_threads|zlib|";
+    char key[CBM_SZ_64];
+    int n = snprintf(key, sizeof(key), "|%s|", spec);
+    return n > 0 && (size_t)n < sizeof(key) && strstr(builtins, key) != NULL;
+}
+
+static bool es_specifier_has_scheme(const char *spec) {
+    if (!isalpha((unsigned char)spec[0])) {
+        return false;
+    }
+    size_t i = SKIP_ONE;
+    while (isalnum((unsigned char)spec[i]) || spec[i] == '+' || spec[i] == '-' || spec[i] == '.') {
+        i++;
+    }
+    return spec[i] == ':' && i >= PAIR_LEN;
+}
+
+static bool es_specifier_package(const char *spec, char *out, size_t cap) {
+    if (spec[0] == '\0' || spec[0] == '/' || spec[0] == '.' || spec[0] == '#') {
+        return false;
+    }
+    const char *end = strchr(spec, '/');
+    if (spec[0] == '@') {
+        if (!end || end[SKIP_ONE] == '\0') {
+            return false;
+        }
+        end = strchr(end + SKIP_ONE, '/');
+    }
+    size_t len = end ? (size_t)(end - spec) : strlen(spec);
+    if (len == 0 || len >= cap) {
+        return false;
+    }
+    memcpy(out, spec, len);
+    out[len] = '\0';
+    return true;
+}
+
+static void cut_basename_query(char *path) {
+    char *slash = strrchr(path, '/');
+    char *query = strchr(slash ? slash + SKIP_ONE : path, '?');
+    if (query) {
+        *query = '\0';
+    }
+}
+
+typedef enum { ES_OTHER, ES_FILE, ES_EXTERNAL } es_import_kind_t;
+
+static es_import_kind_t classify_es_import(const cbm_pipeline_ctx_t *ctx, const char *rel,
+                                           const char *spec, char **path) {
+    *path = NULL;
+    if (strncmp(spec, "./", 2) == 0 || strncmp(spec, "../", 3) == 0 || strcmp(spec, ".") == 0 ||
+        strcmp(spec, "..") == 0) {
+        *path = cbm_pipeline_resolve_es_file_path(rel, spec);
+        return ES_FILE;
+    }
+    if (es_specifier_has_scheme(spec)) {
+        return ES_EXTERNAL;
+    }
+    const cbm_path_alias_map_t *aliases = cbm_path_alias_find_for_file(ctx->path_aliases, rel);
+    char *alias = cbm_path_alias_resolve_file(aliases, spec, false);
+    if (!alias) {
+        char package[PKGMAP_PATH_BUF];
+        const CBMHashTable *map = cbm_pipeline_get_pkgmap();
+        if (es_specifier_package(spec, package, sizeof(package))) {
+            if (map && cbm_ht_has(map, package)) {
+                return ES_OTHER;
+            }
+            char *key = dependency_key(package);
+            bool external = node_builtin_module(spec) || (map && key && cbm_ht_has(map, key));
+            free(key);
+            if (external) {
+                return ES_EXTERNAL;
+            }
+        }
+        alias = cbm_path_alias_resolve_file(aliases, spec, true);
+    }
+    if (alias) {
+        *path = cbm_pipeline_resolve_es_file_path(NULL, alias);
+        free(alias);
+        return ES_FILE;
+    }
+    return ES_OTHER;
+}
+
+static const cbm_gbuf_node_t *es_module_at_path(const cbm_pipeline_ctx_t *ctx, char *path) {
+    if (!path || !path[0]) {
+        return NULL;
+    }
+    cut_basename_query(path);
+    static const char *const suffixes[] = {"",           ".ts",        ".tsx",       ".mts",
+                                           ".cts",       ".js",        ".jsx",       ".mjs",
+                                           ".cjs",       ".json",      "/index.ts",  "/index.tsx",
+                                           "/index.js",  "/index.jsx", "/index.mts", "/index.cts",
+                                           "/index.mjs", "/index.cjs", NULL};
+    for (int i = 0; suffixes[i]; i++) {
+        char candidate[PKGMAP_PATH_BUF];
+        int n = snprintf(candidate, sizeof(candidate), "%s%s", path, suffixes[i]);
+        if (n < 0 || (size_t)n >= sizeof(candidate)) {
+            continue;
+        }
+        const cbm_gbuf_node_t **hits = NULL;
+        int count = 0;
+        cbm_gbuf_find_by_name(ctx->gbuf, candidate, &hits, &count);
+        for (int j = 0; j < count; j++) {
+            if (strcmp(hits[j]->label, "Module") == 0 && hits[j]->file_path &&
+                strcmp(hits[j]->file_path, candidate) == 0) {
+                return hits[j];
+            }
+        }
+        char *qn = cbm_pipeline_fqn_compute(ctx->project_name, candidate, "__file__");
+        const cbm_gbuf_node_t *file = qn ? cbm_gbuf_find_by_qn(ctx->gbuf, qn) : NULL;
+        free(qn);
+        if (file && file->file_path && strcmp(file->file_path, candidate) == 0) {
+            return file;
+        }
+    }
+    return NULL;
+}
+
 const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t *ctx,
                                                         const char *source_rel,
                                                         const char *source_file_qn,
@@ -1417,6 +1585,16 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                                                         CBMHashTable *namespace_map) {
     if (!ctx || !imp || !imp->module_path) {
         return NULL;
+    }
+
+    if (cbm_pipeline_es_importer(source_rel)) {
+        char *path = NULL;
+        es_import_kind_t kind = classify_es_import(ctx, source_rel, imp->module_path, &path);
+        if (kind != ES_OTHER) {
+            const cbm_gbuf_node_t *node = kind == ES_FILE ? es_module_at_path(ctx, path) : NULL;
+            free(path);
+            return node;
+        }
     }
 
     /* Strategy 1: module-path resolution → existing node (Python/TS/Go).
@@ -1536,7 +1714,7 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
     /* ES module specifiers name modules, not arbitrary same-named symbols. If
      * path/alias resolution failed, a basename fallback such as "index" can
      * connect the importer to any unrelated index function in the repository. */
-    if (source_uses_es_module_paths(source_rel)) {
+    if (cbm_pipeline_es_importer(source_rel)) {
         return NULL;
     }
 
@@ -1731,10 +1909,8 @@ static bool import_symbol_is_function_in_target(const cbm_gbuf_node_t *node,
     if (!node || !target_module || !node->label || strcmp(node->label, "Function") != 0) {
         return false;
     }
-    if (target_module->file_path && target_module->file_path[0]) {
-        return node->file_path && strcmp(node->file_path, target_module->file_path) == 0;
-    }
-    return true;
+    return target_module->file_path && target_module->file_path[0] && node->file_path &&
+           strcmp(node->file_path, target_module->file_path) == 0;
 }
 
 const cbm_gbuf_node_t *cbm_pipeline_resolve_import_symbol_node(const cbm_pipeline_ctx_t *ctx,
@@ -1913,7 +2089,11 @@ int cbm_pipeline_create_import_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResul
             target = create_java_external_type(ctx, imp, rel);
         }
         if (!target && is_js_package_import(rel, imp->module_path)) {
-            target = create_external_package_reference(ctx, imp);
+            char *path = NULL;
+            if (classify_es_import(ctx, rel, imp->module_path, &path) != ES_FILE) {
+                target = create_external_package_reference(ctx, imp);
+            }
+            free(path);
         }
         if (!target || target->id == source_node->id) {
             continue;

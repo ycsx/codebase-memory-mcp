@@ -145,6 +145,11 @@ static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *c
 
 /* Get the current pipeline's package map (NULL if none). */
 CBMHashTable *cbm_pipeline_get_pkgmap(void);
+bool cbm_pipeline_es_importer(const char *source_rel);
+char *cbm_pipeline_resolve_es_file_path(const char *source_rel, const char *specifier);
+int cbm_pipeline_build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
+                                  const CBMFileResult *result, const char ***out_keys,
+                                  const char ***out_vals, int *out_count);
 void cbm_pipeline_set_pkgmap(CBMHashTable *map);
 
 /* Unified module resolver: relative → pkgmap → fqn_module fallback.
@@ -549,6 +554,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * have url_path in properties but point to library functions instead of routes.
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
+void cbm_pipeline_ensure_decorator_routes(cbm_gbuf_t *gb);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

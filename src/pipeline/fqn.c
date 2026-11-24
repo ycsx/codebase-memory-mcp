@@ -295,7 +295,8 @@ static size_t strip_ext(const char *seg_start, size_t seg_len) {
 }
 
 /* JS/TS relative import: "./foo", "../bar/baz" → resolve against source dir. */
-static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_path) {
+static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_path,
+                                 bool file_path) {
     const char *p = module_path;
     while (*p) {
         while (*p == '/') {
@@ -313,10 +314,13 @@ static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_
             continue;
         }
         if (seg_len == FQN_DOTDOT_LEN && seg_start[0] == '.' && seg_start[FQN_SEP_LEN] == '.') {
+            if (file_path && !buf[0]) {
+                return NULL;
+            }
             path_pop_segment(buf);
             continue;
         }
-        if (*p == '\0') {
+        if (!file_path && *p == '\0') {
             seg_len = strip_ext(seg_start, seg_len);
         }
         if (seg_len > 0 && !path_append_segment(buf, buf_size, seg_start, seg_len)) {
@@ -324,6 +328,14 @@ static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_
         }
     }
     return strdup(buf);
+}
+
+char *cbm_pipeline_resolve_es_file_path(const char *source_rel, const char *specifier) {
+    char dir[FQN_PATH_BUF] = {0};
+    if (source_rel) {
+        seed_source_dir(dir, sizeof(dir), source_rel);
+    }
+    return resolve_js_relative(dir, sizeof(dir), specifier, true);
 }
 
 char *cbm_pipeline_resolve_relative_import(const char *source_rel, const char *module_path) {
@@ -336,7 +348,7 @@ char *cbm_pipeline_resolve_relative_import(const char *source_rel, const char *m
     if (kind == FQN_REL_KIND_PYTHON) {
         return resolve_python_relative(buf, sizeof(buf), module_path);
     }
-    return resolve_js_relative(buf, sizeof(buf), module_path);
+    return resolve_js_relative(buf, sizeof(buf), module_path, false);
 }
 
 char *cbm_pipeline_fqn_folder(const char *project, const char *rel_dir) {

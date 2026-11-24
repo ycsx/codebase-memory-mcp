@@ -78,6 +78,16 @@ int cbm_watcher_watch_count(cbm_watcher_t *w);
 /* Return the adaptive poll interval (ms) for a given file count. */
 int cbm_watcher_poll_interval_ms(int file_count);
 
+/* Delay after a successful reindex: max(interval_ms, min(3 * elapsed, 5 min)),
+ * counted from completion. Overflow-safe; negative inputs act as zero. */
+int cbm_watcher_success_delay_ms(int interval_ms, int64_t index_elapsed_ms);
+
+#if defined(CBM_WATCHER_ENABLE_TEST_API) && CBM_WATCHER_ENABLE_TEST_API
+/* Single-threaded test clock; zero restores the real monotonic clock. */
+void cbm_watcher_test_set_clock_ns(int64_t ns);
+int64_t cbm_watcher_test_next_poll_ns(cbm_watcher_t *w, const char *project);
+#endif
+
 /* Classify a stat() errno observed on a watched project root: returns true
  * only for values that mean the root itself is gone (ENOENT, ENOTDIR) and
  * may count toward stale-root pruning (#286). Any other failure (EACCES,

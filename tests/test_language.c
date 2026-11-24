@@ -5,6 +5,8 @@
  */
 #include "../src/foundation/compat.h"
 #include "test_framework.h"
+#include "test_helpers.h"
+#include "foundation/platform.h"
 #include "discover/discover.h"
 
 /* ── Extension-based detection ─────────────────────────────────── */
@@ -1058,7 +1060,55 @@ TEST(lang_all_have_names) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+TEST(lang_inc_c_family_and_existing_dialects) {
+    static const struct {
+        const char *content;
+        CBMLanguage expected;
+    } cases[] = {
+        {"#include \"sample.h\"\nextern \"C\" int sample_export() { return 0; }\n", CBM_LANG_CPP},
+        {"extern \"C\" __declspec(dllexport) int sample_export() { return 0; }\n", CBM_LANG_CPP},
+        {"#define SAMPLE_CALLBACK(T) T\nstatic SAMPLE_CALLBACK(int) sample() { return 0; }\n",
+         CBM_LANG_CPP},
+        {"/* in-function fragment */\n#ifdef SAMPLE_ENABLED\nif (check()) return 1;\n#endif\n",
+         CBM_LANG_CPP},
+        {"int sample(void) { return 0; }\n", CBM_LANG_CPP},
+        {" \t# include <stdint.h>\r\n", CBM_LANG_CPP},
+        {"/* example:\nextern \"C\" int example();\n*/\nSUMMARY = \"sample\"\n", CBM_LANG_BITBAKE},
+        {"// extern \"C\" example only\n", CBM_LANG_BITBAKE},
+        {"#include_extra \"sample.h\"\n", CBM_LANG_BITBAKE},
+        {"#define Value 1\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#ifndef SAMPLE\n#define SAMPLE 1\n#endif\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"ROUTINE Sample [Type=INC]\n#define Value 1\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#def1arg Value(%x) %x\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#; ObjectScript comment\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#include <sample.h>\n#def1arg Value(%x) %x\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"# recipe\nSUMMARY = \"sample\"\nrequire base.inc\n", CBM_LANG_BITBAKE},
+        {"SRC_URI += \"file://sample.c\"\ndo_compile() {\nif (check) { return; }\n}\n",
+         CBM_LANG_BITBAKE},
+        {"python do_generate() {\nif (ready):\n    pass\n}\n", CBM_LANG_BITBAKE},
+        {"do_compile() {\ncat <<'EOF'\n#include <stdio.h>\nstatic int sample;\nEOF\n}\n",
+         CBM_LANG_BITBAKE},
+        {"require base.inc\nextern \"C\" example in recipe text\n", CBM_LANG_BITBAKE},
+        {"", CBM_LANG_BITBAKE},
+    };
+    char dir[512], path[640];
+    snprintf(dir, sizeof(dir), "%s/cbm-lang-inc-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    snprintf(path, sizeof(path), "%s/sample.inc", dir);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        ASSERT_EQ(th_write_file(path, cases[i].content), 0);
+        CBMLanguage by_probe = cbm_disambiguate_inc(path);
+        remove(path);
+        ASSERT_EQ(by_probe, cases[i].expected);
+    }
+    ASSERT_EQ(cbm_disambiguate_inc(NULL), CBM_LANG_BITBAKE);
+    th_rmtree(dir);
+    PASS();
+}
+
 SUITE(language) {
+    RUN_TEST(lang_inc_c_family_and_existing_dialects);
+
     /* Extension: Tier 1 programming */
     RUN_TEST(lang_ext_go);
     RUN_TEST(lang_ext_python);

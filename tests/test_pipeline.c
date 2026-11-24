@@ -7609,7 +7609,50 @@ TEST(pipeline_seq_ts_cross_uses_shared_registry) {
     PASS();
 }
 
+/* Discovery must select C++ before extracting an include fragment. */
+TEST(pipeline_inc_c_family_fragments) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm-inc-cpp-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    write_temp_file(tmp, "runtime.inc",
+                    "#define SAMPLE_CALLBACK(T) T\n"
+                    "extern \"C\" int sample_export() { return 0; }\n"
+                    "static SAMPLE_CALLBACK(int) sample_callback() { return sample_export(); }\n");
+    write_temp_file(tmp, "main.cpp", "#include \"runtime.inc\"\n");
+    const cbm_index_mode_t modes[] = {CBM_MODE_FAST, CBM_MODE_FULL};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        char db_path[512];
+        snprintf(db_path, sizeof(db_path), "%s/graph-%d.db", tmp, (int)i);
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(tmp, db_path, modes[i]);
+        ASSERT_NOT_NULL(pipeline);
+        ASSERT_EQ(cbm_pipeline_run(pipeline), 0);
+        cbm_store_t *store = cbm_store_open_path(db_path);
+        ASSERT_NOT_NULL(store);
+        cbm_node_t *nodes = NULL;
+        int count = 0, exports = 0, callbacks = 0, false_externs = 0;
+        ASSERT_EQ(cbm_store_find_nodes_by_file(store, cbm_pipeline_project_name(pipeline),
+                                               "runtime.inc", &nodes, &count),
+                  CBM_STORE_OK);
+        for (int j = 0; j < count; j++) {
+            exports += strcmp(nodes[j].label, "Function") == 0 &&
+                       strcmp(nodes[j].name, "sample_export") == 0;
+            callbacks += strcmp(nodes[j].label, "Function") == 0 &&
+                         strcmp(nodes[j].name, "sample_callback") == 0;
+            false_externs += strcmp(nodes[j].name, "extern") == 0;
+        }
+        cbm_store_free_nodes(nodes, count);
+        cbm_store_close(store);
+        cbm_pipeline_free(pipeline);
+        ASSERT_EQ(exports, 1);
+        ASSERT_EQ(callbacks, 1);
+        ASSERT_EQ(false_externs, 0);
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
 SUITE(pipeline) {
+    RUN_TEST(pipeline_inc_c_family_fragments);
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
     RUN_TEST(pipeline_lock_blocking);

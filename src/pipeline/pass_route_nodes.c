@@ -442,9 +442,29 @@ static int ensure_decorator_route_path(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fu
     return SKIP_ONE;
 }
 
-/* Process a single Function/Method node. route_paths is emitted for annotation
- * arrays; older
- * indexes and single-path definitions retain route_path. */
+static void emit_client_route_call(cbm_gbuf_t *gb, int64_t func_id, const char *path,
+                                   const char *method) {
+    const char *rm = method ? method : "ANY";
+    char route_qn[CBM_ROUTE_QN_SIZE];
+    char cpath[CBM_SZ_256];
+    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", rm,
+             cbm_route_canon_path(path, cpath, sizeof(cpath)));
+    char esc_m[CBM_SZ_128];
+    cbm_json_escape(esc_m, sizeof(esc_m), rm);
+    char rprops[CBM_SZ_256];
+    (void)snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\"}", esc_m);
+    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn, "", 0, 0, rprops);
+    char esc_p[CBM_SZ_512];
+    cbm_json_escape(esc_p, sizeof(esc_p), path);
+    char eprops[CBM_SZ_1K];
+    (void)snprintf(eprops, sizeof(eprops),
+                   "{\"callee\":\"%s\",\"url_path\":\"%s\",\"method\":\"%s\"}", esc_m, esc_p,
+                   esc_m);
+    cbm_gbuf_insert_edge(gb, func_id, route_id, "HTTP_CALLS", eprops);
+}
+
+/* Process outbound client annotations, server annotation arrays and the
+ * route_path stored by older indexes. */
 static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
     if (!func->properties_json) {
         return 0;
@@ -457,6 +477,13 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
     yyjson_val *method_val = yyjson_obj_get(root, "route_method");
     const char *method = yyjson_is_str(method_val) ? yyjson_get_str(method_val) : "ANY";
     int created = 0;
+
+    const char *client_path = yyjson_get_str(yyjson_obj_get(root, "client_route_path"));
+    if (client_path) {
+        emit_client_route_call(gb, func->id, client_path, method);
+        yyjson_doc_free(doc);
+        return SKIP_ONE;
+    }
 
     yyjson_val *paths = yyjson_obj_get(root, "route_paths");
     if (yyjson_is_arr(paths)) {
@@ -481,7 +508,7 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
 }
 
 /* Phase 2a: Ensure all functions with route_path properties have Route+HANDLES edges. */
-static void ensure_decorator_routes(cbm_gbuf_t *gb) {
+void cbm_pipeline_ensure_decorator_routes(cbm_gbuf_t *gb) {
     const char *labels[] = {"Function", "Method"};
     int created = 0;
 
@@ -1207,7 +1234,7 @@ void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb) {
 
     /* Phase 2a: ensure all functions with route_path have Route+HANDLES.
      * Handles incremental mode where unchanged files don't re-extract. */
-    ensure_decorator_routes(gb);
+    cbm_pipeline_ensure_decorator_routes(gb);
 
     /* Phase 2b: connect prefix Routes to decorator handler Functions.
      * Must run BEFORE match_infra_routes so infra matching can find

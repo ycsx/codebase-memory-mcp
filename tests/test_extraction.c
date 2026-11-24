@@ -4535,7 +4535,31 @@ TEST(iris_export_xml_multi_class) {
     PASS();
 }
 
+TEST(extract_cpp_inc_linkage_and_callback) {
+    CBMFileResult *r =
+        extract("#define SAMPLE_CALLBACK(type) type\n"
+                "extern \"C\" __declspec(dllexport) int sample_export() { return 0; }\n"
+                "static SAMPLE_CALLBACK(int) sample_callback() { return sample_export(); }\n",
+                CBM_LANG_CPP, "sample", "runtime/sample.inc");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "Function", "sample_export"));
+    ASSERT_TRUE(has_def(r, "Function", "sample_callback"));
+    ASSERT_FALSE(has_def_any(r, "extern"));
+    cbm_free_result(r);
+
+    /* A statement include has no enclosing function in the file. Keep any
+     * syntax coverage diagnostic rather than inventing a callable owner. */
+    r = extract("#ifdef ENABLE_SAMPLE\nif (sample_check()) return 1;\n#endif\n", CBM_LANG_CPP,
+                "sample", "runtime/guard.inc");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(has_def_any(r, "extern"));
+    ASSERT_FALSE(has_def(r, "Function", "if"));
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(extraction) {
+    RUN_TEST(extract_cpp_inc_linkage_and_callback);
     /* Initialize extraction library */
     cbm_init();
 

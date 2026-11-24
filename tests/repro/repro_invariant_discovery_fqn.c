@@ -140,7 +140,6 @@ TEST(invariant_discovery_always_skip_dirs) {
         { ".ruff_cache",             1 }, /* GREEN */
         { ".eggs",                   1 }, /* GREEN */
         { ".env",                    1 }, /* GREEN */
-        { "env",                     1 }, /* GREEN */
         { "htmlcov",                 1 }, /* GREEN */
         { "site-packages",           1 }, /* GREEN */
 

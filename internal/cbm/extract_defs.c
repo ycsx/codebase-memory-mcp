@@ -1803,6 +1803,110 @@ static bool extract_routes_from_annotations(CBMArena *a, TSNode node, const char
     return false;
 }
 
+static TSNode annotation_arg_literal(TSNode arg) {
+    TSNode null_node = {0};
+    const char *kind = ts_node_type(arg);
+    if (strcmp(kind, "element_value_pair") == 0 || strcmp(kind, "value_argument") == 0) {
+        uint32_t nc = ts_node_named_child_count(arg);
+        if (nc == 0) {
+            return null_node;
+        }
+        arg = ts_node_named_child(arg, nc - SKIP_CHAR);
+    }
+    if (!is_route_string_kind(ts_node_type(arg))) {
+        return null_node;
+    }
+    for (uint32_t i = 0; i < ts_node_named_child_count(arg); i++) {
+        const char *ck = ts_node_type(ts_node_named_child(arg, i));
+        if (strcmp(ck, "interpolated_identifier") == 0 ||
+            strcmp(ck, "interpolated_expression") == 0 || strcmp(ck, "string_interpolation") == 0) {
+            return null_node;
+        }
+    }
+    return arg;
+}
+
+static bool is_jvm_interface(TSNode class_node) {
+    if (ts_node_is_null(class_node)) {
+        return false;
+    }
+    const char *kind = ts_node_type(class_node);
+    if (strcmp(kind, "interface_declaration") == 0) {
+        return true;
+    }
+    if (strcmp(kind, "class_declaration") != 0) {
+        return false;
+    }
+    for (uint32_t i = 0; i < ts_node_child_count(class_node); i++) {
+        TSNode ch = ts_node_child(class_node, i);
+        if (!ts_node_is_named(ch) && strcmp(ts_node_type(ch), "interface") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool retrofit_client_route(CBMArena *a, TSNode func_node, const char *source,
+                                  const CBMLangSpec *spec, const char **out_path,
+                                  const char **out_method) {
+    *out_path = NULL;
+    *out_method = NULL;
+    TSNode wrappers[] = {find_jvm_modifiers(func_node, spec->language), func_node};
+    for (size_t w = 0; w < sizeof(wrappers) / sizeof(wrappers[0]); w++) {
+        if (ts_node_is_null(wrappers[w])) {
+            continue;
+        }
+        uint32_t cc = ts_node_child_count(wrappers[w]);
+        for (uint32_t ci = 0; ci < cc; ci++) {
+            TSNode child = ts_node_child(wrappers[w], ci);
+            if (!cbm_kind_in_set(child, spec->decorator_node_types)) {
+                continue;
+            }
+            TSNode name_node = annotation_name_node(child);
+            if (ts_node_is_null(name_node)) {
+                continue;
+            }
+            char *name = cbm_node_text(a, name_node, source);
+            const char *method = annotation_route_method(name);
+            if (!method || strcmp(method, name) != 0) {
+                continue;
+            }
+            TSNode args = annotation_args_node(child);
+            if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
+                continue;
+            }
+            *out_method = method;
+            TSNode lit = annotation_arg_literal(ts_node_named_child(args, 0));
+            char *text = ts_node_is_null(lit) ? NULL : cbm_node_text(a, lit, source);
+            size_t len = text ? strlen(text) : 0;
+            if (len > PAIR_CHARS && (text[0] == '"' || text[0] == '\'')) {
+                char *path = cbm_arena_strndup(a, text + SKIP_CHAR, len - PAIR_CHARS);
+                *out_path = (!path || path[0] == '/' || strstr(path, "://"))
+                                ? path
+                                : cbm_arena_sprintf(a, "/%s", path);
+            }
+            return true;
+        }
+    }
+    return false;
+}
+/* Both the general definition walk and the class method walk see JVM methods. */
+static bool extract_client_route(CBMExtractCtx *ctx, TSNode method, const CBMLangSpec *spec,
+                                 CBMDefinition *def) {
+    if (ctx->language != CBM_LANG_JAVA && ctx->language != CBM_LANG_KOTLIN) {
+        return false;
+    }
+    for (TSNode owner = ts_node_parent(method); !ts_node_is_null(owner);
+         owner = ts_node_parent(owner)) {
+        if (cbm_kind_in_set(owner, spec->class_node_types)) {
+            return is_jvm_interface(owner) &&
+                   retrofit_client_route(ctx->arena, method, ctx->source, spec,
+                                         &def->client_route_path, &def->route_method);
+        }
+    }
+    return false;
+}
+
 static void extract_route_from_decorators(CBMArena *a, TSNode func_node, const char *source,
                                           const CBMLangSpec *spec, const char **out_path,
                                           const char **out_method) {
@@ -3417,7 +3521,14 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
 
     // Decorators + route extraction from decorator AST
     def.decorators = extract_decorators(a, node, ctx->source, ctx->language, spec);
-    extract_route_from_decorators(a, node, ctx->source, spec, &def.route_path, &def.route_method);
+    if (extract_client_route(ctx, node, spec, &def)) {
+        /* The class method walk emits the route with its owning interface. */
+        def.client_route_path = NULL;
+        def.route_method = NULL;
+    } else {
+        extract_route_from_decorators(a, node, ctx->source, spec, &def.route_path,
+                                      &def.route_method);
+    }
 
     // Rust: disambiguate cfg-gated twin functions by folding the #[cfg(...)]
     // predicate into the QN so both branches survive the graph upsert (#495).
@@ -4508,7 +4619,10 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
     }
 
     def.decorators = extract_decorators(a, child, ctx->source, ctx->language, spec);
-    extract_route_from_decorators(a, child, ctx->source, spec, &def.route_path, &def.route_method);
+    if (!extract_client_route(ctx, child, spec, &def)) {
+        extract_route_from_decorators(a, child, ctx->source, spec, &def.route_path,
+                                      &def.route_method);
+    }
     if (def.route_path && (ctx->language == CBM_LANG_JAVA || ctx->language == CBM_LANG_KOTLIN)) {
         const char **method_paths = NULL;
         const char *single_method_path[PAIR_LEN] = {def.route_path, NULL};

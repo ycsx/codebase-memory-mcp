@@ -503,6 +503,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     append_json_string(buf, bufsize, &pos, "route_path", def->route_path);
     append_json_str_array(buf, bufsize, &pos, "route_paths", def->route_paths);
     append_json_string(buf, bufsize, &pos, "route_method", def->route_method);
+    append_json_string(buf, bufsize, &pos, "client_route_path", def->client_route_path);
 
     /* MinHash fingerprint — append if present and buffer has room.
      * Hex-encoded K=64 uint32 = 512 chars + key/quotes ≈ 520 chars. */
@@ -1425,6 +1426,7 @@ typedef struct {
     resolve_worker_state_t *workers;
     int max_workers;
 
+    cbm_pipeline_ctx_t *pipeline_ctx;
     CBMFileResult **result_cache;
     const cbm_gbuf_t *main_gbuf;    /* READ-ONLY during Phase 4 */
     const cbm_registry_t *registry; /* READ-ONLY during Phase 4 */
@@ -2796,7 +2798,13 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         const char **imp_vals = NULL;
         int imp_count = 0;
         uint64_t _imp_t0 = extract_now_ns();
-        build_import_map(rc->main_gbuf, rc->project_name, rel, &imp_keys, &imp_vals, &imp_count);
+        if (cbm_pipeline_es_importer(rel)) {
+            cbm_pipeline_build_import_map(rc->pipeline_ctx, rel, result, &imp_keys, &imp_vals,
+                                          &imp_count);
+        } else {
+            build_import_map(rc->main_gbuf, rc->project_name, rel, &imp_keys, &imp_vals,
+                             &imp_count);
+        }
         atomic_fetch_add_explicit(&rc->time_ns_import_map, extract_now_ns() - _imp_t0,
                                   memory_order_relaxed);
 
@@ -2967,6 +2975,9 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 
     cbm_pipeline_propagate_java_http(files, file_count, result_cache);
 
+    /* The serial registry pass allocated external imports and channels after
+     * extraction. Resolution workers must start beyond those IDs. */
+    atomic_store(shared_ids, cbm_gbuf_next_id(ctx->gbuf));
     cbm_log_info("parallel.resolve.start", "files", itoa_log(file_count), "workers",
                  itoa_log(worker_count));
 
@@ -2985,6 +2996,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         .workers = workers,
         .max_workers = worker_count,
         .result_cache = result_cache,
+        .pipeline_ctx = ctx,
         .main_gbuf = ctx->gbuf,
         .registry = ctx->registry,
         .shared_ids = shared_ids,

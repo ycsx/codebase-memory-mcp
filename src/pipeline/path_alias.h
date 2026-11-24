@@ -90,6 +90,9 @@ const cbm_path_alias_map_t *cbm_path_alias_find_for_file(const cbm_path_alias_co
  * baseUrl fallback applies. Common JS/TS/Vue extensions are stripped from the
  * resolved path so the existing module-FQN
  * pipeline can consume it. */
+/* Return the actual filename, including a spelled suffix, for exact lookup. */
+char *cbm_path_alias_resolve_file(const cbm_path_alias_map_t *map, const char *module_path,
+                                  bool use_base_url);
 char *cbm_path_alias_resolve(const cbm_path_alias_map_t *map, const char *module_path);
 
 #endif /* CBM_PATH_ALIAS_H */

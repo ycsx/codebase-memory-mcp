@@ -92,6 +92,11 @@ struct cbm_watcher {
 #define POLL_FILE_STEP 500 /* add 1s per this many files */
 #define POLL_MAX_MS 60000
 
+/* Pay back the cost of a successful rebuild before polling again (#2835).
+ * Cap the cooldown at five minutes to bound freshness under continuous edits. */
+#define INDEX_COOLDOWN_FACTOR 3
+#define INDEX_COOLDOWN_CEILING_MS 300000
+
 /* Stale-root pruning (#286): a watched project whose root directory stays
  * missing is pruned — its cached DB is deleted and the watch entry removed.
  * Deletion is destructive (the DB can hold user-authored data such as the
@@ -105,13 +110,36 @@ struct cbm_watcher {
 
 /* ── Time helper ────────────────────────────────────────────────── */
 
+#if defined(CBM_WATCHER_ENABLE_TEST_API) && CBM_WATCHER_ENABLE_TEST_API
+static int64_t test_clock_ns = 0;
+#endif
+
 static int64_t now_ns(void) {
+#if defined(CBM_WATCHER_ENABLE_TEST_API) && CBM_WATCHER_ENABLE_TEST_API
+    if (test_clock_ns != 0) {
+        return test_clock_ns;
+    }
+#endif
     struct timespec ts;
     cbm_clock_gettime(CLOCK_MONOTONIC, &ts);
     return ((int64_t)ts.tv_sec * NS_PER_SEC) + ts.tv_nsec;
 }
 
 /* ── Adaptive interval ──────────────────────────────────────────── */
+
+int cbm_watcher_success_delay_ms(int interval_ms, int64_t index_elapsed_ms) {
+    if (interval_ms < 0) {
+        interval_ms = 0;
+    }
+    if (index_elapsed_ms <= 0) {
+        return interval_ms;
+    }
+    /* Divide before multiplying so even INT64_MAX cannot overflow. */
+    int64_t cooldown = index_elapsed_ms > INDEX_COOLDOWN_CEILING_MS / INDEX_COOLDOWN_FACTOR
+                           ? INDEX_COOLDOWN_CEILING_MS
+                           : index_elapsed_ms * INDEX_COOLDOWN_FACTOR;
+    return (int)(cooldown > interval_ms ? cooldown : interval_ms);
+}
 
 int cbm_watcher_poll_interval_ms(int file_count) {
     int ms = POLL_BASE_MS + ((file_count / POLL_FILE_STEP) * CBM_MSEC_PER_SEC);
@@ -517,19 +545,22 @@ void cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *r
         return;
     }
 
-    /* Remove old entry first (key points to state's project_name) */
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *old = cbm_ht_get(w->projects, project_name);
-    if (old) {
-        cbm_ht_delete(w->projects, project_name);
-        state_free(old);
+    /* Reusing a project across agent sessions must retain its poll baseline. */
+    if (old && strcmp(old->root_path, root_path) == 0) {
+        cbm_mutex_unlock(&w->projects_lock);
+        return;
     }
-
     project_state_t *s = state_new(project_name, root_path);
-    if (!s) {
+    if (!s || (old && !defer_state_free(w, old))) {
+        state_free(s);
         cbm_mutex_unlock(&w->projects_lock);
         cbm_log_warn("watcher.watch.oom", "project", project_name, "path", root_path);
         return;
+    }
+    if (old) {
+        cbm_ht_delete(w->projects, project_name);
     }
     cbm_ht_set(w->projects, s->project_name, s);
     cbm_mutex_unlock(&w->projects_lock);
@@ -787,7 +818,10 @@ static void poll_project(const char *key, void *val, void *ud) {
 
     /* Trigger reindex */
     cbm_log_info("watcher.changed", "project", s->project_name, "strategy", "git");
+    int delay_ms = s->interval_ms;
+    int64_t anchor_ns = ctx->now;
     if (ctx->w->index_fn) {
+        int64_t index_start = now_ns();
         int rc = ctx->w->index_fn(s->project_name, s->root_path, ctx->w->user_data);
         if (rc == 0) {
             ctx->reindexed++;
@@ -802,6 +836,13 @@ static void poll_project(const char *key, void *val, void *ud) {
             /* Refresh file count for interval */
             s->file_count = git_file_count(s->root_path);
             s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
+            anchor_ns = now_ns();
+            delay_ms =
+                cbm_watcher_success_delay_ms(s->interval_ms, (anchor_ns - index_start) / US_PER_MS);
+            if (delay_ms > s->interval_ms) {
+                cbm_log_info("watcher.cooldown", "project", s->project_name, "delay_ms",
+                             itoa_buf(delay_ms));
+            }
         } else if (rc > 0) {
             /* Busy-skip: baseline stays uncommitted, next poll retries. */
             cbm_log_info("watcher.index.retry", "project", s->project_name);
@@ -810,7 +851,7 @@ static void poll_project(const char *key, void *val, void *ud) {
         }
     }
 
-    s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
+    s->next_poll_ns = anchor_ns + ((int64_t)delay_ms * US_PER_MS);
 }
 
 /* Callback to snapshot project state pointers into an array. */
@@ -827,6 +868,23 @@ static void snapshot_project(const char *key, void *val, void *ud) {
         sc->items[sc->count++] = val;
     }
 }
+
+#if defined(CBM_WATCHER_ENABLE_TEST_API) && CBM_WATCHER_ENABLE_TEST_API
+void cbm_watcher_test_set_clock_ns(int64_t ns) {
+    test_clock_ns = ns;
+}
+
+int64_t cbm_watcher_test_next_poll_ns(cbm_watcher_t *w, const char *project) {
+    if (!w || !project) {
+        return -1;
+    }
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = cbm_ht_get(w->projects, project);
+    int64_t next = s ? s->next_poll_ns : -1;
+    cbm_mutex_unlock(&w->projects_lock);
+    return next;
+}
+#endif
 
 int cbm_watcher_poll_once(cbm_watcher_t *w) {
     if (!w) {

@@ -1772,7 +1772,73 @@ TEST(jlsp_real_corpus_parity_90_percent) {
 
 /* ── Suite registration ──────────────────────────────────────────── */
 
+/* Same-package Enum/Process shadow java.lang, while explicit imports still win. */
+TEST(jlsp_own_package_shadows_java_lang) {
+    const char *names[] = {"Enum", "Process"};
+    for (size_t ni = 0; ni < sizeof(names) / sizeof(names[0]); ni++) {
+        for (int imported = 0; imported < 2; imported++) {
+            char source[512], own_qn[128], other_qn[128], own_method[160], other_method[160];
+            snprintf(own_qn, sizeof(own_qn), "com.example.%s", names[ni]);
+            snprintf(other_qn, sizeof(other_qn), "other.%s", names[ni]);
+            snprintf(own_method, sizeof(own_method), "%s.pick", own_qn);
+            snprintf(other_method, sizeof(other_method), "%s.pick", other_qn);
+            char import_line[160] = "";
+            if (imported) {
+                snprintf(import_line, sizeof(import_line), "import %s;\n", other_qn);
+            }
+            snprintf(source, sizeof(source),
+                     "package com.example;\n%s"
+                     "class Caller { int run(%s value) { return value.pick(); } }\n",
+                     import_line, names[ni]);
+            CBMLSPDef defs[] = {
+                {.qualified_name = own_qn,
+                 .short_name = names[ni],
+                 .label = "Class",
+                 .def_module_qn = "com.example"},
+                {.qualified_name = own_method,
+                 .short_name = "pick",
+                 .label = "Method",
+                 .receiver_type = own_qn,
+                 .def_module_qn = "com.example",
+                 .return_types = "int"},
+                {.qualified_name = other_qn,
+                 .short_name = names[ni],
+                 .label = "Class",
+                 .def_module_qn = "other"},
+                {.qualified_name = other_method,
+                 .short_name = "pick",
+                 .label = "Method",
+                 .receiver_type = other_qn,
+                 .def_module_qn = "other",
+                 .return_types = "int"},
+            };
+            CBMArena arena;
+            cbm_arena_init(&arena);
+            CBMResolvedCallArray out = {0};
+            const char *import_names[] = {names[ni]};
+            const char *import_qns[] = {other_qn};
+            cbm_run_java_lsp_cross(&arena, source, (int)strlen(source), "test.Caller", defs, 4,
+                                   import_names, import_qns, imported, NULL, &out);
+            int expected = 0, unexpected = 0;
+            for (int i = 0; i < out.count; i++) {
+                if (!out.items[i].callee_qn || out.items[i].confidence < 0.5f) {
+                    continue;
+                }
+                const char *qn = out.items[i].callee_qn;
+                expected += strcmp(qn, imported ? other_method : own_method) == 0;
+                unexpected += strcmp(qn, imported ? own_method : other_method) == 0 ||
+                              strncmp(qn, "java.lang.", 10) == 0;
+            }
+            cbm_arena_destroy(&arena);
+            ASSERT_EQ(expected, 1);
+            ASSERT_EQ(unexpected, 0);
+        }
+    }
+    PASS();
+}
+
 void suite_java_lsp(void) {
+    RUN_TEST(jlsp_own_package_shadows_java_lang);
     /* Strings / java.lang */
     RUN_TEST(jlsp_string_length);
     RUN_TEST(jlsp_string_concat_method);
