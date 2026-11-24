@@ -1,6 +1,6 @@
 {
   "name": "codebase-memory-desktop",
-  "version": "0.1.0",
+  "version": "0.9.20",
   "private": true,
   "author": "ycsx/codebase-memory-mcp",
   "description": "Desktop service controller for codebase-memory-mcp",

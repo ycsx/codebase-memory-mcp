@@ -125,6 +125,8 @@ codebase-memory-mcp console --port=9749 --no-open
 
 服务只绑定 `127.0.0.1`。Windows/macOS Desktop 安装包会独立管理该 `console` 子进程；普通 stdio MCP 启动不会自动创建 UI 服务。
 
+多个本机 Agent 共用桌面服务时，先在桌面窗口启动服务，再到“AI 接入”点击“复制提示词”。提示词包含当前的 `/mcp` 地址、目标机的凭据文件位置，以及重连后用 `list_projects` 验证各客户端共用一个常驻后端的步骤。
+
 ## Release 资产清单
 
 发布时应包含：

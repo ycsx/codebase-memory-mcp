@@ -1,3 +1,5 @@
+const assert = require("node:assert/strict");
+const { once } = require("node:events");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { app, BrowserWindow, ipcMain } = require("electron");
@@ -55,7 +57,10 @@ ipcMain.handle("update:get-status", () => ({
 }));
 ipcMain.handle("update:check", () => ({ state: "up-to-date", currentVersion: "1.0.0" }));
 ipcMain.handle("update:install", () => ({ state: "installing", currentVersion: "0.9.0", latestVersion: "1.0.0" }));
-ipcMain.handle("clipboard:write-text", () => true);
+ipcMain.handle("clipboard:write-text", (_event, text) => {
+  ipcMain.emit("smoke:copied", text);
+  return true;
+});
 
 app.whenReady().then(async () => {
   const window = new BrowserWindow({
@@ -75,6 +80,13 @@ app.whenReady().then(async () => {
   const image = await window.webContents.capturePage();
   const output = process.env.CBM_RENDER_OUTPUT || path.join(app.getPath("temp"), "codebase-memory-desktop-smoke.png");
   await fs.writeFile(output, image.toPNG());
+  const copied = once(ipcMain, "smoke:copied", { signal: AbortSignal.timeout(5000) });
+  await window.webContents.executeJavaScript('document.querySelector("#copy-prompt-button").click()');
+  const [prompt] = await copied;
+  assert.ok(prompt.includes(`http://127.0.0.1:${status.port}/mcp`), "Copied prompt must include the current MCP URL");
   console.log(output);
   app.quit();
+}).catch((error) => {
+  console.error(error);
+  app.exit(1);
 });

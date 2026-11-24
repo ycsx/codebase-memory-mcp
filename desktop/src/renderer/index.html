@@ -101,7 +101,13 @@
           </button>
         </div>
         <div class="prompt-shell">
-          <pre id="connection-prompt">本机已经安装 Codebase Memory MCP。不要下载、重装、升级或改写 MCP 配置，也不要把代码上传到外部服务。请先确认当前会话能看到名为 codebase-memory-mcp 的 MCP 工具；如果看不到，停止当前任务并告诉我需要重启或重新连接 AI 客户端。
+          <pre id="connection-prompt">本机已经安装 Codebase Memory MCP。不要下载、重装、升级，也不要把代码上传到外部服务。日常代码任务请沿用现有 MCP 配置。如果当前会话看不到 codebase-memory-mcp 工具，请提示我重新连接或重启 AI 客户端。
+
+当我要求部署或迁移客户端时，先启动目标机的桌面服务。在各个本机 Agent 中将 codebase-memory-mcp 条目设为 Streamable HTTP。如果菜单列出 HTTP 和 SSE，选择 HTTP。URL 填 <span id="prompt-mcp-url">http://127.0.0.1:&lt;桌面监听端口&gt;/mcp</span>（端口以目标机桌面显示为准，默认 9749）。如果原条目仍用 stdio 启动可执行文件，在原条目中用这个 URL 替换 command 和 args。
+
+桌面端已写好的有效鉴权配置可直接复用。需要配置鉴权时，请在目标机读取桌面应用用户数据目录中的 desktop-mcp.token，Windows 默认路径为 %APPDATA%\codebase-memory-desktop\desktop-mcp.token。在同一个本地操作中去掉文件内容首尾的空白，自动写入 Authorization 请求头，值为 Bearer、一个空格和文件内容。Codex 直接管理配置时，在 config.toml 的 [mcp_servers.codebase-memory-mcp] 表中设置 url 和 http_headers.Authorization。真实凭据只用于目标机的认证配置，命令输出、日志和回复只报告配置结果。
+
+如果通过 CC Switch 管理 MCP，在它的 MCP 管理页修改原条目并同步到目标客户端。使用 Codex 时，迁移前记下原有的逐工具审批设置，迁移后逐项核对。退出仍使用旧 stdio 连接的会话，逐个重连客户端并调用 list_projects。核对系统进程列表，所有客户端应共用桌面显示的同一个常驻服务 PID。带 --index-worker 的是索引期间的临时子进程。
 
 开始代码任务时先调用 list_projects，选择目标仓库对应的 project。只有目标仓库尚未登记或确实需要重新建立索引时才调用 index_repository；已登记项目先用 index_status 检查状态，普通查询不要重复索引。
 

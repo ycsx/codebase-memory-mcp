@@ -379,6 +379,13 @@ test("desktop exposes branding, AI routing, usage stats, and verified updates", 
   assert.match(html, /trace_path/);
   assert.match(html, /rg\/grep/);
   const promptSource = html.match(/<pre id="connection-prompt">([\s\S]*?)<\/pre>/)?.[1] ?? "";
+  assert.match(promptSource, /Streamable HTTP/);
+  assert.match(promptSource, /Authorization.*Bearer/);
+  assert.match(promptSource, /http_headers\.Authorization/);
+  assert.doesNotMatch(promptSource, /Bearer\s+cbm-desktop-[0-9a-f]{64}/i);
+  assert.ok(promptSource.includes("%APPDATA%\\codebase-memory-desktop\\desktop-mcp.token"));
+  assert.match(promptSource, /CC Switch/);
+  assert.match(promptSource, /--index-worker/);
   assert.doesNotMatch(promptSource, /GitHub|checksums\.txt|install -y/);
   assert.match(html, /id="usage-file-rows"/);
   assert.match(html, /id="update-notice"/);

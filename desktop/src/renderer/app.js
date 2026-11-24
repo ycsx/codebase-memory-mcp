@@ -10,6 +10,7 @@ const elements = {
   appVersion: document.querySelector("#app-version"),
   binaryPath: document.querySelector("#binary-path"),
   connectionPrompt: document.querySelector("#connection-prompt"),
+  promptMcpUrl: document.querySelector("#prompt-mcp-url"),
   copyPrompt: document.querySelector("#copy-prompt-button"),
   copyPromptLabel: document.querySelector("#copy-prompt-label"),
   externalNotice: document.querySelector("#external-notice"),
@@ -97,6 +98,7 @@ function renderStatus(status) {
   elements.state.textContent = label;
   elements.pid.textContent = status?.pid ?? "--";
   elements.address.textContent = `127.0.0.1:${status?.port ?? "--"}`;
+  elements.promptMcpUrl.textContent = `http://127.0.0.1:${status?.port ?? "<桌面监听端口>"}/mcp`;
   elements.uptime.textContent = formatDuration(status?.uptimeMs);
   elements.owner.textContent = status?.managed ? "桌面端管理" : state === "external" ? "其他程序管理" : "尚未启动";
   elements.memory.textContent = Number.isFinite(status?.rssMb) ? `${status.rssMb.toFixed(1)} MB` : "--";
