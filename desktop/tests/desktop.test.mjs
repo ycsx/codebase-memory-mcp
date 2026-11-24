@@ -233,6 +233,11 @@ test("Desktop starts a detached console and persists its ownership token", async
     const saved = JSON.parse(readFileSync(statePath, "utf8"));
     assert.equal(saved.pid, child.pid);
     assert.equal(saved.token, spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN);
+    const bearer = spawnOptions.env.CBM_DESKTOP_MCP_TOKEN;
+    assert.match(bearer, /^cbm-desktop-[0-9a-f]{64}$/);
+    assert.notEqual(bearer, saved.token);
+    assert.equal(JSON.stringify(saved).includes(bearer), false);
+    assert.equal(JSON.stringify(started).includes(bearer), false);
 
     const outputReady = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -257,6 +262,11 @@ test("Desktop starts a detached console and persists its ownership token", async
       ["stdout", "索引完成"],
       ["stderr", "警告：跳过一个文件"],
     ]);
+    await manager.stop();
+    child.killed = false;
+    await manager.start();
+    assert.equal(spawnOptions.env.CBM_DESKTOP_MCP_TOKEN, bearer);
+    assert.notEqual(spawnOptions.env.CBM_DESKTOP_SERVICE_TOKEN, saved.token);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

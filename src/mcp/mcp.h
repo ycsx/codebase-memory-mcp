@@ -137,6 +137,7 @@ bool cbm_mcp_server_set_authz(cbm_mcp_server_t *srv, const cbm_mcp_authz_t *auth
 void cbm_mcp_server_free(cbm_mcp_server_t *srv);
 
 /* Set external watcher reference (for auto-index registration). Not owned. */
+void cbm_mcp_server_attach_desktop_session(cbm_mcp_server_t *srv, struct cbm_watcher *watcher);
 void cbm_mcp_server_set_watcher(cbm_mcp_server_t *srv, struct cbm_watcher *w);
 
 /* Set external config store reference (for auto_index setting). Not owned. */

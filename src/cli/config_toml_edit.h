@@ -39,6 +39,14 @@ int cbm_toml_remove_managed_block(const char *file_path, const char *begin_marke
 int cbm_toml_remove_legacy_table(const char *file_path, const char *table_name,
                                  const char *begin_marker, const char *end_marker);
 
+/* Replace just the transport assignments of an existing Codex server. Preserve
+ * per-tool approvals, timeouts and unrelated bytes. A NULL transport with
+ * only_from_desktop removes the owned Desktop server and its tool tables.
+ * Returns 2 for absent,
+ * 1 for customized transport, 0 for success, or -1 on edit failure. */
+int cbm_toml_switch_mcp_transport(const char *file_path, const char *table_name,
+                                  const char *transport, int only_from_desktop);
+
 /* Insert, replace, or remove the array table whose identity assignment equals
  * identity_value. table_name and identity_key must be TOML bare identifiers.
  * table_body excludes the [[table_name]] header. */

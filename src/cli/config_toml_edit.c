@@ -5,6 +5,7 @@
 
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
+#include "mcp/desktop_endpoint.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -2418,6 +2419,158 @@ static int toml_legacy_schema_is_owned(int command_count, int command_owned, int
                                        int args_empty) {
     return command_count == 1 && command_owned && args_count <= 1 &&
            (args_count == 0 || args_empty);
+}
+
+enum { MCP_COMMAND, MCP_ARGS, MCP_URL, MCP_BEARER, MCP_FIELD_COUNT };
+
+static int mcp_transport_field(const toml_key_path_t *key) {
+    if (toml_key_path_is_single(key, "command"))
+        return MCP_COMMAND;
+    if (toml_key_path_is_single(key, "args"))
+        return MCP_ARGS;
+    if (toml_key_path_is_single(key, "url"))
+        return MCP_URL;
+    if (key->count == 2 && strcmp(key->data, "http_headers") == 0 &&
+        strcmp(toml_key_path_segment(key, 1), "Authorization") == 0)
+        return MCP_BEARER;
+    return -1;
+}
+
+static bool mcp_client_setting(const toml_key_path_t *key) {
+    static const char *const names[] = {"startup_timeout_sec",
+                                        "startup_timeout_ms",
+                                        "tool_timeout_sec",
+                                        "enabled",
+                                        "required",
+                                        "enabled_tools",
+                                        "disabled_tools",
+                                        "default_tools_approval_mode",
+                                        "tools"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        if (strcmp(key->data, names[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool mcp_transport_value_owned(const char *data, const toml_assignment_t *a, int field) {
+    if (field == MCP_COMMAND) {
+        int owned = 0;
+        return toml_legacy_command_is_owned(data, a, &owned) == TOML_EDIT_OK && owned;
+    }
+    if (field == MCP_ARGS)
+        return toml_legacy_args_are_empty(data, a);
+    toml_string_t string = {0};
+    size_t len = a->value_end - a->value_start;
+    bool valid = !a->multiline_value &&
+                 toml_parse_string(data + a->value_start, len, &string) == TOML_EDIT_OK &&
+                 string.consumed == len && strlen(string.data) == string.len &&
+                 (field == MCP_URL ? cbm_desktop_url_valid(string.data)
+                                   : cbm_desktop_bearer_valid(string.data));
+    toml_string_dispose(&string);
+    return valid;
+}
+
+static int switch_mcp_transport(const char *path, const char *data, size_t len,
+                                const toml_file_snapshot_t *snapshot, const toml_key_path_t *table,
+                                const char *transport, int only_from_desktop) {
+    toml_buffer_t output = {0};
+    int rc = TOML_EDIT_ERR;
+    int string_state = TOML_STRING_NONE;
+    bool active = false, descendant = false, found = false, replaced = false;
+    bool seen[MCP_FIELD_COUNT] = {false};
+    size_t cursor = 0;
+    toml_line_t line;
+    const char *newline = toml_newline_style(data, len);
+    while (toml_next_line(data, len, &cursor, &line)) {
+        int field = -1;
+        if (string_state == TOML_STRING_NONE) {
+            toml_header_t header;
+            if (toml_parse_header(data, &line, "", &header) != TOML_EDIT_OK)
+                goto done;
+            if (header.present) {
+                active = toml_key_path_equal(&header.path, table);
+                descendant = header.path.count > table->count &&
+                             toml_key_path_has_prefix(&header.path, table);
+                bool foreign =
+                    (active && (found || header.array)) ||
+                    (descendant &&
+                     strcmp(toml_key_path_segment(&header.path, table->count), "tools") != 0);
+                found |= active;
+                toml_header_dispose(&header);
+                if (foreign) {
+                    rc = TOML_EDIT_FOREIGN;
+                    goto done;
+                }
+            } else if (active && !toml_line_is_blank_or_comment(data, &line)) {
+                toml_assignment_t a;
+                if (toml_parse_assignment(data, &line, &a) != TOML_EDIT_OK)
+                    goto done;
+                field = a.present ? mcp_transport_field(&a.key) : -1;
+                bool owned =
+                    a.present &&
+                    (field < 0 ? mcp_client_setting(&a.key)
+                               : !seen[field] && mcp_transport_value_owned(data, &a, field));
+                toml_assignment_dispose(&a);
+                if (!owned) {
+                    rc = TOML_EDIT_FOREIGN;
+                    goto done;
+                }
+                if (field >= 0)
+                    seen[field] = true;
+            }
+        }
+        if (toml_scan_line_strings(data, &line, &string_state) != TOML_EDIT_OK)
+            goto done;
+        if (!transport && (active || descendant) && !toml_line_is_blank_or_comment(data, &line)) {
+            continue;
+        }
+        if (field < 0) {
+            if (toml_buffer_append(&output, data + line.start, line.full_end - line.start) !=
+                TOML_EDIT_OK)
+                goto done;
+        } else if (!replaced) {
+            if (toml_append_normalized_text(&output, transport, strlen(transport), newline) !=
+                TOML_EDIT_OK)
+                goto done;
+            replaced = true;
+        }
+    }
+    if (string_state != TOML_STRING_NONE)
+        goto done;
+    if (!found) {
+        rc = 2;
+        goto done;
+    }
+    bool stdio_entry = seen[MCP_COMMAND] && !seen[MCP_URL] && !seen[MCP_BEARER];
+    bool desktop_entry = seen[MCP_URL] && seen[MCP_BEARER] && !seen[MCP_COMMAND] && !seen[MCP_ARGS];
+    rc = desktop_entry || (stdio_entry && !only_from_desktop)
+             ? toml_write_atomic(path, data, len, output.data, output.len, snapshot)
+             : TOML_EDIT_FOREIGN;
+done:
+    toml_buffer_dispose(&output);
+    return rc;
+}
+
+int cbm_toml_switch_mcp_transport(const char *file_path, const char *table_name,
+                                  const char *transport, int only_from_desktop) {
+    if (!toml_valid_path(file_path) || !table_name || (!transport && !only_from_desktop))
+        return TOML_EDIT_ERR;
+    toml_key_path_t table;
+    if (toml_parse_key_path(table_name, 0, strlen(table_name), &table) != TOML_EDIT_OK)
+        return TOML_EDIT_ERR;
+    char *data = NULL;
+    size_t len = 0;
+    toml_file_snapshot_t snapshot;
+    int rc = TOML_EDIT_ERR;
+    if (toml_read_file(file_path, &data, &len, &snapshot) == TOML_EDIT_OK &&
+        toml_text_is_safe(data, len, 1)) {
+        rc = switch_mcp_transport(file_path, data, len, &snapshot, &table, transport,
+                                  only_from_desktop);
+    }
+    free(data);
+    toml_key_path_dispose(&table);
+    return rc;
 }
 
 int cbm_toml_remove_legacy_table(const char *file_path, const char *table_name,

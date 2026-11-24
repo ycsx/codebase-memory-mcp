@@ -15,6 +15,7 @@
 #include "foundation/platform.h"
 #include "foundation/constants.h"
 #include "foundation/sha256.h"
+#include "mcp/desktop_endpoint.h"
 #include "mcp/mcp.h" // cbm_mcp_tool_input_schema — CLI flag parser + per-tool --help
 
 /* CLI buffer size constants. */
@@ -854,6 +855,11 @@ static const char CBM_SCOUT_MCP_SERVER_NAME[] = "codebase-memory-scout";
 static const char CBM_ANALYSIS_PROFILE_ARGUMENT[] = "--tool-profile=analysis";
 static const char CBM_SCOUT_PROFILE_ARGUMENT[] = "--tool-profile=scout";
 
+/* Set once during Desktop console startup. The explicit integrations installer
+ * runs in that same process. Standalone CLI processes leave these empty. */
+static char desktop_url[CBM_SZ_64];
+static char desktop_bearer[CBM_SZ_128];
+
 static char *cbm_build_json_mcp_entry(const char *binary_path, cbm_json_mcp_schema_t schema,
                                       const char *argument) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -926,17 +932,28 @@ static bool cbm_json_mcp_owned_command(const char *command, const char *expected
            strcmp(command, "codebase-memory-mcp.exe") == 0;
 }
 
+static void cbm_agent_installed_binary_path(const char *home, char *binary_path,
+                                            size_t binary_path_size) {
+#ifdef _WIN32
+    snprintf(binary_path, binary_path_size, "%s/.local/bin/codebase-memory-mcp.exe", home);
+#else
+    snprintf(binary_path, binary_path_size, "%s/.local/bin/codebase-memory-mcp", home);
+#endif
+}
+
 static int cbm_json_mcp_snapshot_ownership(const char *document, size_t document_length,
                                            const char *const *object_path, size_t path_len,
                                            cbm_json_mcp_schema_t schema, const char *entry_name,
-                                           const char *argument, const char *expected_binary) {
+                                           const char *argument, const char *expected_binary,
+                                           const char *alternate_binary) {
     cbm_json_like_object_field_t fields[3];
     size_t field_count = cbm_json_mcp_ownership_fields(schema, argument, fields);
     char *command = NULL;
     int result = cbm_json_like_match_object_entry(document, document_length, object_path, path_len,
                                                   entry_name, fields, field_count, &command);
     if (result == CBM_JSON_LIKE_OBJECT_MATCH &&
-        !cbm_json_mcp_owned_command(command, expected_binary)) {
+        !cbm_json_mcp_owned_command(command, expected_binary) &&
+        !(alternate_binary && cbm_json_mcp_owned_command(command, alternate_binary))) {
         result = CBM_JSON_LIKE_OBJECT_MISMATCH;
     }
     free(command);
@@ -959,7 +976,7 @@ static int cbm_upsert_json_named_mcp(const char *binary_path, const char *config
     if (read_result == 0) {
         int ownership =
             cbm_json_mcp_snapshot_ownership(document, document_length, object_path, path_len,
-                                            schema, entry_name, argument, binary_path);
+                                            schema, entry_name, argument, binary_path, NULL);
         if (ownership != CBM_JSON_LIKE_OBJECT_MATCH && ownership != CBM_JSON_LIKE_OBJECT_MISSING) {
             free(document);
             return CLI_ERR;
@@ -1006,7 +1023,7 @@ static int cbm_remove_json_named_mcp(const char *config_path, const char *const 
     }
     int ownership =
         cbm_json_mcp_snapshot_ownership(document, document_length, object_path, path_len, schema,
-                                        entry_name, argument, expected_binary);
+                                        entry_name, argument, expected_binary, NULL);
     if (ownership == CBM_JSON_LIKE_OBJECT_MISSING || ownership == CBM_JSON_LIKE_OBJECT_MISMATCH) {
         free(document);
         return CLI_OK;
@@ -1043,6 +1060,80 @@ int cbm_remove_editor_mcp(const char *config_path) {
 int cbm_remove_editor_mcp_owned(const char *binary_path, const char *config_path) {
     static const char *const path[] = {"mcpServers"};
     return cbm_remove_json_mcp(config_path, path, 1U, CBM_JSON_MCP_STANDARD, binary_path);
+}
+
+static bool claude_desktop_entry(const char *document, size_t length) {
+    yyjson_doc *doc = yyjson_read(document, length,
+                                  YYJSON_READ_ALLOW_COMMENTS | YYJSON_READ_ALLOW_TRAILING_COMMAS);
+    yyjson_val *servers = yyjson_obj_get(yyjson_doc_get_root(doc), "mcpServers");
+    yyjson_val *entry = yyjson_obj_get(servers, CBM_DEFAULT_MCP_SERVER_NAME);
+    yyjson_val *headers = yyjson_obj_get(entry, "headers");
+    bool owned = yyjson_obj_size(entry) == 3 && yyjson_obj_size(headers) == 1 &&
+                 yyjson_equals_str(yyjson_obj_get(entry, "type"), "http") &&
+                 cbm_desktop_url_valid(yyjson_get_str(yyjson_obj_get(entry, "url"))) &&
+                 cbm_desktop_bearer_valid(yyjson_get_str(yyjson_obj_get(headers, "Authorization")));
+    yyjson_doc_free(doc);
+    return owned;
+}
+
+static int edit_claude_client_mcp(const char *binary, const char *path, bool existing_only,
+                                  bool remove_entry) {
+    static const char *const servers[] = {"mcpServers"};
+    char *document = NULL;
+    size_t length = 0;
+    int read = cbm_json_like_read_document(path, &document, &length);
+    if (read < 0)
+        return CLI_ERR;
+    int ownership = CBM_JSON_LIKE_OBJECT_MISSING;
+    if (read == 0) {
+        /* The native installer registers its ~/.local/bin copy even when
+         * Electron starts a different, bundled binary. */
+        char installed[CLI_BUF_1K] = "";
+        const char *home = cbm_get_home_dir();
+        if (home && desktop_url[0]) {
+            cbm_agent_installed_binary_path(home, installed, sizeof(installed));
+        }
+        ownership =
+            cbm_json_mcp_snapshot_ownership(document, length, servers, 1, CBM_JSON_MCP_STANDARD,
+                                            CBM_DEFAULT_MCP_SERVER_NAME, NULL, binary, installed);
+        if (ownership == CBM_JSON_LIKE_OBJECT_MISMATCH) {
+            /* Claude also accepts an explicit type:"stdio". */
+            ownership = cbm_json_mcp_snapshot_ownership(
+                document, length, servers, 1, CBM_JSON_MCP_VSCODE, CBM_DEFAULT_MCP_SERVER_NAME,
+                NULL, binary, installed);
+        }
+        if (ownership == CBM_JSON_LIKE_OBJECT_MISMATCH && claude_desktop_entry(document, length)) {
+            ownership = CBM_JSON_LIKE_OBJECT_MATCH;
+        }
+    }
+    int rc = CLI_OK;
+    if (ownership == CBM_JSON_LIKE_OBJECT_MISMATCH) {
+        rc = remove_entry ? CLI_OK : CBM_TOML_OWNED_EDIT_FOREIGN;
+    } else if (ownership < 0) {
+        rc = CLI_ERR;
+    } else if (ownership == CBM_JSON_LIKE_OBJECT_MATCH || !existing_only) {
+        if (remove_entry) {
+            rc = cbm_json_like_remove_entry_if_unchanged(
+                path, servers, 1, CBM_DEFAULT_MCP_SERVER_NAME, document, length);
+        } else {
+            char http_entry[CBM_SZ_512];
+            snprintf(http_entry, sizeof(http_entry),
+                     "{\"type\":\"http\",\"url\":\"%s\",\"headers\":{\"Authorization\":\"%s\"}}",
+                     desktop_url, desktop_bearer);
+            char *stdio_entry = desktop_url[0]
+                                    ? NULL
+                                    : cbm_build_json_mcp_entry(binary, CBM_JSON_MCP_STANDARD, NULL);
+            const char *entry = desktop_url[0] ? http_entry : stdio_entry;
+            rc = entry
+                     ? cbm_json_like_upsert_entry_if_unchanged(path, servers, 1,
+                                                               CBM_DEFAULT_MCP_SERVER_NAME, entry,
+                                                               read == 1 ? NULL : document, length)
+                     : CLI_ERR;
+            free(stdio_entry);
+        }
+    }
+    free(document);
+    return rc;
 }
 
 /* ── OpenClaw MCP (nested mcp.servers with command + args) ────── */
@@ -1118,11 +1209,11 @@ int cbm_remove_zed_mcp_owned(const char *binary_path, const char *config_path) {
 /* ── Agent detection ──────────────────────────────────────────── */
 
 static bool dir_exists(const char *path) {
-    struct stat st;
 #ifndef _WIN32
+    struct stat st;
     return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
 #else
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    return cbm_is_dir(path);
 #endif
 }
 
@@ -2252,10 +2343,45 @@ static int cbm_remove_codex_legacy_mcp(const char *config_path) {
                                         CODEX_MCP_END);
 }
 
+static int connect_codex_desktop(const char *path, bool existing_only) {
+    char transport[CBM_SZ_512];
+    snprintf(transport, sizeof(transport), "url = \"%s\"\nhttp_headers.Authorization = \"%s\"\n",
+             desktop_url, desktop_bearer);
+    int rc = cbm_toml_switch_mcp_transport(path, CODEX_CMM_TABLE, transport, false);
+    if (rc != 2)
+        return rc;
+    if (existing_only)
+        return CLI_OK;
+    char block[CBM_SZ_1K];
+    snprintf(block, sizeof(block), CODEX_CMM_SECTION "\n%s", transport);
+    return cbm_toml_upsert_managed_block(path, CODEX_MCP_BEGIN, CODEX_MCP_END, block);
+}
+
+void cbm_desktop_clients_connect(const char *home, const char *binary, int port,
+                                 const char *token) {
+    if (!home || !binary || port <= 0 || port > 65535 || !cbm_desktop_token_valid(token))
+        return;
+    snprintf(desktop_url, sizeof(desktop_url), CBM_DESKTOP_URL_PREFIX "%d/mcp", port);
+    snprintf(desktop_bearer, sizeof(desktop_bearer), "Bearer %s", token);
+    char dir[CLI_BUF_1K], path[CLI_BUF_2K];
+    cbm_codex_config_dir(home, dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s/config.toml", dir);
+    int codex = connect_codex_desktop(path, true);
+    cbm_claude_user_root(home, dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s/.claude.json", dir);
+    int claude = edit_claude_client_mcp(binary, path, true, false);
+    if (codex != CLI_OK || claude != CLI_OK) {
+        fprintf(stderr, "Desktop MCP: kept existing client configuration (Codex=%d, Claude=%d)\n",
+                codex, claude);
+    }
+}
+
 int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
     if (!binary_path || !config_path) {
         return CLI_ERR;
     }
+    if (desktop_url[0])
+        return connect_codex_desktop(config_path, false);
     char escaped[CLI_BUF_8K];
     if (cbm_toml_escape_basic_string(binary_path, escaped, sizeof(escaped)) != 0) {
         return CLI_ERR;
@@ -2263,8 +2389,26 @@ int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
     char block[CLI_BUF_8K];
     int written = snprintf(block, sizeof(block),
                            CODEX_CMM_SECTION "\ncommand = \"%s\"\nargs = []\n", escaped);
-    if (written < 0 || (size_t)written >= sizeof(block) ||
-        cbm_remove_codex_legacy_mcp(config_path) != 0) {
+    if (written < 0 || (size_t)written >= sizeof(block)) {
+        return CLI_ERR;
+    }
+    /* Switching back to stdio keeps client-owned per-tool preferences. */
+    int switched = cbm_toml_switch_mcp_transport(config_path, CODEX_CMM_TABLE,
+                                                 block + sizeof(CODEX_CMM_SECTION "\n") - 1, true);
+    if (switched == 0)
+        return CLI_OK;
+    if (switched < 0) {
+        return CLI_ERR;
+    }
+    int legacy = cbm_remove_codex_legacy_mcp(config_path);
+    if (legacy == CBM_TOML_OWNED_EDIT_FOREIGN) {
+        /* An unmarked default server can carry Codex-owned approvals. */
+        return cbm_toml_switch_mcp_transport(config_path, CODEX_CMM_TABLE,
+                                             block + sizeof(CODEX_CMM_SECTION "\n") - 1, false) == 0
+                   ? CLI_OK
+                   : CLI_ERR;
+    }
+    if (legacy < 0) {
         return CLI_ERR;
     }
     return cbm_toml_upsert_managed_block(config_path, CODEX_MCP_BEGIN, CODEX_MCP_END, block) == 0
@@ -2274,6 +2418,7 @@ int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
 
 int cbm_remove_codex_mcp(const char *config_path) {
     if (!config_path ||
+        cbm_toml_switch_mcp_transport(config_path, CODEX_CMM_TABLE, NULL, true) < 0 ||
         cbm_toml_remove_managed_block(config_path, CODEX_MCP_BEGIN, CODEX_MCP_END) != 0) {
         return CLI_ERR;
     }
@@ -2734,7 +2879,7 @@ static int cbm_junie_mcp_preflight(const char *binary_path, const char *config_p
     for (size_t i = 0U; i < sizeof(entries) / sizeof(entries[0]); i++) {
         int ownership = cbm_json_mcp_snapshot_ownership(document, document_length, path, 1U,
                                                         CBM_JSON_MCP_STANDARD, entries[i].name,
-                                                        entries[i].argument, binary_path);
+                                                        entries[i].argument, binary_path, NULL);
         if (ownership != CBM_JSON_LIKE_OBJECT_MATCH && ownership != CBM_JSON_LIKE_OBJECT_MISSING) {
             result = CLI_ERR;
             break;
@@ -5767,7 +5912,7 @@ static void install_claude_code_config(const char *home, const char *binary_path
     snprintf(mcp_path2, sizeof(mcp_path2), "%s/.claude.json", user_root);
     if (!dry_run) {
         if (!prepare_config_parent(mcp_path2) ||
-            cbm_install_editor_mcp(binary_path, mcp_path2) != CLI_OK) {
+            edit_claude_client_mcp(binary_path, mcp_path2, false, false) != CLI_OK) {
             record_agent_config_error(false, "Claude Code", "mcp_install", mcp_path2);
         }
     }
@@ -6260,15 +6405,6 @@ static void print_detected_registry_agents(const char *home, bool *any) {
             *any = true;
         }
     }
-}
-
-static void cbm_agent_installed_binary_path(const char *home, char *binary_path,
-                                            size_t binary_path_size) {
-#ifdef _WIN32
-    snprintf(binary_path, binary_path_size, "%s/.local/bin/codebase-memory-mcp.exe", home);
-#else
-    snprintf(binary_path, binary_path_size, "%s/.local/bin/codebase-memory-mcp", home);
-#endif
 }
 
 static void install_managed_agent_instructions(const char *label, const char *instructions_path,
@@ -7795,7 +7931,7 @@ static void uninstall_claude_code(const char *home, bool dry_run) {
 
     char mcp_path2[CLI_BUF_1K];
     snprintf(mcp_path2, sizeof(mcp_path2), "%s/.claude.json", user_root);
-    if (!dry_run && cbm_remove_editor_mcp_owned(installed_binary, mcp_path2) != CLI_OK) {
+    if (!dry_run && edit_claude_client_mcp(installed_binary, mcp_path2, true, true) != CLI_OK) {
         record_agent_config_error(true, "Claude Code", "mcp_uninstall", mcp_path2);
     }
 

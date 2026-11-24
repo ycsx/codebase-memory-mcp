@@ -180,6 +180,7 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir);
 
 /* Install or refresh every detected agent integration below home. */
 int cbm_install_agent_configs(const char *home, const char *binary_path, bool force, bool dry_run);
+void cbm_desktop_clients_connect(const char *home, const char *binary, int port, const char *token);
 
 #ifdef CBM_CLI_ENABLE_TEST_API
 int cbm_build_qwen_hook_command_for_testing(const char *binary_path, bool windows, char *command,

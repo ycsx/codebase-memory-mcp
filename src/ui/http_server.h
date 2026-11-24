@@ -41,6 +41,8 @@ int cbm_http_server_port(const cbm_http_server_t *srv);
 void cbm_http_server_set_recv_deadline_ms(cbm_http_server_t *srv, int ms);
 
 /* Set external watcher reference for UI project lifecycle actions. Not owned. */
+bool cbm_http_server_enable_desktop_mcp(cbm_http_server_t *srv, const char *token,
+                                        struct cbm_watcher *watcher);
 void cbm_http_server_set_watcher(cbm_http_server_t *srv, struct cbm_watcher *watcher);
 
 /* Initialize the log ring buffer mutex. Must be called once before any threads. */

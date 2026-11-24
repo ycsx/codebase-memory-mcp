@@ -957,6 +957,23 @@ static int run_console(int argc, char **argv, const char *binary_path) {
         return 1;
     }
     cbm_http_server_set_watcher(g_http_server, g_watcher);
+    char desktop_token[CBM_SZ_128];
+    if (cbm_safe_getenv("CBM_DESKTOP_MCP_TOKEN", desktop_token, sizeof(desktop_token), NULL)) {
+        if (!cbm_http_server_enable_desktop_mcp(g_http_server, desktop_token, g_watcher)) {
+            fprintf(stderr, "codebase-memory-mcp: failed to initialize shared Desktop MCP\n");
+            cbm_http_server_free(g_http_server);
+            g_http_server = NULL;
+            cbm_watcher_free(g_watcher);
+            g_watcher = NULL;
+            if (watch_store) {
+                cbm_store_close(watch_store);
+            }
+            cbm_diag_stop();
+            return 1;
+        }
+        cbm_desktop_clients_connect(cbm_get_home_dir(), binary_path,
+                                    cbm_http_server_port(g_http_server), desktop_token);
+    }
 
     cbm_thread_t watcher_tid;
     bool watcher_started = false;

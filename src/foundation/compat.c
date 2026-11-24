@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#include <errno.h>
 #include <io.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -149,23 +150,37 @@ char *cbm_mkdtemp(char *tmpl) {
 
 #ifdef _WIN32
 int cbm_mkstemp(char *tmpl) {
-    /* Rewrite /tmp/ to %TEMP%\ like cbm_mkdtemp */
-    static char buf[CBM_SZ_512];
-    if (strncmp(tmpl, "/tmp/", 5) == 0) {
-        const char *tmp = getenv("TEMP");
-        if (!tmp)
-            tmp = getenv("TMP");
-        if (!tmp)
-            tmp = ".";
-        snprintf(buf, sizeof(buf), "%s\\%s", tmp, tmpl + 5);
-    } else {
-        snprintf(buf, sizeof(buf), "%s", tmpl);
-    }
-    if (!_mktemp(buf))
+    enum { SUFFIX_LEN = 6, MAX_ATTEMPTS = 32 };
+    size_t len = tmpl ? strlen(tmpl) : 0;
+    if (len < SUFFIX_LEN || strcmp(tmpl + len - SUFFIX_LEN, "XXXXXX") != 0) {
+        errno = EINVAL;
         return CBM_NOT_FOUND;
-    int fd = _open(buf, _O_CREAT | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
-    if (fd >= 0)
-        strcpy(tmpl, buf);
+    }
+    wchar_t *wide = cbm_utf8_to_wide(tmpl);
+    if (!wide) {
+        return CBM_NOT_FOUND;
+    }
+    size_t count = wcslen(wide) + 1;
+    wchar_t *suffix = wide + count - 1 - SUFFIX_LEN;
+    int fd = CBM_NOT_FOUND;
+    for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
+        wcscpy(suffix, L"XXXXXX");
+        if (_wmktemp_s(wide, count) != 0) {
+            break;
+        }
+        fd = _wopen(wide, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY | _O_NOINHERIT,
+                    _S_IREAD | _S_IWRITE);
+        if (fd >= 0) {
+            for (size_t i = 0; i < SUFFIX_LEN; ++i) {
+                tmpl[len - SUFFIX_LEN + i] = (char)suffix[i];
+            }
+            break;
+        }
+        if (errno != EEXIST) {
+            break;
+        }
+    }
+    free(wide);
     return fd;
 }
 #endif

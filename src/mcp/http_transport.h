@@ -2,6 +2,7 @@
 #define CBM_MCP_HTTP_TRANSPORT_H
 
 #include "mcp/mcp.h"
+#include "ui/httpd.h"
 
 #include <stdbool.h>
 
@@ -29,6 +30,11 @@ typedef struct cbm_mcp_http_server cbm_mcp_http_server_t;
  * must contain at least 32 bytes. The audit log is opened during construction
  * so startup fails closed when operations cannot be recorded. */
 cbm_mcp_http_server_t *cbm_mcp_http_server_new(const cbm_mcp_http_config_t *config);
+
+cbm_mcp_http_server_t *cbm_mcp_http_desktop_new(const char *token, struct cbm_watcher *watcher);
+/* After the UI's Host check. True transfers socket and body ownership to a worker. */
+bool cbm_mcp_http_desktop_request(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn,
+                                  const cbm_http_req_t *request);
 
 void cbm_mcp_http_server_free(cbm_mcp_http_server_t *server);
 void cbm_mcp_http_server_stop(cbm_mcp_http_server_t *server);

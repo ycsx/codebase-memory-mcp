@@ -1554,8 +1554,9 @@ struct cbm_mcp_server {
     char session_root[CBM_SZ_1K];     /* detected project root path */
     char session_project[CBM_SZ_256]; /* derived project name */
     bool session_detected;            /* true after first detection attempt */
-    struct cbm_watcher *watcher;      /* external watcher ref (not owned) */
-    struct cbm_config *config;        /* external config ref (not owned) */
+    bool desktop_auto_watch;
+    struct cbm_watcher *watcher; /* external watcher ref (not owned) */
+    struct cbm_config *config;   /* external config ref (not owned) */
     cbm_thread_t autoindex_tid;
     bool autoindex_active; /* true if auto-index thread was started */
 
@@ -1587,6 +1588,18 @@ cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
     srv->tool_profile = CBM_MCP_TOOL_PROFILE_ALL;
 
     return srv;
+}
+
+void cbm_mcp_server_attach_desktop_session(cbm_mcp_server_t *srv, struct cbm_watcher *watcher) {
+    /* The console's working directory is unrelated to any agent workspace.
+     * Explicit index requests register projects with the single Desktop watcher. */
+    srv->session_detected = true;
+    srv->update_checked = true;
+    srv->watcher = watcher;
+    cbm_config_t *cfg = cbm_config_open(cbm_resolve_cache_dir());
+    srv->desktop_auto_watch =
+        watcher && (!cfg || cbm_config_get_bool(cfg, CBM_CONFIG_AUTO_WATCH, true));
+    cbm_config_close(cfg);
 }
 
 void cbm_mcp_server_set_tool_profile(cbm_mcp_server_t *srv, cbm_mcp_tool_profile_t profile) {
@@ -1809,6 +1822,10 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
          * store without closing it leaks the SQLite connection. */
         cbm_project_t proj_verify = {0};
         if (cbm_store_get_project(srv->store, project, &proj_verify) == CBM_STORE_OK) {
+            if (srv->desktop_auto_watch && proj_verify.root_path &&
+                cbm_is_dir(proj_verify.root_path)) {
+                cbm_watcher_watch(srv->watcher, project, proj_verify.root_path);
+            }
             cbm_project_free_fields(&proj_verify);
             srv->owns_store = true;
             free(srv->current_project);
@@ -7959,6 +7976,16 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     if (cbm_index_supervisor_should_wrap()) {
         char *supervised = index_run_supervised(srv, args);
         if (supervised) {
+            if (srv && srv->desktop_auto_watch) {
+                /* The index worker has exited. Open its verified project in the
+                 * parent to register it with the Desktop watcher. */
+                yyjson_doc *doc = yyjson_read(supervised, strlen(supervised), 0);
+                yyjson_val *result = yyjson_obj_get(yyjson_doc_get_root(doc), "structuredContent");
+                if (yyjson_equals_str(yyjson_obj_get(result, "status"), "indexed")) {
+                    resolve_store(srv, yyjson_get_str(yyjson_obj_get(result, "project")));
+                }
+                yyjson_doc_free(doc);
+            }
             return supervised;
         }
     }

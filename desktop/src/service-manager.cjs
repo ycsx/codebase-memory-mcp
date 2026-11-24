@@ -17,6 +17,39 @@ function validServiceToken(token) {
   return typeof token === "string" && /^[a-f0-9]{48,128}$/i.test(token);
 }
 
+function desktopMcpToken(statePath) {
+  const generate = () => "cbm-desktop-" + crypto.randomBytes(32).toString("hex");
+  if (!statePath) return generate();
+  const directory = path.dirname(statePath);
+  const file = path.join(directory, "desktop-mcp.token");
+  const read = () => {
+    const value = fs.readFileSync(file, "utf8").trim();
+    if (!/^cbm-desktop-[a-f0-9]{64}$/.test(value)) {
+      throw new Error("桌面 MCP 凭据文件格式无效");
+    }
+    return value;
+  };
+  try {
+    return read();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const token = generate();
+  const temp = file + "." + crypto.randomUUID();
+  fs.writeFileSync(temp, token + "\n", { flag: "wx", mode: 0o600 });
+  try {
+    // Publish a complete credential even when two launchers race.
+    fs.linkSync(temp, file);
+    return token;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    return read();
+  } finally {
+    fs.unlinkSync(temp);
+  }
+}
+
 function readServiceState(statePath) {
   if (!statePath) {
     return null;
@@ -430,7 +463,11 @@ class ServiceManager extends EventEmitter {
         ["console", "--no-open", `--port=${this.port}`],
         {
           cwd: path.dirname(this.binaryPath),
-          env: { ...this.env, CBM_DESKTOP_SERVICE_TOKEN: this.serviceToken },
+          env: {
+            ...this.env,
+            CBM_DESKTOP_SERVICE_TOKEN: this.serviceToken,
+            CBM_DESKTOP_MCP_TOKEN: desktopMcpToken(this.statePath),
+          },
           detached: true,
           windowsHide: true,
           // Keep stdin detached, but capture the service streams so the Desktop

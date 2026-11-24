@@ -18,6 +18,7 @@
 #include "ui/embedded_assets.h"
 #include "ui/layout3d.h"
 #include "mcp/mcp.h"
+#include "mcp/http_transport.h"
 #include "mcp/usage_stats.h"
 #include "store/store.h"
 #include "watcher/watcher.h"
@@ -149,6 +150,7 @@ static void handle_ui_config(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
 struct cbm_http_server {
     cbm_httpd_t *listener;
+    cbm_mcp_http_server_t *desktop_mcp;
     cbm_mcp_server_t *mcp;       /* own MCP server instance (read-only) */
     struct cbm_watcher *watcher; /* external watcher ref (not owned) */
     atomic_int stop_flag;
@@ -3095,11 +3097,18 @@ static void join_all_index_jobs(void) {
     }
 }
 
+bool cbm_http_server_enable_desktop_mcp(cbm_http_server_t *srv, const char *token,
+                                        struct cbm_watcher *watcher) {
+    srv->desktop_mcp = cbm_mcp_http_desktop_new(token, watcher);
+    return srv->desktop_mcp != NULL;
+}
+
 void cbm_http_server_free(cbm_http_server_t *srv) {
     if (!srv)
         return;
     join_all_index_jobs();
     cbm_httpd_close(srv->listener);
+    cbm_mcp_http_server_free(srv->desktop_mcp);
     cbm_mcp_server_free(srv->mcp);
     free(srv);
 }
@@ -3123,7 +3132,16 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
         cbm_http_req_t req;
         int rc = cbm_httpd_read_request(conn, &req);
         if (rc == 0) {
-            dispatch_request(srv, conn, &req);
+            if (srv->desktop_mcp && strcmp(req.path, "/mcp") == 0) {
+                if (!host_is_loopback(req.host)) {
+                    cbm_http_replyf(conn, 403, "Cache-Control: no-store\r\n", "%s",
+                                    "forbidden host");
+                } else if (cbm_mcp_http_desktop_request(srv->desktop_mcp, conn, &req)) {
+                    continue;
+                }
+            } else {
+                dispatch_request(srv, conn, &req);
+            }
             cbm_log_http_request("graph_ui", req.method, req.path, cbm_http_conn_status(conn),
                                  (int64_t)(cbm_now_ms() - request_start_ms), req.body_len,
                                  cbm_http_conn_response_bytes(conn));

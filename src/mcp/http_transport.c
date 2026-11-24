@@ -1,4 +1,5 @@
 #include "mcp/http_transport.h"
+#include "mcp/desktop_endpoint.h"
 
 #include "mcp/remote_auth.h"
 
@@ -51,6 +52,8 @@ typedef struct {
 
 struct cbm_mcp_http_server {
     cbm_httpd_t *httpd;
+    bool desktop;
+    struct cbm_watcher *watcher;
     char *auth_token;
     cbm_remote_auth_store_t *auth_store;
     char token_key_id[13];
@@ -63,6 +66,7 @@ struct cbm_mcp_http_server {
     cbm_mcp_http_session_t *sessions;
     cbm_mutex_t sessions_mutex;
     cbm_mutex_t audit_mutex;
+    cbm_mutex_t desktop_tools_mutex;
     atomic_int stop;
     atomic_int active_workers;
     atomic_uint_fast64_t nonce;
@@ -71,6 +75,8 @@ struct cbm_mcp_http_server {
 typedef struct {
     cbm_mcp_http_server_t *server;
     cbm_http_conn_t *conn;
+    cbm_http_req_t request;
+    bool parsed;
 } cbm_mcp_http_worker_t;
 
 static char *string_dup(const char *value) {
@@ -418,15 +424,19 @@ static cbm_mcp_http_session_t *session_create(cbm_mcp_http_server_t *server, con
         cbm_mutex_unlock(&server->sessions_mutex);
         return NULL;
     }
-    cbm_mcp_server_set_tool_profile(
-        slot->mcp, effective_profile(server->tool_profile, identity->tool_profile));
-    cbm_mcp_authz_t authz;
-    identity_to_authz(identity, &authz);
-    if (!cbm_mcp_server_set_authz(slot->mcp, &authz)) {
-        cbm_mcp_server_free(slot->mcp);
-        slot->mcp = NULL;
-        cbm_mutex_unlock(&server->sessions_mutex);
-        return NULL;
+    if (server->desktop) {
+        cbm_mcp_server_attach_desktop_session(slot->mcp, server->watcher);
+    } else {
+        cbm_mcp_server_set_tool_profile(
+            slot->mcp, effective_profile(server->tool_profile, identity->tool_profile));
+        cbm_mcp_authz_t authz;
+        identity_to_authz(identity, &authz);
+        if (!cbm_mcp_server_set_authz(slot->mcp, &authz)) {
+            cbm_mcp_server_free(slot->mcp);
+            slot->mcp = NULL;
+            cbm_mutex_unlock(&server->sessions_mutex);
+            return NULL;
+        }
     }
     char nonce[CBM_SHA256_HEX_LEN + 1];
     make_nonce(server, "session", client_ip, nonce);
@@ -715,7 +725,8 @@ static void legacy_identity(cbm_mcp_http_server_t *server, cbm_remote_identity_t
     }
 }
 
-static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn) {
+static void process_request(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn,
+                            const cbm_http_req_t *request, int read_status) {
     struct timespec started, finished;
     cbm_clock_gettime(CLOCK_MONOTONIC, &started);
     char peer_ip[CLIENT_IP_LEN] = "unknown";
@@ -726,19 +737,16 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
     memcpy(request_id, request_nonce, REQUEST_ID_HEX_LEN);
     request_id[REQUEST_ID_HEX_LEN] = '\0';
 
-    cbm_http_req_t request;
-    memset(&request, 0, sizeof(request));
-    int read_status = cbm_httpd_read_request(conn, &request);
     char client_ip[CLIENT_IP_LEN];
-    if (!cbm_mcp_http_resolve_client_ip(peer_ip, request.x_forwarded_for, server->trusted_proxies,
+    if (!cbm_mcp_http_resolve_client_ip(peer_ip, request->x_forwarded_for, server->trusted_proxies,
                                         client_ip, sizeof(client_ip))) {
         snprintf(client_ip, sizeof(client_ip), "%s", peer_ip);
     }
 
     char audit_method[128];
     char audit_session[128];
-    snprintf(audit_method, sizeof(audit_method), "%s", request.method);
-    snprintf(audit_session, sizeof(audit_session), "%s", request.mcp_session_id);
+    snprintf(audit_method, sizeof(audit_method), "%s", request->method);
+    snprintf(audit_session, sizeof(audit_session), "%s", request->mcp_session_id);
     char audit_tool[128] = "";
     char audit_target_value[AUDIT_VALUE_LEN] = "";
     const char *audit_status = "error";
@@ -753,17 +761,17 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
         goto done;
     }
 
-    bool admin_route = is_admin_route(request.path);
-    if (strcmp(request.path, "/mcp") != 0 && !admin_route) {
+    bool admin_route = is_admin_route(request->path);
+    if (strcmp(request->path, "/mcp") != 0 && !admin_route) {
         cbm_http_replyf(conn, 404, "Cache-Control: no-store\r\n", "%s", "not found");
         goto done;
     }
     const char *presented_token = NULL;
-    bool auth_ok = bearer_token_value(request.authorization, &presented_token);
+    bool auth_ok = bearer_token_value(request->authorization, &presented_token);
     if (auth_ok && server->auth_store) {
         auth_ok = cbm_remote_auth_authenticate(server->auth_store, presented_token, &identity);
     } else if (auth_ok && server->auth_token) {
-        auth_ok = cbm_mcp_http_authorize(request.authorization, server->auth_token);
+        auth_ok = cbm_mcp_http_authorize(request->authorization, server->auth_token);
         if (auth_ok) {
             legacy_identity(server, &identity, client_ip);
         }
@@ -780,34 +788,34 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
     }
     snprintf(audit_principal, sizeof(audit_principal), "%s", identity.principal);
     snprintf(audit_key_id, sizeof(audit_key_id), "%s", identity.key_id);
-    if (request.origin[0] != '\0') {
+    if (request->origin[0] != '\0') {
         cbm_http_replyf(conn, 403, "Cache-Control: no-store\r\n", "%s", "forbidden origin");
         audit_status = "origin_rejected";
         goto done;
     }
 
     if (admin_route) {
-        handle_remote_admin(server, conn, &request, &identity);
+        handle_remote_admin(server, conn, request, &identity);
         audit_status =
             cbm_http_conn_status(conn) >= 200 && cbm_http_conn_status(conn) < 300 ? "ok" : "error";
         goto done;
     }
 
-    if (strcmp(request.method, "GET") == 0) {
+    if (strcmp(request->method, "GET") == 0) {
         cbm_http_replyf(conn, 405, "Allow: POST, DELETE\r\nCache-Control: no-store\r\n", "%s",
                         "server-sent events are not enabled");
         audit_status = "method_not_allowed";
         goto done;
     }
 
-    if (strcmp(request.method, "DELETE") == 0) {
-        if (request.mcp_session_id[0] == '\0') {
+    if (strcmp(request->method, "DELETE") == 0) {
+        if (request->mcp_session_id[0] == '\0') {
             reply_json(conn, 400, NULL, "{\"error\":\"missing MCP session\"}");
             goto done;
         }
         bool ip_mismatch = false;
         bool key_mismatch = false;
-        if (!session_delete(server, request.mcp_session_id, client_ip, identity.key_id,
+        if (!session_delete(server, request->mcp_session_id, client_ip, identity.key_id,
                             &ip_mismatch, &key_mismatch)) {
             reply_json(conn, (ip_mismatch || key_mismatch) ? 403 : 404, NULL,
                        ip_mismatch    ? "{\"error\":\"session IP mismatch\"}"
@@ -823,25 +831,25 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
         goto done;
     }
 
-    if (strcmp(request.method, "POST") != 0) {
+    if (strcmp(request->method, "POST") != 0) {
         cbm_http_replyf(conn, 405, "Allow: POST, DELETE\r\nCache-Control: no-store\r\n", "%s",
                         "method not allowed");
         audit_status = "method_not_allowed";
         goto done;
     }
-    if (!content_type_is_json(request.content_type)) {
+    if (!content_type_is_json(request->content_type)) {
         reply_json(conn, 415, NULL, "{\"error\":\"Content-Type must be application/json\"}");
         audit_status = "unsupported_media_type";
         goto done;
     }
-    if (!request.body || request.body_len == 0) {
+    if (!request->body || request->body_len == 0) {
         reply_json(conn, 400, NULL, "{\"error\":\"empty request body\"}");
         goto done;
     }
 
     cbm_jsonrpc_request_t rpc;
     memset(&rpc, 0, sizeof(rpc));
-    if (cbm_jsonrpc_parse(request.body, &rpc) != 0 || !rpc.method) {
+    if (cbm_jsonrpc_parse(request->body, &rpc) != 0 || !rpc.method) {
         reply_json(conn, 400, NULL,
                    "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,"
                    "\"message\":\"Parse error\"},\"id\":null}");
@@ -856,8 +864,8 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
     cbm_mcp_http_session_t *session = NULL;
     bool ip_mismatch = false;
     bool key_mismatch = false;
-    if (request.mcp_session_id[0]) {
-        session = session_acquire(server, request.mcp_session_id, client_ip, identity.key_id,
+    if (request->mcp_session_id[0]) {
+        session = session_acquire(server, request->mcp_session_id, client_ip, identity.key_id,
                                   &ip_mismatch, &key_mismatch);
     } else if (is_initialize) {
         session = session_create(server, client_ip, &identity);
@@ -880,7 +888,16 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
     snprintf(audit_session, sizeof(audit_session), "%s", session->id);
 
     cbm_mutex_lock(&session->mutex);
-    char *response = cbm_mcp_server_handle(session->mcp, request.body);
+    /* The full local tool set can replace project databases. Serialize local
+     * tool calls while keeping handshakes, other sessions and the UI responsive. */
+    bool local_tool = server->desktop && strcmp(rpc.method, "tools/call") == 0;
+    if (local_tool)
+        cbm_mutex_lock(&server->desktop_tools_mutex);
+    char *response = cbm_mcp_server_handle(session->mcp, request->body);
+    if (local_tool) {
+        cbm_mcp_server_evict_idle(session->mcp, 0);
+        cbm_mutex_unlock(&server->desktop_tools_mutex);
+    }
     cbm_mutex_unlock(&session->mutex);
     if (response) {
         reply_json(conn, 200, session->id, response);
@@ -896,21 +913,117 @@ static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *c
 done:
     cbm_clock_gettime(CLOCK_MONOTONIC, &finished);
     int status = cbm_http_conn_status(conn);
-    write_audit(server, request_id, client_ip, audit_session, audit_method, audit_tool,
-                audit_target_value, audit_status, status, audit_principal, audit_key_id,
-                elapsed_ms(&started, &finished), cbm_http_conn_request_bytes(conn),
-                cbm_http_conn_response_bytes(conn));
+    if (!server->desktop) {
+        write_audit(server, request_id, client_ip, audit_session, audit_method, audit_tool,
+                    audit_target_value, audit_status, status, audit_principal, audit_key_id,
+                    elapsed_ms(&started, &finished), cbm_http_conn_request_bytes(conn),
+                    cbm_http_conn_response_bytes(conn));
+    }
     cbm_remote_identity_free(&identity);
-    cbm_http_req_free(&request);
+}
+
+static void process_connection(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn) {
+    cbm_http_req_t req = {0};
+    int status = cbm_httpd_read_request(conn, &req);
+    process_request(server, conn, &req, status);
+    cbm_http_req_free(&req);
 }
 
 static void *connection_worker(void *arg) {
     cbm_mcp_http_worker_t *worker = arg;
-    process_connection(worker->server, worker->conn);
+    if (worker->parsed) {
+        process_request(worker->server, worker->conn, &worker->request, 0);
+        cbm_http_req_free(&worker->request);
+    } else {
+        process_connection(worker->server, worker->conn);
+    }
     cbm_httpd_conn_close(worker->conn);
     atomic_fetch_sub(&worker->server->active_workers, 1);
     free(worker);
     return NULL;
+}
+
+/* Transfer the socket and optional pre-read body only after a successful spawn. */
+static bool start_worker(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn,
+                         const cbm_http_req_t *parsed) {
+    cbm_mcp_http_worker_t *worker = malloc(sizeof(*worker));
+    if (!worker)
+        return false;
+    worker->server = server;
+    worker->conn = conn;
+    worker->parsed = parsed != NULL;
+    if (parsed)
+        worker->request = *parsed;
+    cbm_thread_t thread;
+    atomic_fetch_add(&server->active_workers, 1);
+    if (cbm_thread_create(&thread, 0, connection_worker, worker) != 0) {
+        atomic_fetch_sub(&server->active_workers, 1);
+        free(worker);
+        return false;
+    }
+    (void)cbm_thread_detach(&thread);
+    return true;
+}
+
+bool cbm_mcp_http_desktop_request(cbm_mcp_http_server_t *server, cbm_http_conn_t *conn,
+                                  const cbm_http_req_t *request) {
+    char peer[CLIENT_IP_LEN];
+    if (!server || !server->desktop || strcmp(request->path, "/mcp") != 0 || !request->host[0] ||
+        request->origin[0] || request->x_forwarded_for[0] ||
+        !cbm_http_conn_peer_ip(conn, peer, sizeof(peer)) || strcmp(peer, "127.0.0.1") != 0) {
+        cbm_http_replyf(conn, 403, "Cache-Control: no-store\r\n", "%s", "forbidden");
+        return false;
+    }
+    if (atomic_load(&server->active_workers) < server->max_workers &&
+        start_worker(server, conn, request))
+        return true;
+    cbm_http_replyf(conn, 503, "Retry-After: 1\r\n", "%s", "server busy");
+    return false;
+}
+
+static cbm_mcp_http_server_t *new_session_table(int capacity, int ttl) {
+    cbm_mcp_http_server_t *server = calloc(1, sizeof(*server));
+    if (!server) {
+        return NULL;
+    }
+    server->sessions = calloc((size_t)capacity, sizeof(*server->sessions));
+    if (!server->sessions) {
+        free(server);
+        return NULL;
+    }
+    server->session_ttl_sec = ttl;
+    server->max_sessions = capacity;
+    cbm_mutex_init(&server->sessions_mutex);
+    cbm_mutex_init(&server->audit_mutex);
+    for (int i = 0; i < capacity; i++) {
+        cbm_mutex_init(&server->sessions[i].mutex);
+    }
+    return server;
+}
+
+/* A separate constructor keeps remote transports restricted to their configured
+ * profiles. Desktop shares its existing listener and watcher with local clients. */
+cbm_mcp_http_server_t *cbm_mcp_http_desktop_new(const char *token, struct cbm_watcher *watcher) {
+    if (!cbm_desktop_token_valid(token)) {
+        return NULL;
+    }
+    cbm_mcp_http_server_t *server =
+        new_session_table(CBM_MCP_HTTP_DEFAULT_MAX_SESSIONS, CBM_MCP_HTTP_DEFAULT_SESSION_TTL_SEC);
+    if (!server) {
+        return NULL;
+    }
+    server->auth_token = string_dup(token);
+    if (!server->auth_token) {
+        cbm_mcp_http_server_free(server);
+        return NULL;
+    }
+    server->desktop = true;
+    cbm_mutex_init(&server->desktop_tools_mutex);
+    server->max_workers = CBM_MCP_HTTP_DEFAULT_MAX_WORKERS;
+    server->watcher = watcher;
+    server->tool_profile = CBM_MCP_TOOL_PROFILE_ALL;
+    snprintf(server->token_key_id, sizeof(server->token_key_id), "%s", "desktop");
+    return server;
 }
 
 cbm_mcp_http_server_t *cbm_mcp_http_server_new(const cbm_mcp_http_config_t *config) {
@@ -926,30 +1039,24 @@ cbm_mcp_http_server_t *cbm_mcp_http_server_new(const cbm_mcp_http_config_t *conf
         cbm_log_error("mcp_http.config.invalid", "reason", "missing_or_out_of_range");
         return NULL;
     }
-    cbm_mcp_http_server_t *server = calloc(1, sizeof(*server));
-    if (!server)
+    cbm_mcp_http_server_t *server =
+        new_session_table(config->max_sessions, config->session_ttl_sec);
+    if (!server) {
         return NULL;
+    }
     server->auth_token = has_legacy_token ? string_dup(config->auth_token) : NULL;
     if (has_auth_store) {
         server->auth_store = cbm_remote_auth_store_open(config->auth_store_path, true);
     }
     server->audit_log_path = string_dup(config->audit_log_path);
     server->trusted_proxies = string_dup(config->trusted_proxies ? config->trusted_proxies : "");
-    server->sessions = calloc((size_t)config->max_sessions, sizeof(*server->sessions));
     if ((has_legacy_token && !server->auth_token) || (has_auth_store && !server->auth_store) ||
-        !server->audit_log_path || !server->trusted_proxies || !server->sessions) {
-        cbm_log_error("mcp_http.config.invalid", "reason", "out_of_memory");
+        !server->audit_log_path || !server->trusted_proxies) {
         cbm_mcp_http_server_free(server);
         return NULL;
     }
-    server->session_ttl_sec = config->session_ttl_sec;
-    server->max_sessions = config->max_sessions;
     server->max_workers = config->max_workers;
     server->tool_profile = config->tool_profile;
-    cbm_mutex_init(&server->sessions_mutex);
-    cbm_mutex_init(&server->audit_mutex);
-    for (int i = 0; i < server->max_sessions; i++)
-        cbm_mutex_init(&server->sessions[i].mutex);
     if (server->auth_token) {
         char token_hash[CBM_SHA256_HEX_LEN + 1];
         cbm_sha256_hex(server->auth_token, strlen(server->auth_token), token_hash);
@@ -998,24 +1105,10 @@ int cbm_mcp_http_server_run(cbm_mcp_http_server_t *server) {
             cbm_httpd_conn_close(conn);
             continue;
         }
-        cbm_mcp_http_worker_t *worker = malloc(sizeof(*worker));
-        if (!worker) {
+        if (!start_worker(server, conn, NULL)) {
             cbm_http_replyf(conn, 503, "Retry-After: 1\r\n", "%s", "server busy");
             cbm_httpd_conn_close(conn);
-            continue;
         }
-        worker->server = server;
-        worker->conn = conn;
-        atomic_fetch_add(&server->active_workers, 1);
-        cbm_thread_t thread;
-        if (cbm_thread_create(&thread, 0, connection_worker, worker) != 0) {
-            atomic_fetch_sub(&server->active_workers, 1);
-            cbm_http_replyf(conn, 503, "Retry-After: 1\r\n", "%s", "server busy");
-            cbm_httpd_conn_close(conn);
-            free(worker);
-            continue;
-        }
-        (void)cbm_thread_detach(&thread);
     }
     while (atomic_load(&server->active_workers) > 0)
         cbm_usleep(SHUTDOWN_POLL_US);
@@ -1029,6 +1122,10 @@ int cbm_mcp_http_server_port(const cbm_mcp_http_server_t *server) {
 void cbm_mcp_http_server_free(cbm_mcp_http_server_t *server) {
     if (!server)
         return;
+    while (atomic_load(&server->active_workers) > 0)
+        cbm_usleep(SHUTDOWN_POLL_US);
+    if (server->desktop)
+        cbm_mutex_destroy(&server->desktop_tools_mutex);
     if (server->httpd)
         cbm_httpd_close(server->httpd);
     cbm_remote_auth_store_close(server->auth_store);

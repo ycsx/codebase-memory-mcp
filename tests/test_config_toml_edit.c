@@ -1022,7 +1022,34 @@ TEST(config_toml_vibe_ambiguous_target_fail_closed) {
     PASS();
 }
 
+TEST(config_toml_desktop_transport_lifecycle) {
+    const char *table = "mcp_servers.codebase-memory-mcp";
+    const char *stdio = "command = 'codebase-memory-mcp'\nargs = []\n";
+    const char *http = "url = \"http://127.0.0.1:9749/mcp\"\n"
+                       "http_headers.Authorization = \"Bearer cbm-desktop-"
+                       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n";
+    const char *original = "[mcp_servers.codebase-memory-mcp]\n"
+                           "command = 'codebase-memory-mcp'\nargs = []\n"
+                           "startup_timeout_sec = 120\n"
+                           "[mcp_servers.codebase-memory-mcp.tools.search_graph]\n"
+                           "approval_mode = 'approve'\n[other]\nkeep = true\n";
+    char dir[CTE_PATH_CAP], path[CTE_PATH_CAP], output[CTE_FILE_CAP];
+    ASSERT_EQ(cte_fixture(dir, sizeof(dir), path, sizeof(path)), 0);
+    ASSERT_EQ(th_write_file(path, original), 0);
+    ASSERT_EQ(cbm_toml_switch_mcp_transport(path, table, http, 0), 0);
+    ASSERT_EQ(cbm_toml_switch_mcp_transport(path, table, stdio, 1), 0);
+    ASSERT_EQ(cte_read(path, output, sizeof(output)), 0);
+    ASSERT_STR_EQ(output, original);
+    ASSERT_EQ(cbm_toml_switch_mcp_transport(path, table, http, 0), 0);
+    ASSERT_EQ(cbm_toml_switch_mcp_transport(path, table, NULL, 1), 0);
+    ASSERT_EQ(cte_read(path, output, sizeof(output)), 0);
+    ASSERT_STR_EQ(output, "[other]\nkeep = true\n");
+    th_cleanup(dir);
+    PASS();
+}
+
 SUITE(config_toml_edit) {
+    RUN_TEST(config_toml_desktop_transport_lifecycle);
     RUN_TEST(config_toml_rejects_stale_content_and_identity);
     RUN_TEST(config_toml_missing_target_race_does_not_replace_winner);
     RUN_TEST(config_toml_existing_target_swap_after_check_preserves_winner);

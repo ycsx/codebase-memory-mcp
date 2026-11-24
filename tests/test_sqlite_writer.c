@@ -19,7 +19,7 @@
 /* ── Helper: create temp file path ─────────────────────────────── */
 
 static int make_temp_db(char *path, size_t pathsz) {
-    snprintf(path, pathsz, "/tmp/cbm_sw_test_XXXXXX");
+    snprintf(path, pathsz, "%s/cbm_sw_test_XXXXXX", cbm_tmpdir());
     int fd = cbm_mkstemp(path);
     if (fd < 0)
         return -1;
