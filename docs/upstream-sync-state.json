@@ -2,9 +2,9 @@
   "schema_version": 1,
   "upstream_url": "https://github.com/DeusData/codebase-memory-mcp.git",
   "upstream_ref": "main",
-  "last_seen_commit": null,
-  "last_integrated_upstream_commit": null,
-  "last_integrated_target_commit": null,
-  "last_integrated_at": null,
-  "last_checked_at": null
+  "last_seen_commit": "9a4da7a314833d8d965b74612e1f25fef5371861",
+  "last_integrated_upstream_commit": "8efb059fe8d40797eb91000439bda05802a99a1b",
+  "last_integrated_target_commit": "be8aa9799453364e9d9f3bc4ac0e844e0341e31e",
+  "last_integrated_at": "2026-11-24T08:36:32Z",
+  "last_checked_at": "2026-11-24T06:34:59Z"
 }
