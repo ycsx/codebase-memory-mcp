@@ -3657,6 +3657,59 @@ TEST(tool_delete_project_not_found) {
     PASS();
 }
 
+TEST(tool_delete_project_review_failure_keeps_watcher) {
+    char repo[512], path[640], reviews[672];
+    snprintf(repo, sizeof(repo), "%s/cbm-delete-review-failure-XXXXXX", cbm_tmpdir());
+    ASSERT_TRUE(cbm_mkdtemp(repo));
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(related_documents_fixture(srv, repo));
+    snprintf(path, sizeof(path), "%s/related-documents.db", repo);
+    ASSERT_EQ(cbm_store_dump_to_file(cbm_mcp_server_store(srv), path), CBM_STORE_OK);
+    cbm_mcp_server_free(srv);
+    snprintf(reviews, sizeof(reviews), "%s.reviews.sqlite", path);
+    /* An invalid SQLite sidecar deterministically fails cleanup on all platforms. */
+    ASSERT_EQ(th_write_file(reviews, "not a SQLite database\n"), 0);
+
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", repo, 1);
+    cbm_store_t *watch_store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(watch_store);
+    cbm_watcher_t *watcher = cbm_watcher_new(watch_store, NULL, NULL);
+    ASSERT_NOT_NULL(watcher);
+    cbm_watcher_watch(watcher, "related-documents", repo);
+    ASSERT_EQ(cbm_watcher_watch_count(watcher), 1);
+    srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_mcp_server_set_watcher(srv, watcher);
+
+    char *response =
+        cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"related-documents\"}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NOT_NULL(strstr(response, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(response, "delete_failed"));
+    ASSERT_NOT_NULL(strstr(response, "could not remove project document review state"));
+    ASSERT_FALSE(cbm_file_exists(path));
+    ASSERT_TRUE(cbm_file_exists(reviews));
+    ASSERT_EQ(cbm_watcher_watch_count(watcher), 1);
+    free(response);
+
+    ASSERT_EQ(remove(reviews), 0);
+    response = cbm_mcp_handle_tool(srv, "delete_project", "{\"project\":\"related-documents\"}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NOT_NULL(strstr(response, "not_found"));
+    ASSERT_EQ(cbm_watcher_watch_count(watcher), 0);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cbm_watcher_free(watcher);
+    cbm_store_close(watch_store);
+    restore_cache_dir(saved_copy);
+    free(saved_copy);
+    th_rmtree(repo);
+    PASS();
+}
+
 TEST(tool_get_architecture_empty) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
@@ -8524,6 +8577,7 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_call_path_distinct_defs_not_over_unioned);
     RUN_TEST(tool_trace_call_path_dts_stub_unions_with_impl);
     RUN_TEST(tool_delete_project_not_found);
+    RUN_TEST(tool_delete_project_review_failure_keeps_watcher);
     RUN_TEST(tool_get_architecture_empty);
     RUN_TEST(tool_get_architecture_emits_populated_sections);
     RUN_TEST(tool_get_architecture_overview_compact_subset_pr560);

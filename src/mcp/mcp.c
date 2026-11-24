@@ -4017,6 +4017,7 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     const char *status = "not_found";
     const char *error_detail = NULL;
     bool is_error = false;
+    bool delete_failed = false;
     char reviews[CBM_SZ_1K + 32];
     snprintf(reviews, sizeof(reviews), "%s.reviews.sqlite", path);
     bool reviews_exist = cbm_file_exists(reviews);
@@ -4031,6 +4032,7 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
             status = "delete_failed";
             error_detail = strerror(errno);
             is_error = true;
+            delete_failed = true;
         }
     } else {
         is_error = true;
@@ -4042,6 +4044,7 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
             status = "delete_failed";
             error_detail = "could not remove project document review state";
             is_error = true;
+            delete_failed = true;
         } else {
             status = "deleted";
             is_error = false;
@@ -4053,7 +4056,7 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     /* Keep watching when Windows rejects deletion because another process still
      * has the SQLite file open. A failed delete must not silently disable future
      * change detection for a project that still exists. */
-    if (srv->watcher && strcmp(status, "delete_failed") != 0) {
+    if (srv->watcher && !delete_failed) {
         cbm_watcher_unwatch(srv->watcher, name);
     }
 
